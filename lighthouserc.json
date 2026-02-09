@@ -1,0 +1,40 @@
+{
+  "ci": {
+    "collect": {
+      "startServerCommand": "npm run build && npm run start -- --port 4175",
+      "startServerReadyPattern": "ready",
+      "startServerReadyTimeout": 240000,
+      "url": [
+        "http://localhost:4175/",
+        "http://localhost:4175/editor",
+        "http://localhost:4175/profile/recharge",
+        "http://localhost:4175/profile/billing",
+        "http://localhost:4175/admin"
+      ],
+      "numberOfRuns": 1,
+      "settings": {
+        "chromeFlags": "--no-sandbox --headless=new"
+      }
+    },
+    "assert": {
+      "assertions": {
+        "categories:accessibility": [
+          "warn",
+          {
+            "minScore": 0.9
+          }
+        ],
+        "categories:best-practices": [
+          "warn",
+          {
+            "minScore": 0.9
+          }
+        ],
+        "categories:performance": "off"
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}
