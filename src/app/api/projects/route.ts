@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js"
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -16,6 +17,7 @@ export async function GET(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const { searchParams } = new URL(request.url)
         const page = parseInt(searchParams.get("page") || "1")
@@ -71,6 +73,7 @@ export async function POST(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const body = await request.json()
         const { name, description } = body

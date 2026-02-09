@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
-import { createServerClient } from "@/lib/supabase/client"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 export async function GET() {
     try {
@@ -9,21 +9,12 @@ export async function GET() {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
 
-        const supabaseAdmin = createServerClient()
-        const { data: user, error } = await supabaseAdmin
-            .from("users")
-            .select("role")
-            .eq("id", userId)
-            .single()
-
-        if (error || !user) {
-            // 用户不存在时，默认按普通用户处理
-            return NextResponse.json({ role: "user", isAdmin: false })
-        }
+        const { user } = await ensureUserRecord(userId)
+        const role = user.role ?? "user"
 
         return NextResponse.json({
-            role: user.role,
-            isAdmin: user.role === "admin",
+            role,
+            isAdmin: role === "admin",
         })
     } catch (error) {
         console.error("Get user role error:", error)

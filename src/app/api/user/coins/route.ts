@@ -1,12 +1,10 @@
-import { createClient } from "@supabase/supabase-js"
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
+import { createServerClient } from "@/lib/supabase/client"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 // 使用 Service Role Key 绕过 RLS
-const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+const supabaseAdmin = createServerClient()
 
 // 每次 AI 生成消耗的 Coin 数量
 const COIN_COST_PER_GENERATION = 10
@@ -21,25 +19,12 @@ export async function GET() {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
 
-        // 获取用户余额
-        const { data, error } = await supabaseAdmin
-            .from("users")
-            .select("credits")
-            .eq("id", userId)
-            .single()
-
-        if (error) {
-            // 用户不存在时返回默认余额
-            if (error.code === "PGRST116") {
-                return NextResponse.json({ coins: 100, isNew: true })
-            }
-            console.error("Error fetching coins:", error)
-            return NextResponse.json({ error: error.message }, { status: 500 })
-        }
+        const { user, created } = await ensureUserRecord(userId)
 
         return NextResponse.json({
-            coins: data?.credits || 0,
+            coins: user.credits ?? 0,
             costPerGeneration: COIN_COST_PER_GENERATION,
+            isNew: created,
         })
     } catch (error) {
         console.error("Coins GET error:", error)
@@ -79,34 +64,8 @@ export async function POST(request: Request) {
             )
         }
 
-        // 获取当前余额
-        const { data: fetchedUser, error: fetchUserError } = await supabaseAdmin
-            .from("users")
-            .select("credits")
-            .eq("id", userId)
-            .single()
-
-        let userData = fetchedUser
-
-        // 如果用户不存在，创建用户记录
-        if (fetchUserError?.code === "PGRST116") {
-            const { data: newUser, error: createError } = await supabaseAdmin
-                .from("users")
-                .insert({ id: userId, credits: 100 })
-                .select("credits")
-                .single()
-
-            if (createError) {
-                console.error("Error creating user:", createError)
-                return NextResponse.json({ error: createError.message }, { status: 500 })
-            }
-            userData = newUser
-        } else if (fetchUserError) {
-            console.error("Error fetching user:", fetchUserError)
-            return NextResponse.json({ error: fetchUserError.message }, { status: 500 })
-        }
-
-        const currentCredits = userData?.credits || 0
+        const { user } = await ensureUserRecord(userId)
+        const currentCredits = user.credits ?? 0
 
         // 检查余额是否足够
         if (currentCredits < consumeAmount) {

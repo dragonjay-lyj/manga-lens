@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js"
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import * as crypto from "crypto"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 // 使用 Service Role Key 绕过 RLS
 const supabaseAdmin = createClient(
@@ -72,6 +73,7 @@ export async function GET() {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const { data, error } = await supabaseAdmin
             .from("user_api_keys")
@@ -109,6 +111,7 @@ export async function POST(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const body = await request.json()
         const { provider, apiKey } = body
@@ -169,6 +172,7 @@ export async function DELETE(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const { searchParams } = new URL(request.url)
         const provider = searchParams.get("provider")
