@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { createServerClient } from "@/lib/supabase/client"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 const supabaseAdmin = createServerClient()
 
@@ -10,6 +11,7 @@ export async function GET(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        const { user } = await ensureUserRecord(userId)
 
         const { searchParams } = new URL(request.url)
         const page = Math.max(1, Number(searchParams.get("page") || 1))
@@ -33,12 +35,6 @@ export async function GET(request: Request) {
             console.error("Get billing transactions error:", error)
             return NextResponse.json({ error: "获取账单失败" }, { status: 500 })
         }
-
-        const { data: userData } = await supabaseAdmin
-            .from("users")
-            .select("credits")
-            .eq("id", userId)
-            .single()
 
         const [{ count: pendingCount }, { count: completedCount }, { count: failedCount }] = await Promise.all([
             supabaseAdmin
@@ -69,7 +65,7 @@ export async function GET(request: Request) {
                 total: count || 0,
                 totalPages: Math.ceil((count || 0) / limit),
             },
-            balance: userData?.credits || 0,
+            balance: user.credits || 0,
             stats: {
                 pending: pendingCount || 0,
                 completed: completedCount || 0,

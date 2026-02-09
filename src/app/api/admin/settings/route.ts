@@ -4,6 +4,7 @@
 import { NextResponse } from "next/server"
 import { createServerClient } from "@/lib/supabase/client"
 import { requireAdmin } from "@/lib/auth/require-admin"
+import { ensureSystemSettingsDefaults } from "@/lib/settings"
 
 const supabaseAdmin = createServerClient()
 
@@ -14,6 +15,7 @@ export async function GET() {
     try {
         const admin = await requireAdmin()
         if (!admin.ok) return admin.response
+        await ensureSystemSettingsDefaults()
 
         const { data, error } = await supabaseAdmin
             .from("system_settings")
@@ -26,7 +28,7 @@ export async function GET() {
         }
 
         // 隐藏加密字段的值（只返回是否已设置）
-        const safeData = data.map(item => ({
+        const safeData = (data ?? []).map(item => ({
             ...item,
             value: item.is_encrypted ? (item.value ? "******" : "") : item.value,
             hasValue: !!item.value,
@@ -46,6 +48,7 @@ export async function POST(request: Request) {
     try {
         const admin = await requireAdmin()
         if (!admin.ok) return admin.response
+        await ensureSystemSettingsDefaults()
 
         const body = await request.json()
         const { key, value } = body
@@ -57,8 +60,14 @@ export async function POST(request: Request) {
         // 更新设置
         const { error } = await supabaseAdmin
             .from("system_settings")
-            .update({ value, updated_at: new Date().toISOString() })
-            .eq("key", key)
+            .upsert(
+                {
+                    key,
+                    value,
+                    updated_at: new Date().toISOString(),
+                },
+                { onConflict: "key" }
+            )
 
         if (error) {
             console.error("Update setting error:", error)
@@ -79,6 +88,7 @@ export async function PUT(request: Request) {
     try {
         const admin = await requireAdmin()
         if (!admin.ok) return admin.response
+        await ensureSystemSettingsDefaults()
 
         const body = await request.json()
         const { settings } = body as { settings: Array<{ key: string; value: string }> }
@@ -94,8 +104,14 @@ export async function PUT(request: Request) {
 
             const { error } = await supabaseAdmin
                 .from("system_settings")
-                .update({ value: item.value, updated_at: new Date().toISOString() })
-                .eq("key", item.key)
+                .upsert(
+                    {
+                        key: item.key,
+                        value: item.value,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: "key" }
+                )
 
             if (error) {
                 console.error("Batch update setting error:", item.key, error)

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { createServerClient } from "@/lib/supabase/client"
 import { requireAdmin } from "@/lib/auth/require-admin"
+import { getLinuxdoPaymentConfigStatus } from "@/lib/settings"
 
 const supabaseAdmin = createServerClient()
 
@@ -8,6 +9,7 @@ export async function GET(request: Request) {
     try {
         const admin = await requireAdmin()
         if (!admin.ok) return admin.response
+        const configStatus = await getLinuxdoPaymentConfigStatus()
 
         const { searchParams } = new URL(request.url)
         const page = Math.max(1, Number(searchParams.get("page") || 1))
@@ -62,6 +64,7 @@ export async function GET(request: Request) {
         return NextResponse.json({
             transactions: transactions || [],
             users: usersMap,
+            configStatus,
             timeoutMinutes,
             pagination: {
                 page,

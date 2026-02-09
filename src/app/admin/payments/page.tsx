@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
     Table,
@@ -30,6 +31,8 @@ import {
     ChevronLeft,
     ChevronRight,
     Clock,
+    ShieldAlert,
+    Settings2,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -61,6 +64,14 @@ interface UserProfile {
 interface PaymentsResponse {
     transactions: PaymentTransaction[]
     users: Record<string, UserProfile>
+    configStatus: {
+        enabled: boolean
+        pidConfigured: boolean
+        keyConfigured: boolean
+        notifyUrlConfigured: boolean
+        returnUrlConfigured: boolean
+        isReady: boolean
+    }
     timeoutMinutes: number
     pagination: Pagination
 }
@@ -87,6 +98,14 @@ export default function AdminPaymentsPage() {
     const [onlyTimeout, setOnlyTimeout] = useState(false)
     const [timeoutMinutes, setTimeoutMinutes] = useState(30)
     const [reconcilingMap, setReconcilingMap] = useState<Record<string, boolean>>({})
+    const [configStatus, setConfigStatus] = useState<PaymentsResponse["configStatus"]>({
+        enabled: false,
+        pidConfigured: false,
+        keyConfigured: false,
+        notifyUrlConfigured: false,
+        returnUrlConfigured: false,
+        isReady: false,
+    })
 
     const fetchPayments = useCallback(async (page = 1) => {
         setLoading(true)
@@ -109,6 +128,14 @@ export default function AdminPaymentsPage() {
             const data = (await response.json()) as PaymentsResponse
             setTransactions(data.transactions || [])
             setUsers(data.users || {})
+            setConfigStatus(data.configStatus || {
+                enabled: false,
+                pidConfigured: false,
+                keyConfigured: false,
+                notifyUrlConfigured: false,
+                returnUrlConfigured: false,
+                isReady: false,
+            })
             setTimeoutMinutes(data.timeoutMinutes || 30)
             setPagination(data.pagination || {
                 page: 1,
@@ -234,6 +261,26 @@ export default function AdminPaymentsPage() {
                     <CardDescription>共 {pagination.total} 条</CardDescription>
                 </CardHeader>
                 <CardContent>
+                    {!loading && transactions.length === 0 && !configStatus.isReady && (
+                        <div className="mb-4 rounded-lg border border-amber-500/50 bg-amber-500/10 p-4">
+                            <div className="flex items-center gap-2 text-sm font-medium text-amber-700 dark:text-amber-300">
+                                <ShieldAlert className="h-4 w-4" />
+                                当前支付配置未就绪，充值订单不会创建
+                            </div>
+                            <div className="mt-2 text-xs text-muted-foreground space-y-1">
+                                {!configStatus.enabled ? <p>• 支付开关未启用</p> : null}
+                                {!configStatus.pidConfigured ? <p>• Client ID (PID) 未配置</p> : null}
+                                {!configStatus.keyConfigured ? <p>• Client Secret (KEY) 未配置</p> : null}
+                            </div>
+                            <Button variant="outline" size="sm" className="h-9 mt-3" asChild>
+                                <Link href="/admin/settings/payment">
+                                    <Settings2 className="h-4 w-4 mr-2" />
+                                    前往支付设置
+                                </Link>
+                            </Button>
+                        </div>
+                    )}
+
                     {loading ? (
                         <div className="h-40 flex items-center justify-center text-muted-foreground">
                             <Loader2 className="h-5 w-5 animate-spin mr-2" />

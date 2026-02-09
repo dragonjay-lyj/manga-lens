@@ -1,17 +1,36 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { IconButton } from "@/components/ui/icon-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Coins, ArrowLeft, ExternalLink, Loader2, CheckCircle } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Coins, ArrowLeft, ExternalLink, Loader2, CheckCircle, ShieldAlert, Settings2 } from "lucide-react"
 import { toast } from "sonner"
 import Link from "next/link"
 
 const PRESET_AMOUNTS = [10, 50, 100, 500, 1000]
+
+interface PaymentConfigStatus {
+    enabled: boolean
+    pidConfigured: boolean
+    keyConfigured: boolean
+    notifyUrlConfigured: boolean
+    returnUrlConfigured: boolean
+    isReady: boolean
+}
+
+const DEFAULT_PAYMENT_CONFIG_STATUS: PaymentConfigStatus = {
+    enabled: false,
+    pidConfigured: false,
+    keyConfigured: false,
+    notifyUrlConfigured: false,
+    returnUrlConfigured: false,
+    isReady: false,
+}
 
 export default function RechargePage() {
     const router = useRouter()
@@ -19,6 +38,45 @@ export default function RechargePage() {
     const [customAmount, setCustomAmount] = useState<string>("")
     const [loading, setLoading] = useState(false)
     const [orderId, setOrderId] = useState<string>("")
+    const [paymentConfigLoading, setPaymentConfigLoading] = useState(true)
+    const [paymentConfigStatus, setPaymentConfigStatus] = useState<PaymentConfigStatus>(DEFAULT_PAYMENT_CONFIG_STATUS)
+
+    const loadPaymentConfigStatus = useCallback(async () => {
+        try {
+            setPaymentConfigLoading(true)
+            const response = await fetch("/api/payment/linuxdo/config", { cache: "no-store" })
+            const data = await response.json().catch(() => ({}))
+
+            if (!response.ok) {
+                throw new Error(data.error || "获取支付配置失败")
+            }
+
+            setPaymentConfigStatus(data.configStatus || DEFAULT_PAYMENT_CONFIG_STATUS)
+        } catch (error) {
+            console.error("Load payment config status error:", error)
+            setPaymentConfigStatus(DEFAULT_PAYMENT_CONFIG_STATUS)
+        } finally {
+            setPaymentConfigLoading(false)
+        }
+    }, [])
+
+    useEffect(() => {
+        loadPaymentConfigStatus()
+    }, [loadPaymentConfigStatus])
+
+    const paymentConfigIssues = useMemo(() => {
+        const issues: string[] = []
+        if (!paymentConfigStatus.enabled) {
+            issues.push("支付开关未启用")
+        }
+        if (!paymentConfigStatus.pidConfigured) {
+            issues.push("Client ID (PID) 未配置")
+        }
+        if (!paymentConfigStatus.keyConfigured) {
+            issues.push("Client Secret (KEY) 未配置")
+        }
+        return issues
+    }, [paymentConfigStatus.enabled, paymentConfigStatus.keyConfigured, paymentConfigStatus.pidConfigured])
 
     // 选择预设金额
     const handleSelectAmount = (value: number) => {
@@ -41,6 +99,10 @@ export default function RechargePage() {
             toast.error("请输入有效金额")
             return
         }
+        if (!paymentConfigStatus.isReady) {
+            toast.error("支付暂不可用，请联系管理员完成支付配置")
+            return
+        }
 
         setLoading(true)
 
@@ -57,6 +119,9 @@ export default function RechargePage() {
             const data = await res.json()
 
             if (!res.ok) {
+                if (data.code === "PAYMENT_DISABLED" || data.code === "PAYMENT_CONFIG_INCOMPLETE") {
+                    await loadPaymentConfigStatus()
+                }
                 throw new Error(data.error || "创建订单失败")
             }
 
@@ -139,6 +204,30 @@ export default function RechargePage() {
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-6">
+                        {!paymentConfigLoading && !paymentConfigStatus.isReady && (
+                            <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 p-4 space-y-3">
+                                <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+                                    <ShieldAlert className="h-4 w-4" />
+                                    <span className="text-sm font-medium">支付当前不可用</span>
+                                    <Badge variant="outline">待配置</Badge>
+                                </div>
+                                <div className="text-xs text-muted-foreground space-y-1">
+                                    {paymentConfigIssues.map((issue) => (
+                                        <p key={issue}>• {issue}</p>
+                                    ))}
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    管理员请前往 <span className="font-medium">/admin/settings/payment</span> 完成配置。
+                                </p>
+                            </div>
+                        )}
+
+                        {!paymentConfigLoading && paymentConfigStatus.isReady && (
+                            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">
+                                支付配置已就绪，可以正常创建充值订单。
+                            </div>
+                        )}
+
                         {/* 预设金额 */}
                         <div className="space-y-3">
                             <p className="text-sm font-medium">选择金额</p>
@@ -183,12 +272,22 @@ export default function RechargePage() {
                         <Button
                             className="w-full h-12"
                             onClick={handleRecharge}
-                            disabled={loading || amount <= 0}
+                            disabled={loading || amount <= 0 || paymentConfigLoading || !paymentConfigStatus.isReady}
                         >
                             {loading ? (
                                 <>
                                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                                     创建订单中...
+                                </>
+                            ) : paymentConfigLoading ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    检查支付配置中...
+                                </>
+                            ) : !paymentConfigStatus.isReady ? (
+                                <>
+                                    <Settings2 className="h-4 w-4 mr-2" />
+                                    支付配置未就绪
                                 </>
                             ) : (
                                 <>

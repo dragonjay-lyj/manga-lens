@@ -5,7 +5,8 @@ import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { createClient } from "@supabase/supabase-js"
 import * as crypto from "crypto"
-import { getSystemSettings } from "@/lib/settings"
+import { getLinuxdoPaymentConfigStatus, getSystemSettings } from "@/lib/settings"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -41,6 +42,7 @@ export async function POST(request: Request) {
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
         }
+        await ensureUserRecord(userId)
 
         const body = await request.json()
         const { amount, name = "MangaLens 积分充值" } = body
@@ -54,22 +56,36 @@ export async function POST(request: Request) {
         // 生成订单号
         const outTradeNo = `ML${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 
+        const configStatus = await getLinuxdoPaymentConfigStatus()
+        if (!configStatus.enabled) {
+            return NextResponse.json(
+                {
+                    error: "支付功能未启用，请联系管理员在 /admin/settings/payment 开启",
+                    code: "PAYMENT_DISABLED",
+                    configStatus,
+                },
+                { status: 400 }
+            )
+        }
+
+        if (!configStatus.pidConfigured || !configStatus.keyConfigured) {
+            return NextResponse.json(
+                {
+                    error: "支付配置不完整，请联系管理员在 /admin/settings/payment 填写 PID/KEY",
+                    code: "PAYMENT_CONFIG_INCOMPLETE",
+                    configStatus,
+                },
+                { status: 400 }
+            )
+        }
+
         // 从数据库获取 LINUX DO Credit 配置
         const settings = await getSystemSettings([
             "linuxdo_credit_pid",
             "linuxdo_credit_key",
             "linuxdo_credit_notify_url",
             "linuxdo_credit_return_url",
-            "linuxdo_credit_enabled"
         ])
-
-        if (settings.linuxdo_credit_enabled !== "true") {
-            return NextResponse.json({ error: "支付功能未启用" }, { status: 400 })
-        }
-
-        if (!settings.linuxdo_credit_pid || !settings.linuxdo_credit_key) {
-            return NextResponse.json({ error: "支付配置不完整" }, { status: 400 })
-        }
 
         // 构建请求参数
         const params: Record<string, string> = {

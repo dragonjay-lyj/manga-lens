@@ -404,6 +404,24 @@ export function EditorToolbar() {
         }
     }
 
+    const logUsage = async (
+        action: "generate" | "batch_generate" | "export",
+        metadata: Record<string, unknown> = {}
+    ) => {
+        try {
+            await fetch("/api/user/usage/log", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    action,
+                    metadata,
+                }),
+            })
+        } catch (error) {
+            console.warn("Log usage failed:", error)
+        }
+    }
+
     // 处理单张图片
     const handleGenerate = async () => {
         if (!currentImage) {
@@ -448,6 +466,11 @@ export function EditorToolbar() {
 
             setImageStatus(currentImage.id, "completed", resultUrl)
             setShowResult(true)
+            void logUsage("generate", {
+                source: settings.useServerApi ? "server_api" : "custom_key",
+                mode: useMaskMode ? "mask" : "patch",
+                selectionCount: currentImage.selections?.length || 0,
+            })
             toast.success(t.common.success)
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "未知错误"
@@ -513,6 +536,11 @@ export function EditorToolbar() {
                         false
                     )
                     setImageStatus(img.id, "completed", resultUrl)
+                    void logUsage("batch_generate", {
+                        source: settings.useServerApi ? "server_api" : "custom_key",
+                        mode: useMaskMode ? "mask" : "patch",
+                        selectionCount: selections.length,
+                    })
                 } catch (error) {
                     const errorMessage = error instanceof Error ? error.message : "未知错误"
                     failedCount++
@@ -555,6 +583,7 @@ export function EditorToolbar() {
     const handleDownloadResult = () => {
         if (!currentImage?.resultUrl) return
         downloadImage(currentImage.resultUrl, `result-${Date.now()}.png`)
+        void logUsage("export", { type: "single" })
     }
 
     // 打包下载所有结果
@@ -571,6 +600,7 @@ export function EditorToolbar() {
         }))
 
         await downloadImagesAsZip(filesToDownload)
+        void logUsage("export", { type: "batch", count: completedImages.length })
         toast.success(
             locale === "zh"
                 ? `已下载 ${completedImages.length} 张图片`

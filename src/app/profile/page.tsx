@@ -1,5 +1,6 @@
 "use client"
 
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useUser } from "@clerk/nextjs"
 import Image from "next/image"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,12 +10,92 @@ import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { User, Key, BarChart3, Shield, CreditCard } from "lucide-react"
+import { User, Key, BarChart3, Shield, CreditCard, Loader2, RefreshCw } from "lucide-react"
 import { AdminSkeleton } from "@/components/shared/skeleton-loaders"
 import Link from "next/link"
 
+interface UsageSummary {
+    credits: number
+    projectCount: number
+    processedThisMonth: number
+    processedLastMonth: number
+    monthChangePercent: number
+    apiCallsThisMonth: number
+    creditsUsedThisMonth: number
+}
+
+interface UsageStatsResponse {
+    summary: UsageSummary
+    weeklyTrend: Array<{
+        label: string
+        count: number
+    }>
+}
+
+const EMPTY_SUMMARY: UsageSummary = {
+    credits: 0,
+    projectCount: 0,
+    processedThisMonth: 0,
+    processedLastMonth: 0,
+    monthChangePercent: 0,
+    apiCallsThisMonth: 0,
+    creditsUsedThisMonth: 0,
+}
+
+const EMPTY_TREND = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((label) => ({
+    label,
+    count: 0,
+}))
+
 export default function ProfilePage() {
     const { user, isLoaded } = useUser()
+    const [usageLoading, setUsageLoading] = useState(true)
+    const [usageSummary, setUsageSummary] = useState<UsageSummary>(EMPTY_SUMMARY)
+    const [weeklyTrend, setWeeklyTrend] = useState(EMPTY_TREND)
+
+    const fetchUsageStats = useCallback(async () => {
+        try {
+            setUsageLoading(true)
+            const response = await fetch("/api/user/usage/stats", { cache: "no-store" })
+            const data = await response.json().catch(() => ({}))
+
+            if (!response.ok) {
+                throw new Error(data.error || "获取统计失败")
+            }
+
+            const payload = data as UsageStatsResponse
+            setUsageSummary(payload.summary ?? EMPTY_SUMMARY)
+            setWeeklyTrend(payload.weeklyTrend?.length ? payload.weeklyTrend : EMPTY_TREND)
+        } catch (error) {
+            console.error("Fetch usage stats error:", error)
+            setUsageSummary(EMPTY_SUMMARY)
+            setWeeklyTrend(EMPTY_TREND)
+        } finally {
+            setUsageLoading(false)
+        }
+    }, [])
+
+    useEffect(() => {
+        if (!isLoaded || !user?.id) {
+            return
+        }
+        fetchUsageStats()
+    }, [fetchUsageStats, isLoaded, user?.id])
+
+    const trendMaxCount = useMemo(
+        () => Math.max(1, ...weeklyTrend.map((item) => item.count)),
+        [weeklyTrend]
+    )
+
+    const monthTrendText = useMemo(() => {
+        if (usageSummary.monthChangePercent > 0) {
+            return `+${usageSummary.monthChangePercent}% 较上月`
+        }
+        if (usageSummary.monthChangePercent < 0) {
+            return `${usageSummary.monthChangePercent}% 较上月`
+        }
+        return "与上月持平"
+    }, [usageSummary.monthChangePercent])
 
     if (!isLoaded) {
         return (
@@ -150,6 +231,17 @@ export default function ProfilePage() {
 
                 {/* 使用统计 */}
                 <TabsContent value="usage">
+                    <div className="flex justify-end">
+                        <Button variant="outline" className="h-10 px-4" onClick={fetchUsageStats} disabled={usageLoading}>
+                            {usageLoading ? (
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            ) : (
+                                <RefreshCw className="h-4 w-4 mr-2" />
+                            )}
+                            刷新统计
+                        </Button>
+                    </div>
+
                     <div className="grid gap-4 md:grid-cols-3">
                         <Card>
                             <CardHeader className="pb-2">
@@ -158,9 +250,9 @@ export default function ProfilePage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <div className="text-2xl font-bold">128 张</div>
+                                <div className="text-2xl font-bold">{usageSummary.processedThisMonth} 张</div>
                                 <p className="text-xs text-muted-foreground">
-                                    +12% 较上月
+                                    {monthTrendText}
                                 </p>
                             </CardContent>
                         </Card>
@@ -171,9 +263,9 @@ export default function ProfilePage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <div className="text-2xl font-bold">256 次</div>
+                                <div className="text-2xl font-bold">{usageSummary.apiCallsThisMonth} 次</div>
                                 <p className="text-xs text-muted-foreground">
-                                    平均每张 2 次
+                                    本月累计调用
                                 </p>
                             </CardContent>
                         </Card>
@@ -184,9 +276,9 @@ export default function ProfilePage() {
                                 </CardTitle>
                             </CardHeader>
                             <CardContent>
-                                <div className="text-2xl font-bold">5 个</div>
+                                <div className="text-2xl font-bold">{usageSummary.projectCount} 个</div>
                                 <p className="text-xs text-muted-foreground">
-                                    活跃项目
+                                    当前余额 {usageSummary.credits} Coins
                                 </p>
                             </CardContent>
                         </Card>
@@ -198,24 +290,32 @@ export default function ProfilePage() {
                             <CardDescription>最近 7 天的处理记录</CardDescription>
                         </CardHeader>
                         <CardContent>
-                            <div className="h-32 flex items-end justify-between gap-2">
-                                {[12, 24, 8, 32, 18, 28, 16].map((value, i) => (
-                                    <div
-                                        key={i}
-                                        className="flex-1 bg-primary/20 rounded-t"
-                                        style={{ height: `${value * 3}px` }}
-                                    />
-                                ))}
-                            </div>
-                            <div className="flex justify-between text-xs text-muted-foreground mt-2">
-                                <span>周一</span>
-                                <span>周二</span>
-                                <span>周三</span>
-                                <span>周四</span>
-                                <span>周五</span>
-                                <span>周六</span>
-                                <span>周日</span>
-                            </div>
+                            {usageLoading ? (
+                                <div className="h-32 flex items-center justify-center text-muted-foreground">
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    统计加载中
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="h-32 flex items-end justify-between gap-2">
+                                        {weeklyTrend.map((item) => (
+                                            <div
+                                                key={item.label}
+                                                className="flex-1 bg-primary/20 rounded-t transition-all"
+                                                style={{
+                                                    height: `${Math.max(8, Math.round((item.count / trendMaxCount) * 96))}px`,
+                                                }}
+                                                title={`${item.label}: ${item.count}`}
+                                            />
+                                        ))}
+                                    </div>
+                                    <div className="flex justify-between text-xs text-muted-foreground mt-2">
+                                        {weeklyTrend.map((item) => (
+                                            <span key={`label-${item.label}`}>{item.label}</span>
+                                        ))}
+                                    </div>
+                                </>
+                            )}
                         </CardContent>
                     </Card>
                 </TabsContent>
