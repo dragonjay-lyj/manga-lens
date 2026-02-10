@@ -24,6 +24,7 @@ import {
 } from "@/lib/ai/ai-service"
 import {
     loadImage,
+    cropSelection,
     cropSelectionWithClearedArea,
     compositeMultiplePatches,
     downloadImage,
@@ -263,6 +264,11 @@ export function EditorToolbar() {
         height: Math.max(0, Math.min(1, selection.height / imageHeight)),
     })
 
+    type PretranslatePromptResult = {
+        prompt: string
+        hasContextBlocks: boolean
+    }
+
     const buildPretranslateContextPrompt = async (
         imageId: string,
         originalImg: HTMLImageElement,
@@ -271,7 +277,7 @@ export function EditorToolbar() {
         updateToolbarProgress: boolean,
         showFailureToast: boolean,
         existingDetectedBlocks: DetectedTextBlock[] = []
-    ) => {
+    ): Promise<PretranslatePromptResult> => {
         const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
         let allBlocks: DetectedTextBlock[] = existingDetectedBlocks
 
@@ -304,7 +310,10 @@ export function EditorToolbar() {
             if (enablePretranslate) {
                 clearDetectedTextBlocks(imageId)
             }
-            return basePrompt
+            return {
+                prompt: basePrompt,
+                hasContextBlocks: false,
+            }
         }
 
         const scopedBlocks = selections.length
@@ -323,7 +332,10 @@ export function EditorToolbar() {
             if (enablePretranslate) {
                 clearDetectedTextBlocks(imageId)
             }
-            return basePrompt
+            return {
+                prompt: basePrompt,
+                hasContextBlocks: false,
+            }
         }
 
         if (enablePretranslate) {
@@ -344,13 +356,16 @@ export function EditorToolbar() {
             + `w=${block.bbox.width.toFixed(3)}, h=${block.bbox.height.toFixed(3)}`
         ))
 
-        return [
+        return {
+            prompt: [
             basePrompt,
             "",
             "以下是视觉模型预翻译结果（可用于保持台词内容与位置）：",
             ...lines,
             "请优先遵循以上翻译与布局信息。",
-        ].join("\n")
+            ].join("\n"),
+            hasContextBlocks: true,
+        }
     }
 
     const processSelectionsPatchMode = async (
@@ -358,6 +373,7 @@ export function EditorToolbar() {
         originalImg: HTMLImageElement,
         selections: Selection[],
         effectivePrompt: string,
+        clearInputText: boolean,
         updateToolbarProgress: boolean,
         trackSelectionProgress: boolean
     ) => {
@@ -372,16 +388,25 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
-        const inputPatchBySelection = new Map(
-            indexedSelections.map(({ selection }) => [
-                selection.id,
-                cropSelectionWithClearedArea(
+        const buildPatchInput = (selection: Selection) => (
+            clearInputText
+                ? cropSelectionWithClearedArea(
                     originalImg,
                     selection,
                     PATCH_CONTEXT_PADDING,
                     "#ffffff",
                     PATCH_CLEAR_PADDING
-                ),
+                )
+                : cropSelection(
+                    originalImg,
+                    selection,
+                    PATCH_CONTEXT_PADDING
+                )
+        )
+        const inputPatchBySelection = new Map(
+            indexedSelections.map(({ selection }) => [
+                selection.id,
+                buildPatchInput(selection),
             ])
         )
 
@@ -411,13 +436,7 @@ export function EditorToolbar() {
                 }
 
                 const result = await runGenerateRequest(
-                    inputPatchBySelection.get(selection.id) || cropSelectionWithClearedArea(
-                        originalImg,
-                        selection,
-                        PATCH_CONTEXT_PADDING,
-                        "#ffffff",
-                        PATCH_CLEAR_PADDING
-                    ),
+                    inputPatchBySelection.get(selection.id) || buildPatchInput(selection),
                     effectivePrompt
                 )
                 results.set(selection.id, result)
@@ -446,13 +465,7 @@ export function EditorToolbar() {
                 const requests = indexedSelections.map(({ selection }) => ({
                 imageId: selection.id,
                 request: {
-                    imageData: inputPatchBySelection.get(selection.id) || cropSelectionWithClearedArea(
-                        originalImg,
-                        selection,
-                        PATCH_CONTEXT_PADDING,
-                        "#ffffff",
-                        PATCH_CLEAR_PADDING
-                    ),
+                    imageData: inputPatchBySelection.get(selection.id) || buildPatchInput(selection),
                     prompt: effectivePrompt,
                     config: settings,
                 },
@@ -681,7 +694,7 @@ export function EditorToolbar() {
         const hasUserSelections = sourceSelections.length > 0
         const effectiveSelections = hasUserSelections ? sourceSelections : [fullSelection]
 
-        const promptWithContext = await buildPretranslateContextPrompt(
+        const pretranslateContext = await buildPretranslateContextPrompt(
             imageId,
             originalImg,
             hasUserSelections ? sourceSelections : [],
@@ -696,7 +709,7 @@ export function EditorToolbar() {
                 imageId,
                 originalImg,
                 hasUserSelections ? sourceSelections : [],
-                promptWithContext,
+                pretranslateContext.prompt,
                 updateToolbarProgress,
                 hasUserSelections
             )
@@ -706,7 +719,8 @@ export function EditorToolbar() {
             imageId,
             originalImg,
             effectiveSelections,
-            promptWithContext,
+            pretranslateContext.prompt,
+            pretranslateContext.hasContextBlocks,
             updateToolbarProgress,
             hasUserSelections
         )

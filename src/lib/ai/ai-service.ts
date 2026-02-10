@@ -69,6 +69,7 @@ const TRANSLATION_KEYWORDS =
     /(翻译|日文|日语|日语|日本語|中文|简体|繁体|英译|中译|对话|台词|气泡|字幕|translate|translation|japanese|chinese|subtitle|dialogue|speech)/i
 
 const VERTICAL_LAYOUT_KEYWORDS = /(竖排|縦書き|vertical)/i
+const HORIZONTAL_LAYOUT_KEYWORDS = /(横排|horizontal)/i
 
 /**
  * 对漫画局部重绘请求追加稳定约束，降低“竖排错乱/覆盖周边”概率。
@@ -91,7 +92,9 @@ export function buildMangaEditPrompt(userPrompt: string): string {
     const task = rawPrompt || '请将图片中的日文对话翻译替换为自然、通顺的简体中文。'
     const layoutRule = VERTICAL_LAYOUT_KEYWORDS.test(rawPrompt)
         ? '文字排版要求：使用竖排（从上到下，从右到左列），并保持标点位置自然。'
-        : '文字排版要求：默认使用横排中文（从左到右、从上到下），不要竖排。'
+        : HORIZONTAL_LAYOUT_KEYWORDS.test(rawPrompt)
+            ? '文字排版要求：使用横排中文（从左到右、从上到下）。'
+            : '文字排版要求：优先保持原文排版方向与行列结构（原文竖排就竖排，原文横排就横排）。'
 
     return [
         '你是漫画局部翻译修图引擎，只输出编辑后的图片。',
@@ -104,7 +107,9 @@ export function buildMangaEditPrompt(userPrompt: string): string {
         '6) 字体风格必须贴近原文：保持原有字重、笔画粗细、描边/阴影、间距、大小与排版密度；避免使用通用默认字体感。',
         '7) 文本应继续落在原气泡可读区域内，行数与对齐尽量接近原文，避免明显溢出或留白异常。',
         '8) 翻译要贴合语境、口语自然，可适度意译但不能改变剧情信息。',
-        '9) 仅返回图片，不要返回说明文本。',
+        '9) 严禁只擦除不重绘：最终图片中每个对白区域都必须有清晰可读的目标语言文本，不能留空白块。',
+        '10) 若个别词无法识别，可用最接近语境的保守译法或音译占位，但绝不能留空。',
+        '11) 仅返回图片，不要返回说明文本。',
         `用户要求：${task}`,
     ].join('\n')
 }
