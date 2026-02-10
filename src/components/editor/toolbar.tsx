@@ -25,6 +25,7 @@ import {
 import {
     loadImage,
     cropSelection,
+    cropSelectionWithClearedArea,
     compositeMultiplePatches,
     downloadImage,
     downloadImagesAsZip,
@@ -72,9 +73,10 @@ export function EditorToolbar() {
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
     const PATCH_CONTEXT_PADDING = 24
-    const PATCH_BLEND_PADDING = 4
+    const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
-    const MASK_BLEND_PADDING = 3
+    const MASK_BLEND_PADDING = 2
+    const PATCH_DIFF_RETRY_THRESHOLD = 0.014
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
@@ -264,6 +266,55 @@ export function EditorToolbar() {
 
     type PretranslatePromptResult = {
         prompt: string
+    }
+
+    const buildHardTextFallbackPrompt = (basePrompt: string) => [
+        basePrompt,
+        "",
+        "【复杂背景强化】",
+        "1) 这是一块复杂背景/拟声词区域，请务必替换所有可见日文文本。",
+        "2) 若背景干扰阅读，请先局部重绘背景再放置中文文本。",
+        "3) 禁止保持原文不变，禁止仅擦除不重绘。",
+        "4) 保持原有方向（竖排就竖排）、字重和描边风格。",
+    ].join("\n")
+
+    const computeImageDifferenceRatio = async (beforeDataUrl: string, afterDataUrl: string): Promise<number> => {
+        try {
+            const before = await loadImage(beforeDataUrl)
+            const after = await loadImage(afterDataUrl)
+            const sampleWidth = 256
+            const sampleHeight = 256
+            const beforeCanvas = document.createElement("canvas")
+            const afterCanvas = document.createElement("canvas")
+            const beforeCtx = beforeCanvas.getContext("2d")
+            const afterCtx = afterCanvas.getContext("2d")
+            if (!beforeCtx || !afterCtx) return 1
+
+            beforeCanvas.width = sampleWidth
+            beforeCanvas.height = sampleHeight
+            afterCanvas.width = sampleWidth
+            afterCanvas.height = sampleHeight
+            beforeCtx.drawImage(before, 0, 0, sampleWidth, sampleHeight)
+            afterCtx.drawImage(after, 0, 0, sampleWidth, sampleHeight)
+
+            const beforeData = beforeCtx.getImageData(0, 0, sampleWidth, sampleHeight).data
+            const afterData = afterCtx.getImageData(0, 0, sampleWidth, sampleHeight).data
+
+            let changed = 0
+            const total = sampleWidth * sampleHeight
+            for (let i = 0; i < beforeData.length; i += 4) {
+                const dr = Math.abs(beforeData[i] - afterData[i])
+                const dg = Math.abs(beforeData[i + 1] - afterData[i + 1])
+                const db = Math.abs(beforeData[i + 2] - afterData[i + 2])
+                const da = Math.abs(beforeData[i + 3] - afterData[i + 3])
+                const weightedDiff = dr * 0.299 + dg * 0.587 + db * 0.114 + da * 0.1
+                if (weightedDiff > 14) changed++
+            }
+
+            return changed / total
+        } catch {
+            return 1
+        }
     }
 
     const getSelectionDarkRatio = (image: HTMLImageElement, selections: Selection[]): number => {
@@ -535,13 +586,74 @@ export function EditorToolbar() {
         let lowResolutionWarned = false
 
         for (const { selection, index } of indexedSelections) {
-            const result = results.get(selection.id)
+            let result = results.get(selection.id)
             if (result?.success && result.imageData) {
+                const sourcePatch = inputPatchBySelection.get(selection.id)
+                if (sourcePatch) {
+                    let bestImageData = result.imageData
+                    let bestDiffRatio = await computeImageDifferenceRatio(sourcePatch, bestImageData)
+
+                    if (bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD) {
+                        if (updateToolbarProgress) {
+                            setProgressDetail(
+                                locale === "zh"
+                                    ? `选区 #${index} 文本变化过小，正在强化重试...`
+                                    : `Selection #${index} changed too little, retrying with stronger prompt...`
+                            )
+                        }
+                        const hardPrompt = buildHardTextFallbackPrompt(effectivePrompt)
+
+                        const retryWithPrompt = await runGenerateRequest(sourcePatch, hardPrompt)
+                        if (retryWithPrompt.success && retryWithPrompt.imageData) {
+                            const retryDiff = await computeImageDifferenceRatio(sourcePatch, retryWithPrompt.imageData)
+                            if (retryDiff > bestDiffRatio) {
+                                bestImageData = retryWithPrompt.imageData
+                                bestDiffRatio = retryDiff
+                            }
+                        }
+
+                        if (bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD) {
+                            const clearedPatch = cropSelectionWithClearedArea(
+                                originalImg,
+                                selection,
+                                PATCH_CONTEXT_PADDING,
+                                "#ffffff",
+                                1
+                            )
+                            const retryWithCleared = await runGenerateRequest(clearedPatch, hardPrompt)
+                            if (retryWithCleared.success && retryWithCleared.imageData) {
+                                const retryDiff = await computeImageDifferenceRatio(sourcePatch, retryWithCleared.imageData)
+                                if (retryDiff > bestDiffRatio) {
+                                    bestImageData = retryWithCleared.imageData
+                                    bestDiffRatio = retryDiff
+                                }
+                            }
+                        }
+
+                        result = {
+                            ...result,
+                            imageData: bestImageData,
+                        }
+                    }
+                }
+                const finalImageData = result.imageData
+                if (!finalImageData) {
+                    const errorMessage = locale === "zh" ? "生成结果为空" : "Generated image is empty"
+                    if (trackSelectionProgress) {
+                        setSelectionProgress(imageId, selection.id, "failed", errorMessage)
+                    }
+                    failures.push(
+                        locale === "zh"
+                            ? `选区 #${index}: ${errorMessage}`
+                            : `Selection #${index}: ${errorMessage}`
+                    )
+                    continue
+                }
+
                 try {
-                    const sourcePatch = inputPatchBySelection.get(selection.id)
                     if (sourcePatch) {
                         const sourceImg = await loadImage(sourcePatch)
-                        const generatedImg = await loadImage(result.imageData)
+                        const generatedImg = await loadImage(finalImageData)
                         const srcLongEdge = Math.max(sourceImg.width, sourceImg.height)
                         const genLongEdge = Math.max(generatedImg.width, generatedImg.height)
                         if (!lowResolutionWarned && srcLongEdge >= FOUR_K_LONG_EDGE && genLongEdge < FOUR_K_LONG_EDGE) {
@@ -557,8 +669,7 @@ export function EditorToolbar() {
                     // ignore resolution inspect failures
                 }
 
-                const sourcePatch = inputPatchBySelection.get(selection.id)
-                if (sourcePatch && isExactlySameImageData(sourcePatch, result.imageData)) {
+                if (sourcePatch && isExactlySameImageData(sourcePatch, finalImageData)) {
                     const unchangedError = locale === "zh"
                         ? "模型返回原图（该选区未被修改）"
                         : "Model returned original patch (selection unchanged)"
@@ -575,7 +686,7 @@ export function EditorToolbar() {
                 if (trackSelectionProgress) {
                     setSelectionProgress(imageId, selection.id, "completed")
                 }
-                patches.push({ base64: result.imageData, selection })
+                patches.push({ base64: finalImageData, selection })
                 continue
             }
 
@@ -767,7 +878,7 @@ export function EditorToolbar() {
             imageId,
             originalImg,
             effectiveSelections,
-            pretranslateContext.prompt,
+            basePrompt,
             updateToolbarProgress,
             hasUserSelections
         )
