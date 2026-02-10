@@ -343,14 +343,21 @@ export function compositeSelectionsFromFullImage(
 
         const resultImage = new Image()
         resultImage.onload = () => {
+            const scaleX = resultImage.width / originalImage.width
+            const scaleY = resultImage.height / originalImage.height
+
             for (const selection of selections) {
                 const normalized = normalizeSelection(selection, originalImage.width, originalImage.height)
+                const srcX = normalized.x * scaleX
+                const srcY = normalized.y * scaleY
+                const srcWidth = normalized.width * scaleX
+                const srcHeight = normalized.height * scaleY
                 ctx.drawImage(
                     resultImage,
-                    normalized.x,
-                    normalized.y,
-                    normalized.width,
-                    normalized.height,
+                    srcX,
+                    srcY,
+                    srcWidth,
+                    srcHeight,
                     normalized.x,
                     normalized.y,
                     normalized.width,

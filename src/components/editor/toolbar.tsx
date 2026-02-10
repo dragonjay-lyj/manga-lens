@@ -171,6 +171,10 @@ export function EditorToolbar() {
     const getShortError = (errorText: string) =>
         errorText.length > 240 ? `${errorText.slice(0, 240)}...` : errorText
 
+    const normalizeDataUrl = (value: string) => value.replace(/^data:image\/\w+;base64,/, "")
+    const isExactlySameImageData = (input: string, output: string) =>
+        normalizeDataUrl(input) === normalizeDataUrl(output)
+
     const selectionToNormalizedRect = (
         selection: Selection,
         imageWidth: number,
@@ -188,35 +192,41 @@ export function EditorToolbar() {
         selections: Selection[],
         basePrompt: string,
         updateToolbarProgress: boolean,
-        showFailureToast: boolean
+        showFailureToast: boolean,
+        existingDetectedBlocks: DetectedTextBlock[] = []
     ) => {
-        if (!enablePretranslate || (!settings.useServerApi && !settings.apiKey)) {
-            return basePrompt
-        }
+        const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
+        let allBlocks: DetectedTextBlock[] = existingDetectedBlocks
 
-        if (updateToolbarProgress) {
-            setProgressDetail(locale === "zh" ? "视觉模型预翻译中..." : "Running vision pre-translation...")
-        }
-
-        const detectResult = await runDetectTextRequest(
-            imageToDataUrl(originalImg),
-            "简体中文"
-        )
-
-        if (!detectResult.success) {
-            if (showFailureToast) {
-                toast.warning(
-                    locale === "zh"
-                        ? `预翻译失败，继续原流程: ${detectResult.error || "未知错误"}`
-                        : `Pre-translation failed, continuing: ${detectResult.error || "Unknown error"}`
-                )
+        if (enablePretranslate && canRunPretranslate) {
+            if (updateToolbarProgress) {
+                setProgressDetail(locale === "zh" ? "视觉模型预翻译中..." : "Running vision pre-translation...")
             }
-            return basePrompt
+
+            const detectResult = await runDetectTextRequest(
+                imageToDataUrl(originalImg),
+                "简体中文"
+            )
+
+            if (!detectResult.success) {
+                if (showFailureToast) {
+                    toast.warning(
+                        locale === "zh"
+                            ? `预翻译失败，继续原流程: ${detectResult.error || "未知错误"}`
+                            : `Pre-translation failed, continuing: ${detectResult.error || "Unknown error"}`
+                    )
+                }
+                // 预翻译失败时，若已有自动检测结果，继续使用已有结果增强提示词
+                allBlocks = existingDetectedBlocks
+            } else {
+                allBlocks = detectResult.blocks || []
+            }
         }
 
-        const allBlocks = detectResult.blocks || []
         if (!allBlocks.length) {
-            clearDetectedTextBlocks(imageId)
+            if (enablePretranslate) {
+                clearDetectedTextBlocks(imageId)
+            }
             return basePrompt
         }
 
@@ -233,11 +243,15 @@ export function EditorToolbar() {
             : allBlocks
 
         if (!scopedBlocks.length) {
-            clearDetectedTextBlocks(imageId)
+            if (enablePretranslate) {
+                clearDetectedTextBlocks(imageId)
+            }
             return basePrompt
         }
 
-        setDetectedTextBlocks(imageId, scopedBlocks)
+        if (enablePretranslate) {
+            setDetectedTextBlocks(imageId, scopedBlocks)
+        }
 
         if (updateToolbarProgress) {
             setProgressDetail(
@@ -281,6 +295,12 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
+        const inputPatchBySelection = new Map(
+            indexedSelections.map(({ selection }) => [
+                selection.id,
+                cropSelection(originalImg, selection, PATCH_PADDING),
+            ])
+        )
 
         const total = selections.length
         if (updateToolbarProgress) {
@@ -308,7 +328,7 @@ export function EditorToolbar() {
                 }
 
                 const result = await runGenerateRequest(
-                    cropSelection(originalImg, selection, PATCH_PADDING),
+                    inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_PADDING),
                     effectivePrompt
                 )
                 results.set(selection.id, result)
@@ -334,10 +354,10 @@ export function EditorToolbar() {
                 }
             }
         } else {
-            const requests = indexedSelections.map(({ selection }) => ({
+                const requests = indexedSelections.map(({ selection }) => ({
                 imageId: selection.id,
                 request: {
-                    imageData: cropSelection(originalImg, selection, PATCH_PADDING),
+                    imageData: inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_PADDING),
                     prompt: effectivePrompt,
                     config: settings,
                 },
@@ -391,6 +411,21 @@ export function EditorToolbar() {
         for (const { selection, index } of indexedSelections) {
             const result = results.get(selection.id)
             if (result?.success && result.imageData) {
+                const sourcePatch = inputPatchBySelection.get(selection.id)
+                if (sourcePatch && isExactlySameImageData(sourcePatch, result.imageData)) {
+                    const unchangedError = locale === "zh"
+                        ? "模型返回原图（该选区未被修改）"
+                        : "Model returned original patch (selection unchanged)"
+                    if (trackSelectionProgress) {
+                        setSelectionProgress(imageId, selection.id, "failed", unchangedError)
+                    }
+                    failures.push(
+                        locale === "zh"
+                            ? `选区 #${index}: ${unchangedError}`
+                            : `Selection #${index}: ${unchangedError}`
+                    )
+                    continue
+                }
                 if (trackSelectionProgress) {
                     setSelectionProgress(imageId, selection.id, "completed")
                 }
@@ -452,6 +487,18 @@ export function EditorToolbar() {
             throw new Error(result.error || "生成失败")
         }
 
+        if (isExactlySameImageData(inputImageData, result.imageData)) {
+            const unchangedError = locale === "zh"
+                ? "模型返回原图（未修改选区）"
+                : "Model returned original image (selections unchanged)"
+            if (trackSelectionProgress) {
+                sourceSelections.forEach((selection) =>
+                    setSelectionProgress(imageId, selection.id, "failed", unchangedError)
+                )
+            }
+            throw new Error(unchangedError)
+        }
+
         if (trackSelectionProgress) {
             sourceSelections.forEach((selection) => setSelectionProgress(imageId, selection.id, "completed"))
         }
@@ -473,6 +520,7 @@ export function EditorToolbar() {
         imageId: string,
         imageUrl: string,
         sourceSelections: Selection[],
+        existingDetectedBlocks: DetectedTextBlock[],
         basePrompt: string,
         updateToolbarProgress: boolean,
         showPretranslateFailureToast: boolean
@@ -495,7 +543,8 @@ export function EditorToolbar() {
             hasUserSelections ? sourceSelections : [],
             basePrompt,
             updateToolbarProgress,
-            showPretranslateFailureToast
+            showPretranslateFailureToast,
+            existingDetectedBlocks
         )
 
         if (useMaskMode) {
@@ -594,6 +643,7 @@ export function EditorToolbar() {
                 currentImage.id,
                 currentImage.originalUrl,
                 currentImage.selections || [],
+                currentImage.detectedTextBlocks || [],
                 basePrompt,
                 true,
                 true
@@ -681,6 +731,7 @@ export function EditorToolbar() {
                         img.id,
                         img.originalUrl,
                         selections,
+                        img.detectedTextBlocks || [],
                         basePrompt,
                         false,
                         false
