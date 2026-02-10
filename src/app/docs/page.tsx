@@ -75,133 +75,133 @@ export default function DocsPage() {
 
                 {/* 快速开始 */}
                 <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <Zap className="h-5 w-5 text-primary" />
-                        快速开始
-                    </CardTitle>
-                    <CardDescription>3 步完成第一次 AI 重绘</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <div className="grid gap-4 md:grid-cols-3">
-                        <div className="space-y-2">
-                            <Badge>步骤 1</Badge>
-                            <h3 className="font-medium">上传图片</h3>
-                            <p className="text-sm text-muted-foreground">
-                                点击上传或直接拖拽图片到编辑器。支持批量上传。
-                            </p>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Zap className="h-5 w-5 text-primary" />
+                            快速开始
+                        </CardTitle>
+                        <CardDescription>3 步完成第一次 AI 重绘</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid gap-4 md:grid-cols-3">
+                            <div className="space-y-2">
+                                <Badge>步骤 1</Badge>
+                                <h3 className="font-medium">上传图片</h3>
+                                <p className="text-sm text-muted-foreground">
+                                    点击上传或直接拖拽图片到编辑器。支持批量上传。
+                                </p>
+                            </div>
+                            <div className="space-y-2">
+                                <Badge>步骤 2</Badge>
+                                <h3 className="font-medium">框选区域</h3>
+                                <p className="text-sm text-muted-foreground">
+                                    在画布上拖动鼠标框选需要修改的区域。
+                                </p>
+                            </div>
+                            <div className="space-y-2">
+                                <Badge>步骤 3</Badge>
+                                <h3 className="font-medium">输入提示词并生成</h3>
+                                <p className="text-sm text-muted-foreground">
+                                    描述您想要的效果，点击生成按钮。
+                                </p>
+                            </div>
                         </div>
-                        <div className="space-y-2">
-                            <Badge>步骤 2</Badge>
-                            <h3 className="font-medium">框选区域</h3>
-                            <p className="text-sm text-muted-foreground">
-                                在画布上拖动鼠标框选需要修改的区域。
-                            </p>
+                        <div className="mt-6 flex justify-center">
+                            <Button asChild>
+                                <Link href="/editor">
+                                    <Wand2 className="h-4 w-4 mr-2" />
+                                    立即体验
+                                </Link>
+                            </Button>
                         </div>
-                        <div className="space-y-2">
-                            <Badge>步骤 3</Badge>
-                            <h3 className="font-medium">输入提示词并生成</h3>
-                            <p className="text-sm text-muted-foreground">
-                                描述您想要的效果，点击生成按钮。
-                            </p>
-                        </div>
-                    </div>
-                    <div className="mt-6 flex justify-center">
-                        <Button asChild>
-                            <Link href="/editor">
-                                <Wand2 className="h-4 w-4 mr-2" />
-                                立即体验
-                            </Link>
-                        </Button>
-                    </div>
-                </CardContent>
+                    </CardContent>
                 </Card>
 
                 {/* 键盘快捷键 */}
                 <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <Keyboard className="h-5 w-5 text-primary" />
-                        键盘快捷键
-                    </CardTitle>
-                    <CardDescription>提高您的工作效率</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <div className="grid gap-2 md:grid-cols-2">
-                        {shortcuts.map((shortcut, i) => (
-                            <div
-                                key={i}
-                                className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
-                            >
-                                <span className="text-sm">{shortcut.action}</span>
-                                <div className="flex items-center gap-1">
-                                    {shortcut.keys.map((key, j) => (
-                                        <kbd
-                                            key={j}
-                                            className="px-2 py-1 bg-background border rounded text-xs font-mono"
-                                        >
-                                            {key}
-                                        </kbd>
-                                    ))}
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <Keyboard className="h-5 w-5 text-primary" />
+                            键盘快捷键
+                        </CardTitle>
+                        <CardDescription>提高您的工作效率</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="grid gap-2 md:grid-cols-2">
+                            {shortcuts.map((shortcut, i) => (
+                                <div
+                                    key={i}
+                                    className="flex items-center justify-between p-2 rounded-lg bg-muted/50"
+                                >
+                                    <span className="text-sm">{shortcut.action}</span>
+                                    <div className="flex items-center gap-1">
+                                        {shortcut.keys.map((key, j) => (
+                                            <kbd
+                                                key={j}
+                                                className="px-2 py-1 bg-background border rounded text-xs font-mono"
+                                            >
+                                                {key}
+                                            </kbd>
+                                        ))}
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
-                    </div>
-                </CardContent>
+                            ))}
+                        </div>
+                    </CardContent>
                 </Card>
 
                 {/* 常见问题 */}
                 <Card>
-                <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                        <HelpCircle className="h-5 w-5 text-primary" />
-                        常见问题
-                    </CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <Accordion type="single" collapsible className="w-full">
-                        {faqs.map((faq, i) => (
-                            <AccordionItem key={i} value={`item-${i}`}>
-                                <AccordionTrigger>{faq.question}</AccordionTrigger>
-                                <AccordionContent className="text-muted-foreground">
-                                    {faq.answer}
-                                </AccordionContent>
-                            </AccordionItem>
-                        ))}
-                    </Accordion>
-                </CardContent>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            <HelpCircle className="h-5 w-5 text-primary" />
+                            常见问题
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <Accordion type="single" collapsible className="w-full">
+                            {faqs.map((faq, i) => (
+                                <AccordionItem key={i} value={`item-${i}`}>
+                                    <AccordionTrigger>{faq.question}</AccordionTrigger>
+                                    <AccordionContent className="text-muted-foreground">
+                                        {faq.answer}
+                                    </AccordionContent>
+                                </AccordionItem>
+                            ))}
+                        </Accordion>
+                    </CardContent>
                 </Card>
 
                 {/* 外部链接 */}
                 <div className="grid gap-4 md:grid-cols-2">
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="text-lg">API 文档</CardTitle>
-                        <CardDescription>开发者集成指南</CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                        <Button variant="outline" className="w-full" asChild>
-                            <Link href="/api-docs">
-                                <ExternalLink className="h-4 w-4 mr-2" />
-                                查看 API 文档
-                            </Link>
-                        </Button>
-                    </CardContent>
-                </Card>
-                <Card>
-                    <CardHeader>
-                        <CardTitle className="text-lg">联系我们</CardTitle>
-                        <CardDescription>反馈问题或建议</CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                        <Button variant="outline" className="w-full" asChild>
-                            <a href="mailto:support@mangalens.app">
-                                <ExternalLink className="h-4 w-4 mr-2" />
-                                发送邮件
-                            </a>
-                        </Button>
-                    </CardContent>
-                </Card>
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-lg">API 文档</CardTitle>
+                            <CardDescription>开发者集成指南</CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <Button variant="outline" className="w-full" asChild>
+                                <Link href="/api-docs">
+                                    <ExternalLink className="h-4 w-4 mr-2" />
+                                    查看 API 文档
+                                </Link>
+                            </Button>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-lg">联系我们</CardTitle>
+                            <CardDescription>反馈问题或建议</CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                            <Button variant="outline" className="w-full" asChild>
+                                <a href="mailto:lyjcody@foxmail.com">
+                                    <ExternalLink className="h-4 w-4 mr-2" />
+                                    发送邮件
+                                </a>
+                            </Button>
+                        </CardContent>
+                    </Card>
                 </div>
             </div>
         </SiteShell>

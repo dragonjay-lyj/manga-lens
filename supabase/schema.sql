@@ -341,7 +341,7 @@ DROP POLICY IF EXISTS coin_transactions_delete_admin_only ON coin_transactions;
 
 CREATE POLICY coin_transactions_select_own_or_admin
     ON coin_transactions FOR SELECT
-    USING (
+    USING ( 
         user_id = public.current_request_user_id()
         OR public.is_admin_user()
     );
