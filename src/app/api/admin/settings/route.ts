@@ -8,6 +8,14 @@ import { ensureSystemSettingsDefaults } from "@/lib/settings"
 
 const supabaseAdmin = createServerClient()
 
+function maskSecret(value: string): string {
+    const secret = value.trim()
+    if (!secret) return ""
+    if (secret.length <= 4) return "*".repeat(secret.length)
+    if (secret.length <= 8) return `${secret.slice(0, 2)}${"*".repeat(secret.length - 4)}${secret.slice(-2)}`
+    return `${secret.slice(0, 4)}...${secret.slice(-4)}`
+}
+
 /**
  * 获取系统设置
  */
@@ -32,6 +40,7 @@ export async function GET() {
             ...item,
             value: item.is_encrypted ? (item.value ? "******" : "") : item.value,
             hasValue: !!item.value,
+            maskedPreview: item.is_encrypted && item.value ? maskSecret(item.value) : "",
         }))
 
         return NextResponse.json({ settings: safeData })
@@ -57,13 +66,15 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "缺少 key 参数" }, { status: 400 })
         }
 
+        const normalizedValue = typeof value === "string" ? value.trim() : value
+
         // 更新设置
         const { error } = await supabaseAdmin
             .from("system_settings")
             .upsert(
                 {
                     key,
-                    value,
+                    value: normalizedValue,
                     updated_at: new Date().toISOString(),
                 },
                 { onConflict: "key" }
@@ -99,15 +110,17 @@ export async function PUT(request: Request) {
 
         // 批量更新
         for (const item of settings) {
+            const normalizedValue = typeof item.value === "string" ? item.value.trim() : ""
+
             // 如果值是 "******"，跳过（不更新加密字段）
-            if (item.value === "******") continue
+            if (normalizedValue === "******") continue
 
             const { error } = await supabaseAdmin
                 .from("system_settings")
                 .upsert(
                     {
                         key: item.key,
-                        value: item.value,
+                        value: normalizedValue,
                         updated_at: new Date().toISOString(),
                     },
                     { onConflict: "key" }

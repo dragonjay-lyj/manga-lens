@@ -184,7 +184,8 @@ export function imageToDataUrl(image: HTMLImageElement): string {
 export function createMaskedImage(
     image: HTMLImageElement,
     selections: Selection[],
-    backgroundColor: string = '#ffffff'
+    backgroundColor: string = '#ffffff',
+    padding: number = 0
 ): string {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
@@ -195,17 +196,17 @@ export function createMaskedImage(
     ctx.fillRect(0, 0, canvas.width, canvas.height)
 
     for (const selection of selections) {
-        const normalized = normalizeSelection(selection, image.width, image.height)
+        const region = getSelectionCropRegion(image.width, image.height, selection, padding)
         ctx.drawImage(
             image,
-            normalized.x,
-            normalized.y,
-            normalized.width,
-            normalized.height,
-            normalized.x,
-            normalized.y,
-            normalized.width,
-            normalized.height
+            region.cropX,
+            region.cropY,
+            region.cropWidth,
+            region.cropHeight,
+            region.cropX,
+            region.cropY,
+            region.cropWidth,
+            region.cropHeight
         )
     }
 

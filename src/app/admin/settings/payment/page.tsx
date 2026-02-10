@@ -18,6 +18,7 @@ interface Setting {
     description: string
     is_encrypted: boolean
     hasValue: boolean
+    maskedPreview?: string
 }
 
 export default function PaymentSettingsPage() {
@@ -25,6 +26,7 @@ export default function PaymentSettingsPage() {
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
     const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
+    const [dirtyKeys, setDirtyKeys] = useState<Record<string, boolean>>({})
 
     // 加载设置
     const loadSettings = useCallback(async () => {
@@ -41,7 +43,14 @@ export default function PaymentSettingsPage() {
             const linuxdoSettings = data.settings.filter((s: Setting) =>
                 s.key.startsWith("linuxdo_credit_")
             )
-            setSettings(linuxdoSettings)
+            setSettings(
+                linuxdoSettings.map((setting: Setting) => (
+                    setting.is_encrypted && setting.value === "******"
+                        ? { ...setting, value: "" }
+                        : setting
+                ))
+            )
+            setDirtyKeys({})
         } catch (error) {
             const msg = error instanceof Error ? error.message : "加载失败"
             toast.error(msg)
@@ -59,6 +68,7 @@ export default function PaymentSettingsPage() {
         setSettings(prev =>
             prev.map(s => (s.key === key ? { ...s, value } : s))
         )
+        setDirtyKeys((prev) => ({ ...prev, [key]: true }))
     }
 
     // 保存设置
@@ -70,7 +80,18 @@ export default function PaymentSettingsPage() {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    settings: settings.map(s => ({ key: s.key, value: s.value }))
+                    settings: settings.map((s) => {
+                        const trimmedValue = s.value.trim()
+                        const keepEncryptedUnchanged =
+                            s.is_encrypted &&
+                            s.hasValue &&
+                            !dirtyKeys[s.key] &&
+                            trimmedValue === ""
+                        return {
+                            key: s.key,
+                            value: keepEncryptedUnchanged ? "******" : trimmedValue,
+                        }
+                    })
                 }),
             })
 
@@ -198,7 +219,11 @@ export default function PaymentSettingsPage() {
                                             }
                                             value={setting.value}
                                             onChange={(e) => handleChange(setting.key, e.target.value)}
-                                            placeholder={setting.description}
+                                            placeholder={
+                                                setting.is_encrypted && setting.hasValue
+                                                    ? "留空则保持原密钥不变，输入新值会覆盖"
+                                                    : setting.description
+                                            }
                                         />
                                         {setting.is_encrypted && (
                                             <Button
@@ -219,6 +244,11 @@ export default function PaymentSettingsPage() {
                                     {setting.description && (
                                         <p className="text-xs text-muted-foreground">
                                             {setting.description}
+                                        </p>
+                                    )}
+                                    {setting.is_encrypted && setting.hasValue && !dirtyKeys[setting.key] && setting.maskedPreview && (
+                                        <p className="text-xs text-muted-foreground">
+                                            当前密钥：{setting.maskedPreview}
                                         </p>
                                     )}
                                 </div>

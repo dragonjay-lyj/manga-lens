@@ -71,7 +71,7 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
-    const PATCH_PADDING = 12
+    const PATCH_PADDING = 20
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
 
@@ -473,7 +473,7 @@ export function EditorToolbar() {
         }
 
         const inputImageData = sourceSelections.length
-            ? createMaskedImage(originalImg, sourceSelections)
+            ? createMaskedImage(originalImg, sourceSelections, "#ffffff", PATCH_PADDING)
             : imageToDataUrl(originalImg)
 
         const result = await runGenerateRequest(inputImageData, effectivePrompt)

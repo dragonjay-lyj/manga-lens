@@ -25,6 +25,7 @@ interface Setting {
     description: string
     is_encrypted: boolean
     hasValue: boolean
+    maskedPreview?: string
 }
 
 const AI_SETTING_KEYS = [
@@ -40,6 +41,7 @@ export default function AdminAiSettingsPage() {
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
     const [showSecret, setShowSecret] = useState(false)
+    const [dirtyKeys, setDirtyKeys] = useState<Record<string, boolean>>({})
 
     const loadSettings = useCallback(async () => {
         try {
@@ -52,7 +54,14 @@ export default function AdminAiSettingsPage() {
             const filtered = (data.settings as Setting[]).filter((item) =>
                 AI_SETTING_KEYS.includes(item.key)
             )
-            setSettings(filtered)
+            setSettings(
+                filtered.map((item) => (
+                    item.is_encrypted && item.value === "******"
+                        ? { ...item, value: "" }
+                        : item
+                ))
+            )
+            setDirtyKeys({})
         } catch (error) {
             const message = error instanceof Error ? error.message : "加载失败"
             toast.error(message)
@@ -72,12 +81,25 @@ export default function AdminAiSettingsPage() {
         setSettings((prev) =>
             prev.map((item) => (item.key === key ? { ...item, value } : item))
         )
+        setDirtyKeys((prev) => ({ ...prev, [key]: true }))
     }
 
     const handleSave = async () => {
         try {
             setSaving(true)
-            const payload = settings.map((item) => ({ key: item.key, value: item.value }))
+            const payload = settings.map((item) => {
+                const trimmedValue = item.value.trim()
+                const keepEncryptedUnchanged =
+                    item.is_encrypted &&
+                    item.hasValue &&
+                    !dirtyKeys[item.key] &&
+                    trimmedValue === ""
+
+                return {
+                    key: item.key,
+                    value: keepEncryptedUnchanged ? "******" : trimmedValue,
+                }
+            })
             const res = await fetch("/api/admin/settings", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -205,7 +227,9 @@ export default function AdminAiSettingsPage() {
                                 type={showSecret ? "text" : "password"}
                                 value={keySetting?.value ?? ""}
                                 onChange={(e) => updateSetting("server_api_key", e.target.value)}
-                                placeholder="输入网站统一 API Key"
+                                placeholder={keySetting?.hasValue
+                                    ? "留空则保持原密钥不变，输入新值会覆盖"
+                                    : "输入网站统一 API Key"}
                             />
                             <Button
                                 variant="outline"
@@ -218,8 +242,13 @@ export default function AdminAiSettingsPage() {
                             </Button>
                         </div>
                         <p className="text-xs text-muted-foreground">
-                            已保存密钥会显示为掩码；保持掩码保存不会覆盖原值。
+                            已保存密钥不会回显明文。留空保存可保持原密钥不变。
                         </p>
+                        {keySetting?.hasValue && !dirtyKeys.server_api_key && keySetting.maskedPreview && (
+                            <p className="text-xs text-muted-foreground">
+                                当前密钥：{keySetting.maskedPreview}
+                            </p>
+                        )}
                     </div>
 
                     {provider === "openai" && (
@@ -257,4 +286,3 @@ export default function AdminAiSettingsPage() {
         </div>
     )
 }
-
