@@ -14,8 +14,13 @@ import {
     ArrowUpDown,
     AlertTriangle,
 } from "lucide-react"
+import { cn } from "@/lib/utils"
 
-export function SelectionPanel() {
+interface SelectionPanelProps {
+    className?: string
+}
+
+export function SelectionPanel({ className }: SelectionPanelProps = {}) {
     const {
         locale,
         showResult,
@@ -68,7 +73,7 @@ export function SelectionPanel() {
 
     if (!currentImage) {
         return (
-            <div className="w-64 border-l border-border glass-card p-4">
+            <div className={cn("w-64 border-l border-border glass-card p-4", className)}>
                 <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                     <ImageIcon className="h-8 w-8 mb-2 opacity-50" />
                     <p className="text-sm text-center">
@@ -80,7 +85,7 @@ export function SelectionPanel() {
     }
 
     return (
-        <div className="w-64 border-l border-border glass-card flex flex-col h-full overflow-hidden">
+        <div className={cn("w-64 border-l border-border glass-card flex flex-col h-full overflow-hidden", className)}>
             {/* 图片信息 */}
             <div className="p-4 border-b border-border">
                 <div className="flex items-center gap-2 mb-2">

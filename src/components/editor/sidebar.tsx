@@ -40,7 +40,11 @@ import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 
-export function EditorSidebar() {
+interface EditorSidebarProps {
+    className?: string
+}
+
+export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
@@ -234,7 +238,7 @@ export function EditorSidebar() {
     ])
 
     return (
-        <div className="w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden">
+        <div className={cn("w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden", className)}>
             <ScrollArea className="flex-1 h-full">
                 <div className="p-4 space-y-6 min-h-0">
                     {/* 文件上传区域 */}

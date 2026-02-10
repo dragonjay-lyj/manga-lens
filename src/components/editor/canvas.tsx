@@ -26,6 +26,7 @@ export function EditorCanvas() {
     const containerRef = useRef<HTMLDivElement>(null)
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const imageRef = useRef<HTMLImageElement | null>(null)
+    const fileInputRef = useRef<HTMLInputElement>(null)
     const panSessionRef = useRef<{
         mouseX: number
         mouseY: number
@@ -43,6 +44,7 @@ export function EditorCanvas() {
         setZoom,
         setPan,
         resetView,
+        addImages,
         updateSelections,
         clearSelections,
     } = useEditorStore()
@@ -546,6 +548,14 @@ export function EditorCanvas() {
         }
     }
 
+    const handleFileUpload = useCallback((files: FileList | null) => {
+        if (!files) return
+        const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/"))
+        if (imageFiles.length > 0) {
+            addImages(imageFiles)
+        }
+    }, [addImages])
+
     // 适应屏幕
     const handleFitToScreen = () => {
         const container = containerRef.current
@@ -718,6 +728,26 @@ export function EditorCanvas() {
                     <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                         <ImageIcon className="h-12 w-12 mb-4 opacity-50" />
                         <p>{t.editor.canvas.noImage}</p>
+                        <p className="text-xs mt-2 text-center max-w-xs">
+                            {locale === "zh"
+                                ? "手机端请点击下方按钮选择图片，或使用右上角工具按钮打开完整面板。"
+                                : "On mobile, tap the button below to upload, or open the full tool panel from the top-right button."}
+                        </p>
+                        <Button
+                            className="mt-4 h-11 px-6"
+                            onClick={() => fileInputRef.current?.click()}
+                        >
+                            {locale === "zh" ? "上传图片" : "Upload images"}
+                        </Button>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/*"
+                            multiple
+                            aria-label={locale === "zh" ? "上传图片" : "Upload images"}
+                            className="hidden"
+                            onChange={(e) => handleFileUpload(e.target.files)}
+                        />
                     </div>
                 )}
             </div>
