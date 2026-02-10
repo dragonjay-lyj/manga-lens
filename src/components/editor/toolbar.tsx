@@ -74,10 +74,48 @@ export function EditorToolbar() {
     const PATCH_PADDING = 20
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
+    const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
+    const FOUR_K_LONG_EDGE = 3840
 
     const parseApiError = async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
         return data?.error || `${fallback} (${res.status})`
+    }
+
+    const buildDetectPayloadCandidates = async (
+        dataUrl: string,
+        variants: Array<{ maxLongEdge: number; quality: number; mimeType: "image/jpeg" | "image/png" }>
+    ) => {
+        if (dataUrl.length <= SAFE_DETECT_PAYLOAD_CHARS) {
+            return [dataUrl]
+        }
+
+        const original = await loadImage(dataUrl)
+        const candidates: string[] = [dataUrl]
+        const dedupeKeys = new Set<string>([`${dataUrl.length}:${dataUrl.slice(0, 64)}`])
+
+        for (const variant of variants) {
+            const scale = Math.min(1, variant.maxLongEdge / Math.max(original.width, original.height))
+            const width = Math.max(1, Math.round(original.width * scale))
+            const height = Math.max(1, Math.round(original.height * scale))
+            const canvas = document.createElement("canvas")
+            const ctx = canvas.getContext("2d")
+            if (!ctx) continue
+            canvas.width = width
+            canvas.height = height
+            ctx.drawImage(original, 0, 0, width, height)
+            const compressed = canvas.toDataURL(variant.mimeType, variant.quality)
+            const key = `${compressed.length}:${compressed.slice(0, 64)}`
+            if (!dedupeKeys.has(key)) {
+                dedupeKeys.add(key)
+                candidates.push(compressed)
+            }
+            if (compressed.length <= SAFE_DETECT_PAYLOAD_CHARS) {
+                break
+            }
+        }
+
+        return candidates
     }
 
     const runGenerateRequest = async (imageData: string, promptText: string): Promise<GenerateImageResponse> => {
@@ -85,7 +123,10 @@ export function EditorToolbar() {
             return generateImage({
                 imageData,
                 prompt: promptText,
-                config: settings,
+                config: {
+                    ...settings,
+                    imageSize: settings.imageSize || "2K",
+                },
             })
         }
 
@@ -96,6 +137,7 @@ export function EditorToolbar() {
                 body: JSON.stringify({
                     imageData,
                     prompt: promptText,
+                    imageSize: settings.imageSize || "2K",
                 }),
             })
 
@@ -123,9 +165,20 @@ export function EditorToolbar() {
         imageData: string,
         targetLanguage: string
     ): Promise<DetectTextResponse> => {
+        const detectCandidates = settings.useServerApi
+            ? await buildDetectPayloadCandidates(imageData, [
+                { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
+                { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
+                { maxLongEdge: 2048, quality: 0.82, mimeType: "image/jpeg" },
+                { maxLongEdge: 1600, quality: 0.78, mimeType: "image/jpeg" },
+                { maxLongEdge: 1280, quality: 0.74, mimeType: "image/jpeg" },
+                { maxLongEdge: 1024, quality: 0.7, mimeType: "image/jpeg" },
+            ])
+            : [imageData]
+
         if (!settings.useServerApi) {
             return detectTextBlocks({
-                imageData,
+                imageData: detectCandidates[0],
                 config: {
                     provider: settings.provider,
                     apiKey: settings.apiKey,
@@ -136,35 +189,55 @@ export function EditorToolbar() {
             })
         }
 
-        try {
-            const res = await fetch("/api/ai/detect-text", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    imageData,
-                    targetLanguage,
-                }),
-            })
+        let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+        for (let i = 0; i < detectCandidates.length; i++) {
+            const requestImageData = detectCandidates[i]
+            try {
+                const res = await fetch("/api/ai/detect-text", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        imageData: requestImageData,
+                        targetLanguage,
+                    }),
+                })
 
-            if (!res.ok) {
+                if (!res.ok) {
+                    const parsedError = await parseApiError(
+                        res,
+                        locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+                    )
+                    lastError = parsedError
+                    const canRetryWithSmallerPayload = res.status === 413 && i < detectCandidates.length - 1
+                    if (canRetryWithSmallerPayload) {
+                        continue
+                    }
+                    return {
+                        success: false,
+                        blocks: [],
+                        error: parsedError,
+                    }
+                }
+
+                const data = await res.json()
                 return {
-                    success: false,
-                    blocks: [],
-                    error: await parseApiError(res, locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"),
+                    success: true,
+                    blocks: data.blocks || [],
+                }
+            } catch (error) {
+                lastError = error instanceof Error
+                    ? error.message
+                    : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed")
+                if (i >= detectCandidates.length - 1) {
+                    break
                 }
             }
+        }
 
-            const data = await res.json()
-            return {
-                success: true,
-                blocks: data.blocks || [],
-            }
-        } catch (error) {
-            return {
-                success: false,
-                blocks: [],
-                error: error instanceof Error ? error.message : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"),
-            }
+        return {
+            success: false,
+            blocks: [],
+            error: lastError,
         }
     }
 
@@ -407,10 +480,31 @@ export function EditorToolbar() {
 
         const patches: Array<{ base64: string; selection: Selection }> = []
         const failures: string[] = []
+        let lowResolutionWarned = false
 
         for (const { selection, index } of indexedSelections) {
             const result = results.get(selection.id)
             if (result?.success && result.imageData) {
+                try {
+                    const sourcePatch = inputPatchBySelection.get(selection.id)
+                    if (sourcePatch) {
+                        const sourceImg = await loadImage(sourcePatch)
+                        const generatedImg = await loadImage(result.imageData)
+                        const srcLongEdge = Math.max(sourceImg.width, sourceImg.height)
+                        const genLongEdge = Math.max(generatedImg.width, generatedImg.height)
+                        if (!lowResolutionWarned && srcLongEdge >= FOUR_K_LONG_EDGE && genLongEdge < FOUR_K_LONG_EDGE) {
+                            toast.warning(
+                                locale === "zh"
+                                    ? `选区 #${index} 返回分辨率 ${generatedImg.width}x${generatedImg.height}，低于 4K。`
+                                    : `Selection #${index} generated ${generatedImg.width}x${generatedImg.height}, below 4K.`
+                            )
+                            lowResolutionWarned = true
+                        }
+                    }
+                } catch {
+                    // ignore resolution inspect failures
+                }
+
                 const sourcePatch = inputPatchBySelection.get(selection.id)
                 if (sourcePatch && isExactlySameImageData(sourcePatch, result.imageData)) {
                     const unchangedError = locale === "zh"
@@ -497,6 +591,24 @@ export function EditorToolbar() {
                 )
             }
             throw new Error(unchangedError)
+        }
+
+        const resultImage = await loadImage(result.imageData)
+        const resultLongEdge = Math.max(resultImage.width, resultImage.height)
+        const inputLongEdge = Math.max(originalImg.width, originalImg.height)
+        if ((settings.imageSize || "2K") === "4K") {
+            toast.info(
+                locale === "zh"
+                    ? `本次返回分辨率：${resultImage.width}x${resultImage.height}`
+                    : `Generated resolution: ${resultImage.width}x${resultImage.height}`
+            )
+        }
+        if (inputLongEdge >= FOUR_K_LONG_EDGE && resultLongEdge < FOUR_K_LONG_EDGE) {
+            toast.warning(
+                locale === "zh"
+                    ? `当前模型返回分辨率约 ${resultImage.width}x${resultImage.height}（低于 4K），可能导致文本边缘发糊。`
+                    : `Generated resolution is ${resultImage.width}x${resultImage.height} (below 4K), which may blur text edges.`
+            )
         }
 
         if (trackSelectionProgress) {

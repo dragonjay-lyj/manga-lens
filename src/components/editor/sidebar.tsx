@@ -73,6 +73,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
     const t = getMessages(locale)
     const currentImage = images.find((img) => img.id === currentImageId) || null
+    const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
 
     // 自动迁移已下线的 Gemini 模型
     useEffect(() => {
@@ -164,29 +165,84 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         return data?.error || `${fallback} (${res.status})`
     }, [])
 
+    const buildDetectPayloadCandidates = useCallback(async (imageData: string) => {
+        if (imageData.length <= SAFE_DETECT_PAYLOAD_CHARS) {
+            return [imageData]
+        }
+
+        const source = await loadImage(imageData)
+        const variants: Array<{ maxLongEdge: number; quality: number; mimeType: "image/jpeg" | "image/png" }> = [
+            { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
+            { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
+            { maxLongEdge: 2048, quality: 0.82, mimeType: "image/jpeg" },
+            { maxLongEdge: 1600, quality: 0.78, mimeType: "image/jpeg" },
+            { maxLongEdge: 1280, quality: 0.74, mimeType: "image/jpeg" },
+            { maxLongEdge: 1024, quality: 0.7, mimeType: "image/jpeg" },
+        ]
+        const candidates: string[] = [imageData]
+        const dedupe = new Set<string>([`${imageData.length}:${imageData.slice(0, 64)}`])
+
+        for (const variant of variants) {
+            const scale = Math.min(1, variant.maxLongEdge / Math.max(source.width, source.height))
+            const width = Math.max(1, Math.round(source.width * scale))
+            const height = Math.max(1, Math.round(source.height * scale))
+            const canvas = document.createElement("canvas")
+            const ctx = canvas.getContext("2d")
+            if (!ctx) continue
+            canvas.width = width
+            canvas.height = height
+            ctx.drawImage(source, 0, 0, width, height)
+            const compressed = canvas.toDataURL(variant.mimeType, variant.quality)
+            const key = `${compressed.length}:${compressed.slice(0, 64)}`
+            if (!dedupe.has(key)) {
+                dedupe.add(key)
+                candidates.push(compressed)
+            }
+            if (compressed.length <= SAFE_DETECT_PAYLOAD_CHARS) {
+                break
+            }
+        }
+
+        return candidates
+    }, [SAFE_DETECT_PAYLOAD_CHARS])
+
     const runAutoDetect = useCallback(async (imageData: string): Promise<DetectTextResponse> => {
         if (settings.useServerApi) {
-            const res = await fetch("/api/ai/detect-text", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    imageData,
-                    targetLanguage: "简体中文",
-                }),
-            })
+            const candidates = await buildDetectPayloadCandidates(imageData)
+            let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
 
-            if (!res.ok) {
-                throw new Error(await parseApiError(
-                    res,
-                    locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
-                ))
+            for (let i = 0; i < candidates.length; i++) {
+                const payload = candidates[i]
+                const res = await fetch("/api/ai/detect-text", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        imageData: payload,
+                        targetLanguage: "简体中文",
+                    }),
+                })
+
+                if (!res.ok) {
+                    const parsedError = await parseApiError(
+                        res,
+                        locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+                    )
+                    lastError = parsedError
+                    const canRetryWithSmallerPayload = res.status === 413 && i < candidates.length - 1
+                    if (canRetryWithSmallerPayload) {
+                        continue
+                    }
+                    throw new Error(parsedError)
+                }
+
+                const data = await res.json()
+                return {
+                    success: true,
+                    blocks: data.blocks || [],
+                }
             }
 
-            const data = await res.json()
-            return {
-                success: true,
-                blocks: data.blocks || [],
-            }
+            throw new Error(lastError)
         }
 
         return detectTextBlocks({
@@ -196,10 +252,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 apiKey: settings.apiKey,
                 baseUrl: settings.baseUrl,
                 model: settings.model,
+                imageSize: settings.imageSize || "2K",
             },
             targetLanguage: "简体中文",
         })
-    }, [locale, parseApiError, settings.apiKey, settings.baseUrl, settings.model, settings.provider, settings.useServerApi])
+    }, [
+        buildDetectPayloadCandidates,
+        locale,
+        parseApiError,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.imageSize,
+        settings.model,
+        settings.provider,
+        settings.useServerApi,
+    ])
 
     const handleAutoDetectText = useCallback(async () => {
         if (!currentImage) {
@@ -541,6 +608,32 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         )}
                                     </div>
                                 )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label htmlFor="editor-image-size">
+                                    {locale === "zh" ? "生成分辨率（Gemini）" : "Output Resolution (Gemini)"}
+                                </Label>
+                                <Select
+                                    value={settings.imageSize || "2K"}
+                                    onValueChange={(value: "1K" | "2K" | "4K") =>
+                                        updateSettings({ imageSize: value })
+                                    }
+                                >
+                                    <SelectTrigger id="editor-image-size">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="1K">1K（快）</SelectItem>
+                                        <SelectItem value="2K">2K（平衡）</SelectItem>
+                                        <SelectItem value="4K">4K（更清晰）</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                    {locale === "zh"
+                                        ? "4K 能降低文字边缘发糊，但生成更慢、成本更高；仅 Gemini 图像模型生效。"
+                                        : "4K helps text sharpness but costs more and runs slower; applies to Gemini image models."}
+                                </p>
                             </div>
 
                             <div className="space-y-3 p-3 rounded-lg bg-muted/50">

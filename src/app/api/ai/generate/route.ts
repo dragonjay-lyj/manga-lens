@@ -1,12 +1,21 @@
 import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
-import { generateImage } from "@/lib/ai/ai-service"
+import { generateImage, type ImageSizeOption } from "@/lib/ai/ai-service"
 import { getServerAiRuntimeConfig } from "@/lib/settings"
 
 type GenerateBody = {
     imageData?: string
     prompt?: string
+    imageSize?: string
+}
+
+function parseImageSize(value?: string): ImageSizeOption | undefined {
+    const normalized = value?.trim().toUpperCase()
+    if (normalized === "1K" || normalized === "2K" || normalized === "4K") {
+        return normalized
+    }
+    return undefined
 }
 
 export async function POST(request: Request) {
@@ -21,8 +30,12 @@ export async function POST(request: Request) {
         const body = (await request.json()) as GenerateBody
         const imageData = body.imageData?.trim()
         const prompt = body.prompt?.trim()
+        const imageSize = parseImageSize(body.imageSize)
         if (!imageData || !prompt) {
             return NextResponse.json({ error: "缺少 imageData 或 prompt" }, { status: 400 })
+        }
+        if (body.imageSize && !imageSize) {
+            return NextResponse.json({ error: "imageSize 仅支持 1K/2K/4K" }, { status: 400 })
         }
 
         const runtime = await getServerAiRuntimeConfig()
@@ -36,7 +49,10 @@ export async function POST(request: Request) {
         const result = await generateImage({
             imageData,
             prompt,
-            config: runtime.config,
+            config: {
+                ...runtime.config,
+                imageSize: (imageSize || runtime.config.imageSize),
+            },
         })
 
         if (!result.success || !result.imageData) {
@@ -57,4 +73,3 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "生成失败" }, { status: 500 })
     }
 }
-

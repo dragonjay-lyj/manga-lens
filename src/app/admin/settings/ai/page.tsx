@@ -34,6 +34,7 @@ const AI_SETTING_KEYS = [
     "server_api_key",
     "server_api_base_url",
     "server_api_model",
+    "server_api_image_size",
 ]
 
 export default function AdminAiSettingsPage() {
@@ -124,6 +125,11 @@ export default function AdminAiSettingsPage() {
     const enabled = getValue("server_api_enabled") === "true"
     const provider = getValue("server_api_provider") === "openai" ? "openai" : "gemini"
     const modelValue = getValue("server_api_model")
+    const imageSizeValue = (() => {
+        const raw = getValue("server_api_image_size")
+        if (raw === "1K" || raw === "4K") return raw
+        return "2K"
+    })()
     const keySetting = getSetting("server_api_key")
 
     const status = useMemo(() => {
@@ -272,6 +278,30 @@ export default function AdminAiSettingsPage() {
                             placeholder={provider === "gemini" ? "gemini-2.5-flash-image" : "gpt-4o"}
                         />
                     </div>
+
+                    {provider === "gemini" && (
+                        <div className="space-y-2">
+                            <Label htmlFor="server-api-image-size">生成分辨率</Label>
+                            <Select
+                                value={imageSizeValue}
+                                onValueChange={(value: "1K" | "2K" | "4K") =>
+                                    updateSetting("server_api_image_size", value)
+                                }
+                            >
+                                <SelectTrigger id="server-api-image-size">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="1K">1K（快）</SelectItem>
+                                    <SelectItem value="2K">2K（平衡）</SelectItem>
+                                    <SelectItem value="4K">4K（更清晰）</SelectItem>
+                                </SelectContent>
+                            </Select>
+                            <p className="text-xs text-muted-foreground">
+                                4K 清晰度更高，但耗时与成本会增加。
+                            </p>
+                        </div>
+                    )}
 
                     <Separator />
 

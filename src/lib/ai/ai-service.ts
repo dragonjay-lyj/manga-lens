@@ -2,11 +2,14 @@
 
 import type { AIProvider } from '@/types/database'
 
+export type ImageSizeOption = '1K' | '2K' | '4K'
+
 export interface AIConfig {
     provider: AIProvider
     apiKey: string
     baseUrl?: string
     model?: string
+    imageSize?: ImageSizeOption
 }
 
 export interface GenerateImageRequest {
@@ -115,6 +118,14 @@ function clampNormalized(value: number): number {
     if (!Number.isFinite(value)) return 0
     if (value > 1 && value <= 100) return Math.min(1, Math.max(0, value / 100))
     return Math.min(1, Math.max(0, value))
+}
+
+function normalizeGeminiImageSize(input?: string): ImageSizeOption | undefined {
+    const raw = (input || '').trim().toUpperCase()
+    if (raw === '1K' || raw === '2K' || raw === '4K') {
+        return raw
+    }
+    return undefined
 }
 
 function parseJsonFromText(raw: string): unknown {
@@ -286,36 +297,57 @@ async function fetchWithTimeout(
 async function generateWithGemini(request: GenerateImageRequest): Promise<GenerateImageResponse> {
     const { imageData, prompt, config } = request
     const model = config.model || 'gemini-2.5-flash-image'
+    const imageSize = normalizeGeminiImageSize(config.imageSize)
 
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
+    const baseGenerationConfig: Record<string, unknown> = {
+        responseModalities: ['TEXT', 'IMAGE'],
+    }
 
     try {
-        const response = await fetchWithTimeout(apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                contents: [
-                    {
-                        parts: [
-                            {
-                                inline_data: {
-                                    mime_type: 'image/png',
-                                    data: imageData.replace(/^data:image\/\w+;base64,/, ''),
-                                },
-                            },
-                            {
-                                text: prompt,
-                            },
-                        ],
-                    },
-                ],
-                generationConfig: {
-                    responseModalities: ['TEXT', 'IMAGE'],
+        const sendRequest = async (enableImageSize: boolean) => {
+            const generationConfig: Record<string, unknown> = { ...baseGenerationConfig }
+            if (enableImageSize && imageSize) {
+                generationConfig.imageConfig = { imageSize }
+            }
+
+            return fetchWithTimeout(apiUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
                 },
-            }),
-        })
+                body: JSON.stringify({
+                    contents: [
+                        {
+                            parts: [
+                                {
+                                    inline_data: {
+                                        mime_type: 'image/png',
+                                        data: imageData.replace(/^data:image\/\w+;base64,/, ''),
+                                    },
+                                },
+                                {
+                                    text: prompt,
+                                },
+                            ],
+                        },
+                    ],
+                    generationConfig,
+                }),
+            })
+        }
+
+        let response = await sendRequest(Boolean(imageSize))
+        if (!response.ok && imageSize && response.status === 400) {
+            const apiError = await readApiError(response)
+            const shouldRetryWithoutImageSize =
+                /imageSize|imageConfig|Unknown name|Invalid JSON payload/i.test(apiError)
+            if (shouldRetryWithoutImageSize) {
+                response = await sendRequest(false)
+            } else {
+                throw new Error(`Gemini API ${response.status}: ${apiError}`)
+            }
+        }
 
         if (!response.ok) {
             const apiError = await readApiError(response)
@@ -358,6 +390,7 @@ async function generateWithGemini(request: GenerateImageRequest): Promise<Genera
     } catch (error) {
         console.error('Gemini generate failed:', {
             model,
+            imageSize,
             provider: config.provider,
             error,
         })

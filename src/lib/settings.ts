@@ -74,6 +74,12 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
         description: "网站统一 AI 默认模型",
         is_encrypted: false,
     },
+    {
+        key: "server_api_image_size",
+        value: "2K",
+        description: "网站统一 AI 输出分辨率（Gemini: 1K/2K/4K）",
+        is_encrypted: false,
+    },
 ]
 
 let defaultsEnsured = false
@@ -179,6 +185,7 @@ export type ServerAiRuntimeConfig = {
         apiKey: string
         baseUrl?: string
         model: string
+        imageSize: "1K" | "2K" | "4K"
     }
 }
 
@@ -189,16 +196,22 @@ export async function getServerAiRuntimeConfig(): Promise<ServerAiRuntimeConfig>
         "server_api_key",
         "server_api_base_url",
         "server_api_model",
+        "server_api_image_size",
     ])
 
     const provider: AIProvider = settings.server_api_provider === "openai" ? "openai" : "gemini"
     const apiKey = settings.server_api_key || ""
     const model = settings.server_api_model || (provider === "openai" ? "gpt-4o" : "gemini-2.5-flash-image")
+    const imageSize: "1K" | "2K" | "4K" =
+        settings.server_api_image_size === "1K" || settings.server_api_image_size === "4K"
+            ? settings.server_api_image_size
+            : "2K"
     const enabled = settings.server_api_enabled === "true"
     const config = {
         provider,
         apiKey,
         model,
+        imageSize,
         baseUrl: provider === "openai"
             ? (settings.server_api_base_url || "https://api.openai.com/v1")
             : undefined,

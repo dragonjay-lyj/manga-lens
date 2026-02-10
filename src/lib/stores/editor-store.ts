@@ -46,6 +46,7 @@ export interface EditorSettings {
     apiKey: string
     baseUrl: string
     model: string
+    imageSize: '1K' | '2K' | '4K'
     concurrency: number
     isSerial: boolean
     useMaskMode: boolean
@@ -148,6 +149,7 @@ const defaultSettings: EditorSettings = {
     apiKey: '',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gemini-2.5-flash-image',
+    imageSize: '2K',
     concurrency: 3,
     isSerial: false,
     useMaskMode: true,
