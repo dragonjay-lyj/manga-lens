@@ -25,7 +25,6 @@ import {
 import {
     loadImage,
     cropSelection,
-    cropSelectionWithClearedArea,
     compositeMultiplePatches,
     downloadImage,
     downloadImagesAsZip,
@@ -73,10 +72,9 @@ export function EditorToolbar() {
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
     const PATCH_CONTEXT_PADDING = 24
-    const PATCH_BLEND_PADDING = 10
-    const PATCH_CLEAR_PADDING = 2
+    const PATCH_BLEND_PADDING = 4
     const MASK_CONTEXT_PADDING = 40
-    const MASK_BLEND_PADDING = 14
+    const MASK_BLEND_PADDING = 3
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
@@ -266,7 +264,43 @@ export function EditorToolbar() {
 
     type PretranslatePromptResult = {
         prompt: string
-        hasContextBlocks: boolean
+    }
+
+    const getSelectionDarkRatio = (image: HTMLImageElement, selections: Selection[]): number => {
+        if (!selections.length) return 0
+
+        const canvas = document.createElement("canvas")
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return 0
+        canvas.width = image.width
+        canvas.height = image.height
+        ctx.drawImage(image, 0, 0)
+
+        let darkPixels = 0
+        let totalPixels = 0
+
+        for (const selection of selections) {
+            const x = Math.max(0, Math.min(image.width - 1, Math.floor(selection.x)))
+            const y = Math.max(0, Math.min(image.height - 1, Math.floor(selection.y)))
+            const maxW = Math.max(1, image.width - x)
+            const maxH = Math.max(1, image.height - y)
+            const w = Math.max(1, Math.min(maxW, Math.floor(selection.width)))
+            const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
+
+            const data = ctx.getImageData(x, y, w, h).data
+            for (let i = 0; i < data.length; i += 4) {
+                const alpha = data[i + 3]
+                if (alpha < 16) continue
+                const luminance = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+                if (luminance < 210) {
+                    darkPixels++
+                }
+                totalPixels++
+            }
+        }
+
+        if (totalPixels === 0) return 0
+        return darkPixels / totalPixels
     }
 
     const buildPretranslateContextPrompt = async (
@@ -312,7 +346,6 @@ export function EditorToolbar() {
             }
             return {
                 prompt: basePrompt,
-                hasContextBlocks: false,
             }
         }
 
@@ -334,7 +367,6 @@ export function EditorToolbar() {
             }
             return {
                 prompt: basePrompt,
-                hasContextBlocks: false,
             }
         }
 
@@ -364,7 +396,6 @@ export function EditorToolbar() {
             ...lines,
             "请优先遵循以上翻译与布局信息。",
             ].join("\n"),
-            hasContextBlocks: true,
         }
     }
 
@@ -373,7 +404,6 @@ export function EditorToolbar() {
         originalImg: HTMLImageElement,
         selections: Selection[],
         effectivePrompt: string,
-        clearInputText: boolean,
         updateToolbarProgress: boolean,
         trackSelectionProgress: boolean
     ) => {
@@ -388,21 +418,8 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
-        const buildPatchInput = (selection: Selection) => (
-            clearInputText
-                ? cropSelectionWithClearedArea(
-                    originalImg,
-                    selection,
-                    PATCH_CONTEXT_PADDING,
-                    "#ffffff",
-                    PATCH_CLEAR_PADDING
-                )
-                : cropSelection(
-                    originalImg,
-                    selection,
-                    PATCH_CONTEXT_PADDING
-                )
-        )
+        const buildPatchInput = (selection: Selection) =>
+            cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
         const inputPatchBySelection = new Map(
             indexedSelections.map(({ selection }) => [
                 selection.id,
@@ -651,6 +668,37 @@ export function EditorToolbar() {
             )
         }
 
+        if (sourceSelections.length > 0) {
+            const originalDarkRatio = getSelectionDarkRatio(originalImg, sourceSelections)
+            const resultDarkRatio = getSelectionDarkRatio(resultImage, sourceSelections)
+            const suspiciousBlank =
+                originalDarkRatio > 0.008 &&
+                resultDarkRatio < originalDarkRatio * 0.2
+
+            if (suspiciousBlank) {
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        locale === "zh"
+                            ? "检测到遮罩结果疑似留白，自动切换分片模式重试..."
+                            : "Detected likely blank mask result, retrying in patch mode..."
+                    )
+                }
+                toast.warning(
+                    locale === "zh"
+                        ? "遮罩模式疑似留白，已自动切换分片模式重试。"
+                        : "Mask mode looked blank; retried automatically with patch mode."
+                )
+                return processSelectionsPatchMode(
+                    imageId,
+                    originalImg,
+                    sourceSelections,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress
+                )
+            }
+        }
+
         if (trackSelectionProgress) {
             sourceSelections.forEach((selection) => setSelectionProgress(imageId, selection.id, "completed"))
         }
@@ -720,7 +768,6 @@ export function EditorToolbar() {
             originalImg,
             effectiveSelections,
             pretranslateContext.prompt,
-            pretranslateContext.hasContextBlocks,
             updateToolbarProgress,
             hasUserSelections
         )
