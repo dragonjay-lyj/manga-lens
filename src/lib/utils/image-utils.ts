@@ -167,6 +167,52 @@ export function cropSelection(
 }
 
 /**
+ * 裁剪选区并先清空选区中心区域（用于减少原文与译文重叠）
+ */
+export function cropSelectionWithClearedArea(
+    image: HTMLImageElement,
+    selection: Selection,
+    padding: number = 10,
+    clearColor: string = '#ffffff',
+    clearPadding: number = 0
+): string {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')!
+    const region = getSelectionCropRegion(image.width, image.height, selection, padding)
+
+    canvas.width = region.cropWidth
+    canvas.height = region.cropHeight
+
+    ctx.drawImage(
+        image,
+        region.cropX,
+        region.cropY,
+        region.cropWidth,
+        region.cropHeight,
+        0,
+        0,
+        region.cropWidth,
+        region.cropHeight
+    )
+
+    const localSelectionX = region.selectionX - region.cropX
+    const localSelectionY = region.selectionY - region.cropY
+    const safeClearPadding = Math.max(0, Math.round(clearPadding))
+
+    const clearX = Math.max(0, localSelectionX - safeClearPadding)
+    const clearY = Math.max(0, localSelectionY - safeClearPadding)
+    const clearRight = Math.min(region.cropWidth, localSelectionX + region.selectionWidth + safeClearPadding)
+    const clearBottom = Math.min(region.cropHeight, localSelectionY + region.selectionHeight + safeClearPadding)
+    const clearWidth = Math.max(1, clearRight - clearX)
+    const clearHeight = Math.max(1, clearBottom - clearY)
+
+    ctx.fillStyle = clearColor
+    ctx.fillRect(clearX, clearY, clearWidth, clearHeight)
+
+    return canvas.toDataURL('image/png')
+}
+
+/**
  * 将 Image 元素导出为 data URL
  */
 export function imageToDataUrl(image: HTMLImageElement): string {
@@ -220,7 +266,8 @@ export function compositeImage(
     originalImage: HTMLImageElement,
     patchBase64: string,
     selection: Selection,
-    padding: number = 10
+    padding: number = 10,
+    blendPadding: number = 0
 ): Promise<string> {
     return new Promise((resolve, reject) => {
         const canvas = document.createElement('canvas')
@@ -243,22 +290,37 @@ export function compositeImage(
             )
             const scaleX = patchImage.width / region.cropWidth
             const scaleY = patchImage.height / region.cropHeight
-            const srcX = (region.selectionX - region.cropX) * scaleX
-            const srcY = (region.selectionY - region.cropY) * scaleY
-            const srcWidth = region.selectionWidth * scaleX
-            const srcHeight = region.selectionHeight * scaleY
+            const safeBlendPadding = Math.max(0, Math.round(blendPadding))
+            const extendLeft = Math.min(safeBlendPadding, region.selectionX - region.cropX)
+            const extendTop = Math.min(safeBlendPadding, region.selectionY - region.cropY)
+            const extendRight = Math.min(
+                safeBlendPadding,
+                region.cropX + region.cropWidth - (region.selectionX + region.selectionWidth)
+            )
+            const extendBottom = Math.min(
+                safeBlendPadding,
+                region.cropY + region.cropHeight - (region.selectionY + region.selectionHeight)
+            )
+            const pasteX = region.selectionX - extendLeft
+            const pasteY = region.selectionY - extendTop
+            const pasteWidth = region.selectionWidth + extendLeft + extendRight
+            const pasteHeight = region.selectionHeight + extendTop + extendBottom
+            const srcX = (pasteX - region.cropX) * scaleX
+            const srcY = (pasteY - region.cropY) * scaleY
+            const srcWidth = pasteWidth * scaleX
+            const srcHeight = pasteHeight * scaleY
 
-            // 仅贴回选区本体，避免 padding 区域污染周边内容
+            // 贴回选区并做少量外扩，减少边缘文字被裁切
             ctx.drawImage(
                 patchImage,
                 srcX,
                 srcY,
                 srcWidth,
                 srcHeight,
-                region.selectionX,
-                region.selectionY,
-                region.selectionWidth,
-                region.selectionHeight
+                pasteX,
+                pasteY,
+                pasteWidth,
+                pasteHeight
             )
 
             resolve(canvas.toDataURL('image/png'))
@@ -274,7 +336,8 @@ export function compositeImage(
 export async function compositeMultiplePatches(
     originalImage: HTMLImageElement,
     patches: Array<{ base64: string; selection: Selection }>,
-    padding: number = 10
+    padding: number = 10,
+    blendPadding: number = 0
 ): Promise<string> {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')!
@@ -298,22 +361,37 @@ export async function compositeMultiplePatches(
                 )
                 const scaleX = patchImage.width / region.cropWidth
                 const scaleY = patchImage.height / region.cropHeight
-                const srcX = (region.selectionX - region.cropX) * scaleX
-                const srcY = (region.selectionY - region.cropY) * scaleY
-                const srcWidth = region.selectionWidth * scaleX
-                const srcHeight = region.selectionHeight * scaleY
+                const safeBlendPadding = Math.max(0, Math.round(blendPadding))
+                const extendLeft = Math.min(safeBlendPadding, region.selectionX - region.cropX)
+                const extendTop = Math.min(safeBlendPadding, region.selectionY - region.cropY)
+                const extendRight = Math.min(
+                    safeBlendPadding,
+                    region.cropX + region.cropWidth - (region.selectionX + region.selectionWidth)
+                )
+                const extendBottom = Math.min(
+                    safeBlendPadding,
+                    region.cropY + region.cropHeight - (region.selectionY + region.selectionHeight)
+                )
+                const pasteX = region.selectionX - extendLeft
+                const pasteY = region.selectionY - extendTop
+                const pasteWidth = region.selectionWidth + extendLeft + extendRight
+                const pasteHeight = region.selectionHeight + extendTop + extendBottom
+                const srcX = (pasteX - region.cropX) * scaleX
+                const srcY = (pasteY - region.cropY) * scaleY
+                const srcWidth = pasteWidth * scaleX
+                const srcHeight = pasteHeight * scaleY
 
-                // 仅贴回选区本体，避免 padding 区域污染周边内容
+                // 贴回选区并做少量外扩，减少边缘文字被裁切
                 ctx.drawImage(
                     patchImage,
                     srcX,
                     srcY,
                     srcWidth,
                     srcHeight,
-                    region.selectionX,
-                    region.selectionY,
-                    region.selectionWidth,
-                    region.selectionHeight
+                    pasteX,
+                    pasteY,
+                    pasteWidth,
+                    pasteHeight
                 )
                 resolve()
             }
@@ -331,7 +409,8 @@ export async function compositeMultiplePatches(
 export function compositeSelectionsFromFullImage(
     originalImage: HTMLImageElement,
     fullResultBase64: string,
-    selections: Selection[]
+    selections: Selection[],
+    blendPadding: number = 0
 ): Promise<string> {
     return new Promise((resolve, reject) => {
         const canvas = document.createElement('canvas')
@@ -348,21 +427,26 @@ export function compositeSelectionsFromFullImage(
             const scaleY = resultImage.height / originalImage.height
 
             for (const selection of selections) {
-                const normalized = normalizeSelection(selection, originalImage.width, originalImage.height)
-                const srcX = normalized.x * scaleX
-                const srcY = normalized.y * scaleY
-                const srcWidth = normalized.width * scaleX
-                const srcHeight = normalized.height * scaleY
+                const region = getSelectionCropRegion(
+                    originalImage.width,
+                    originalImage.height,
+                    selection,
+                    blendPadding
+                )
+                const srcX = region.cropX * scaleX
+                const srcY = region.cropY * scaleY
+                const srcWidth = region.cropWidth * scaleX
+                const srcHeight = region.cropHeight * scaleY
                 ctx.drawImage(
                     resultImage,
                     srcX,
                     srcY,
                     srcWidth,
                     srcHeight,
-                    normalized.x,
-                    normalized.y,
-                    normalized.width,
-                    normalized.height
+                    region.cropX,
+                    region.cropY,
+                    region.cropWidth,
+                    region.cropHeight
                 )
             }
             resolve(canvas.toDataURL('image/png'))

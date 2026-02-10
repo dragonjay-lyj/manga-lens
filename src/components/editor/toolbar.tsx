@@ -24,7 +24,7 @@ import {
 } from "@/lib/ai/ai-service"
 import {
     loadImage,
-    cropSelection,
+    cropSelectionWithClearedArea,
     compositeMultiplePatches,
     downloadImage,
     downloadImagesAsZip,
@@ -71,7 +71,11 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
-    const PATCH_PADDING = 20
+    const PATCH_CONTEXT_PADDING = 24
+    const PATCH_BLEND_PADDING = 10
+    const PATCH_CLEAR_PADDING = 2
+    const MASK_CONTEXT_PADDING = 40
+    const MASK_BLEND_PADDING = 14
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
@@ -371,7 +375,13 @@ export function EditorToolbar() {
         const inputPatchBySelection = new Map(
             indexedSelections.map(({ selection }) => [
                 selection.id,
-                cropSelection(originalImg, selection, PATCH_PADDING),
+                cropSelectionWithClearedArea(
+                    originalImg,
+                    selection,
+                    PATCH_CONTEXT_PADDING,
+                    "#ffffff",
+                    PATCH_CLEAR_PADDING
+                ),
             ])
         )
 
@@ -401,7 +411,13 @@ export function EditorToolbar() {
                 }
 
                 const result = await runGenerateRequest(
-                    inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_PADDING),
+                    inputPatchBySelection.get(selection.id) || cropSelectionWithClearedArea(
+                        originalImg,
+                        selection,
+                        PATCH_CONTEXT_PADDING,
+                        "#ffffff",
+                        PATCH_CLEAR_PADDING
+                    ),
                     effectivePrompt
                 )
                 results.set(selection.id, result)
@@ -430,7 +446,13 @@ export function EditorToolbar() {
                 const requests = indexedSelections.map(({ selection }) => ({
                 imageId: selection.id,
                 request: {
-                    imageData: inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_PADDING),
+                    imageData: inputPatchBySelection.get(selection.id) || cropSelectionWithClearedArea(
+                        originalImg,
+                        selection,
+                        PATCH_CONTEXT_PADDING,
+                        "#ffffff",
+                        PATCH_CLEAR_PADDING
+                    ),
                     prompt: effectivePrompt,
                     config: settings,
                 },
@@ -542,7 +564,12 @@ export function EditorToolbar() {
             throw new Error(failures.slice(0, 3).join("\n"))
         }
 
-        return compositeMultiplePatches(originalImg, patches, PATCH_PADDING)
+        return compositeMultiplePatches(
+            originalImg,
+            patches,
+            PATCH_CONTEXT_PADDING,
+            PATCH_BLEND_PADDING
+        )
     }
 
     const processSelectionsMaskMode = async (
@@ -567,7 +594,7 @@ export function EditorToolbar() {
         }
 
         const inputImageData = sourceSelections.length
-            ? createMaskedImage(originalImg, sourceSelections, "#ffffff", PATCH_PADDING)
+            ? createMaskedImage(originalImg, sourceSelections, "#ffffff", MASK_CONTEXT_PADDING)
             : imageToDataUrl(originalImg)
 
         const result = await runGenerateRequest(inputImageData, effectivePrompt)
@@ -625,7 +652,12 @@ export function EditorToolbar() {
             return result.imageData
         }
 
-        return compositeSelectionsFromFullImage(originalImg, result.imageData, sourceSelections)
+        return compositeSelectionsFromFullImage(
+            originalImg,
+            result.imageData,
+            sourceSelections,
+            MASK_BLEND_PADDING
+        )
     }
 
     const processImage = async (
