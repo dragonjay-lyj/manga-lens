@@ -13,6 +13,7 @@ import { Separator } from "@/components/ui/separator"
 import { User, Key, BarChart3, Shield, CreditCard, Loader2, RefreshCw } from "lucide-react"
 import { AdminSkeleton } from "@/components/shared/skeleton-loaders"
 import Link from "next/link"
+import { SiteShell } from "@/components/shared/site-shell"
 
 interface UsageSummary {
     credits: number
@@ -99,14 +100,17 @@ export default function ProfilePage() {
 
     if (!isLoaded) {
         return (
-            <div className="container max-w-4xl py-8">
-                <AdminSkeleton />
-            </div>
+            <SiteShell contentClassName="max-w-4xl">
+                <div className="container max-w-4xl py-8">
+                    <AdminSkeleton />
+                </div>
+            </SiteShell>
         )
     }
 
     return (
-        <main id="main-content" className="container max-w-4xl py-8 space-y-6">
+        <SiteShell contentClassName="max-w-4xl">
+            <div className="container max-w-4xl py-8 space-y-6">
             {/* 页头 */}
             <div className="flex items-center gap-4">
                 <div className="relative w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center overflow-hidden">
@@ -320,6 +324,7 @@ export default function ProfilePage() {
                     </Card>
                 </TabsContent>
             </Tabs>
-        </main>
+            </div>
+        </SiteShell>
     )
 }

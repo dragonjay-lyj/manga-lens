@@ -35,7 +35,7 @@ import {
     Loader2,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
-import { detectTextBlocks, GEMINI_MODELS, OPENAI_MODELS } from "@/lib/ai/ai-service"
+import { detectTextBlocks, GEMINI_MODELS, OPENAI_MODELS, type DetectTextResponse } from "@/lib/ai/ai-service"
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -156,8 +156,50 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const models = settings.provider === "gemini" ? GEMINI_MODELS : OPENAI_MODELS
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
-    const canRunAutoDetect = Boolean(settings.apiKey)
+    const canRunAutoDetect = settings.useServerApi || Boolean(settings.apiKey)
     const detectedBlocks = currentImage?.detectedTextBlocks || []
+
+    const parseApiError = useCallback(async (res: Response, fallback: string) => {
+        const data = await res.json().catch(() => ({}))
+        return data?.error || `${fallback} (${res.status})`
+    }, [])
+
+    const runAutoDetect = useCallback(async (imageData: string): Promise<DetectTextResponse> => {
+        if (settings.useServerApi) {
+            const res = await fetch("/api/ai/detect-text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    targetLanguage: "简体中文",
+                }),
+            })
+
+            if (!res.ok) {
+                throw new Error(await parseApiError(
+                    res,
+                    locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+                ))
+            }
+
+            const data = await res.json()
+            return {
+                success: true,
+                blocks: data.blocks || [],
+            }
+        }
+
+        return detectTextBlocks({
+            imageData,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
+            targetLanguage: "简体中文",
+        })
+    }, [locale, parseApiError, settings.apiKey, settings.baseUrl, settings.model, settings.provider, settings.useServerApi])
 
     const handleAutoDetectText = useCallback(async () => {
         if (!currentImage) {
@@ -165,7 +207,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             return
         }
         if (!canRunAutoDetect) {
-            toast.error(locale === "zh" ? "自动检测需要填写 API Key" : "Auto-detection requires API key")
+            toast.error(
+                locale === "zh"
+                    ? "自动检测需要填写 API Key 或启用网站 API"
+                    : "Auto-detection requires API key or server API"
+            )
             return
         }
 
@@ -174,16 +220,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             const image = await loadImage(currentImage.originalUrl)
             const imageData = imageToDataUrl(image)
 
-            const result = await detectTextBlocks({
-                imageData,
-                config: {
-                    provider: settings.provider,
-                    apiKey: settings.apiKey,
-                    baseUrl: settings.baseUrl,
-                    model: settings.model,
-                },
-                targetLanguage: "简体中文",
-            })
+            const result = await runAutoDetect(imageData)
 
             if (!result.success) {
                 throw new Error(result.error || (locale === "zh" ? "自动识别失败" : "Auto detection failed"))
@@ -230,10 +267,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         currentImage,
         locale,
         setDetectedTextBlocks,
-        settings.apiKey,
-        settings.baseUrl,
-        settings.model,
-        settings.provider,
+        runAutoDetect,
         updateSelections,
     ])
 
@@ -395,7 +429,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                         </Button>
                         {!canRunAutoDetect && (
                             <p className="text-xs text-muted-foreground">
-                                {locale === "zh" ? "自动检测需要先填写 API Key" : "Auto-detection needs API key"}
+                                {locale === "zh"
+                                    ? "自动检测需要填写 API Key，或启用网站 API"
+                                    : "Auto-detection needs API key or server API"}
                             </p>
                         )}
 
@@ -492,6 +528,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                             {locale === "zh"
                                                 ? "每次生成消耗 10 Coins"
                                                 : "10 Coins per generation"}
+                                        </p>
+                                        <p className="text-muted-foreground/70">
+                                            {locale === "zh"
+                                                ? "网站 API 由管理员在 /admin/settings/ai 配置"
+                                                : "Server API is configured by admin at /admin/settings/ai"}
                                         </p>
                                         {coins < 10 && (
                                             <p className="text-destructive font-medium">

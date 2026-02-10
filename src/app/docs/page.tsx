@@ -10,16 +10,13 @@ import {
 import {
     BookOpen,
     Zap,
-    Image as ImageIcon,
     Wand2,
-    Download,
-    Settings,
     HelpCircle,
     ExternalLink,
     Keyboard,
-    MousePointer,
 } from "lucide-react"
 import Link from "next/link"
+import { SiteShell } from "@/components/shared/site-shell"
 
 const shortcuts = [
     { keys: ["Ctrl", "Z"], action: "撤销" },
@@ -63,20 +60,21 @@ const faqs = [
 
 export default function DocsPage() {
     return (
-        <div className="container max-w-4xl py-8 space-y-8">
-            {/* 页头 */}
-            <div className="text-center space-y-4">
-                <div className="w-16 h-16 mx-auto rounded-2xl bg-primary/10 flex items-center justify-center">
-                    <BookOpen className="h-8 w-8 text-primary" />
+        <SiteShell contentClassName="max-w-4xl">
+            <div className="container max-w-4xl py-8 space-y-8">
+                {/* 页头 */}
+                <div className="text-center space-y-4">
+                    <div className="w-16 h-16 mx-auto rounded-2xl bg-primary/10 flex items-center justify-center">
+                        <BookOpen className="h-8 w-8 text-primary" />
+                    </div>
+                    <h1 className="text-3xl font-bold">帮助文档</h1>
+                    <p className="text-muted-foreground max-w-lg mx-auto">
+                        了解如何使用 MangaLens 进行 AI 图像局部重绘
+                    </p>
                 </div>
-                <h1 className="text-3xl font-bold">帮助文档</h1>
-                <p className="text-muted-foreground max-w-lg mx-auto">
-                    了解如何使用 MangaLens 进行 AI 图像局部重绘
-                </p>
-            </div>
 
-            {/* 快速开始 */}
-            <Card>
+                {/* 快速开始 */}
+                <Card>
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                         <Zap className="h-5 w-5 text-primary" />
@@ -117,10 +115,10 @@ export default function DocsPage() {
                         </Button>
                     </div>
                 </CardContent>
-            </Card>
+                </Card>
 
-            {/* 键盘快捷键 */}
-            <Card>
+                {/* 键盘快捷键 */}
+                <Card>
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                         <Keyboard className="h-5 w-5 text-primary" />
@@ -150,10 +148,10 @@ export default function DocsPage() {
                         ))}
                     </div>
                 </CardContent>
-            </Card>
+                </Card>
 
-            {/* 常见问题 */}
-            <Card>
+                {/* 常见问题 */}
+                <Card>
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                         <HelpCircle className="h-5 w-5 text-primary" />
@@ -172,10 +170,10 @@ export default function DocsPage() {
                         ))}
                     </Accordion>
                 </CardContent>
-            </Card>
+                </Card>
 
-            {/* 外部链接 */}
-            <div className="grid gap-4 md:grid-cols-2">
+                {/* 外部链接 */}
+                <div className="grid gap-4 md:grid-cols-2">
                 <Card>
                     <CardHeader>
                         <CardTitle className="text-lg">API 文档</CardTitle>
@@ -204,7 +202,8 @@ export default function DocsPage() {
                         </Button>
                     </CardContent>
                 </Card>
+                </div>
             </div>
-        </div>
+        </SiteShell>
     )
 }

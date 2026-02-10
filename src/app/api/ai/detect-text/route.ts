@@ -1,0 +1,59 @@
+import { NextResponse } from "next/server"
+import { auth } from "@clerk/nextjs/server"
+import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
+import { detectTextBlocks } from "@/lib/ai/ai-service"
+import { getServerAiRuntimeConfig } from "@/lib/settings"
+
+type DetectBody = {
+    imageData?: string
+    targetLanguage?: string
+}
+
+export async function POST(request: Request) {
+    try {
+        const { userId } = await auth()
+        if (!userId) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+        }
+
+        await ensureUserRecord(userId)
+
+        const body = (await request.json()) as DetectBody
+        const imageData = body.imageData?.trim()
+        if (!imageData) {
+            return NextResponse.json({ error: "缺少 imageData" }, { status: 400 })
+        }
+
+        const runtime = await getServerAiRuntimeConfig()
+        if (!runtime.enabled) {
+            return NextResponse.json({ error: "网站 API 未启用，请联系管理员" }, { status: 503 })
+        }
+        if (!runtime.isReady) {
+            return NextResponse.json({ error: "网站 API 未完成配置，请联系管理员" }, { status: 503 })
+        }
+
+        const result = await detectTextBlocks({
+            imageData,
+            config: runtime.config,
+            targetLanguage: body.targetLanguage || "简体中文",
+        })
+
+        if (!result.success) {
+            return NextResponse.json(
+                { error: result.error || "网站 API 文本检测失败", blocks: [] },
+                { status: 502 }
+            )
+        }
+
+        return NextResponse.json({
+            success: true,
+            blocks: result.blocks,
+            provider: runtime.provider,
+            model: runtime.config.model,
+        })
+    } catch (error) {
+        console.error("Server AI detect-text error:", error)
+        return NextResponse.json({ error: "文本检测失败" }, { status: 500 })
+    }
+}
+

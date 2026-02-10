@@ -23,14 +23,15 @@ import {
 } from "@/components/ui/select"
 import {
     Settings,
-    Globe,
     Palette,
-    Bell,
     Shield,
     Database,
     Save,
+    Bot,
+    CreditCard,
 } from "lucide-react"
 import { toast } from "sonner"
+import Link from "next/link"
 
 export default function SettingsPage() {
     const [settings, setSettings] = useState({
@@ -64,6 +65,29 @@ export default function SettingsPage() {
                     保存设置
                 </Button>
             </div>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle>关键配置入口</CardTitle>
+                    <CardDescription>
+                        付费用户“使用网站 API”模式需要先完成网站 AI 配置
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-3 md:grid-cols-2">
+                    <Button variant="outline" className="h-11 justify-start" asChild>
+                        <Link href="/admin/settings/ai">
+                            <Bot className="mr-2 h-4 w-4" />
+                            网站 AI 设置（给付费用户）
+                        </Link>
+                    </Button>
+                    <Button variant="outline" className="h-11 justify-start" asChild>
+                        <Link href="/admin/settings/payment">
+                            <CreditCard className="mr-2 h-4 w-4" />
+                            支付设置（充值通道）
+                        </Link>
+                    </Button>
+                </CardContent>
+            </Card>
 
             <Tabs defaultValue="general" className="space-y-4">
                 <TabsList>

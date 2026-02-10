@@ -1,7 +1,8 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import { Code, FileJson, Key, Zap, Shield, ArrowRight } from "lucide-react"
+import { Code, FileJson, Key, Zap, Shield } from "lucide-react"
+import { SiteShell } from "@/components/shared/site-shell"
 
 const endpoints = [
     {
@@ -92,23 +93,24 @@ const codeExamples = {
 
 export default function ApiDocsPage() {
     return (
-        <div className="container max-w-4xl py-8 space-y-8">
-            {/* 页头 */}
-            <div className="space-y-2">
-                <Badge variant="secondary" className="mb-2">
-                    <Code className="h-3 w-3 mr-1" />
-                    开发者文档
-                </Badge>
-                <h1 className="text-4xl font-bold tracking-tight">API 文档</h1>
-                <p className="text-lg text-muted-foreground">
-                    MangaLens API 接口说明和使用示例
-                </p>
-            </div>
+        <SiteShell contentClassName="max-w-4xl">
+            <div className="container max-w-4xl py-8 space-y-8">
+                {/* 页头 */}
+                <div className="space-y-2">
+                    <Badge variant="secondary" className="mb-2">
+                        <Code className="h-3 w-3 mr-1" />
+                        开发者文档
+                    </Badge>
+                    <h1 className="text-4xl font-bold tracking-tight">API 文档</h1>
+                    <p className="text-lg text-muted-foreground">
+                        MangaLens API 接口说明和使用示例
+                    </p>
+                </div>
 
-            <Separator />
+                <Separator />
 
-            {/* 认证说明 */}
-            <Card>
+                {/* 认证说明 */}
+                <Card>
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                         <Shield className="h-5 w-5" />
@@ -128,10 +130,10 @@ export default function ApiDocsPage() {
                         <p>Authorization: Bearer {'<your-session-token>'}</p>
                     </div>
                 </CardContent>
-            </Card>
+                </Card>
 
-            {/* API 端点列表 */}
-            <div className="space-y-4">
+                {/* API 端点列表 */}
+                <div className="space-y-4">
                 <h2 className="text-2xl font-bold flex items-center gap-2">
                     <Zap className="h-5 w-5" />
                     API 端点
@@ -195,10 +197,10 @@ export default function ApiDocsPage() {
                         </CardContent>
                     </Card>
                 ))}
-            </div>
+                </div>
 
-            {/* 代码示例 */}
-            <div className="space-y-4">
+                {/* 代码示例 */}
+                <div className="space-y-4">
                 <h2 className="text-2xl font-bold flex items-center gap-2">
                     <FileJson className="h-5 w-5" />
                     代码示例
@@ -225,10 +227,10 @@ export default function ApiDocsPage() {
                         </pre>
                     </CardContent>
                 </Card>
-            </div>
+                </div>
 
-            {/* 错误处理 */}
-            <Card>
+                {/* 错误处理 */}
+                <Card>
                 <CardHeader>
                     <CardTitle>错误响应</CardTitle>
                     <CardDescription>API 错误返回格式</CardDescription>
@@ -245,7 +247,8 @@ export default function ApiDocsPage() {
                         <p><Badge variant="destructive">500</Badge> 服务器内部错误</p>
                     </div>
                 </CardContent>
-            </Card>
-        </div>
+                </Card>
+            </div>
+        </SiteShell>
     )
 }

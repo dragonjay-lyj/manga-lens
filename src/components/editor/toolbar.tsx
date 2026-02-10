@@ -18,7 +18,9 @@ import {
     buildMangaEditPrompt,
     detectTextBlocks,
     generateImage,
+    type DetectTextResponse,
     type DetectedTextBlock,
+    type GenerateImageResponse,
 } from "@/lib/ai/ai-service"
 import {
     loadImage,
@@ -73,6 +75,99 @@ export function EditorToolbar() {
     const useMaskMode = settings.useMaskMode ?? true
     const enablePretranslate = settings.enablePretranslate ?? false
 
+    const parseApiError = async (res: Response, fallback: string) => {
+        const data = await res.json().catch(() => ({}))
+        return data?.error || `${fallback} (${res.status})`
+    }
+
+    const runGenerateRequest = async (imageData: string, promptText: string): Promise<GenerateImageResponse> => {
+        if (!settings.useServerApi) {
+            return generateImage({
+                imageData,
+                prompt: promptText,
+                config: settings,
+            })
+        }
+
+        try {
+            const res = await fetch("/api/ai/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    prompt: promptText,
+                }),
+            })
+
+            if (!res.ok) {
+                return {
+                    success: false,
+                    error: await parseApiError(res, locale === "zh" ? "网站 API 请求失败" : "Server API request failed"),
+                }
+            }
+
+            const data = await res.json()
+            return {
+                success: true,
+                imageData: data.imageData,
+            }
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : (locale === "zh" ? "网站 API 请求失败" : "Server API request failed"),
+            }
+        }
+    }
+
+    const runDetectTextRequest = async (
+        imageData: string,
+        targetLanguage: string
+    ): Promise<DetectTextResponse> => {
+        if (!settings.useServerApi) {
+            return detectTextBlocks({
+                imageData,
+                config: {
+                    provider: settings.provider,
+                    apiKey: settings.apiKey,
+                    baseUrl: settings.baseUrl,
+                    model: settings.model,
+                },
+                targetLanguage,
+            })
+        }
+
+        try {
+            const res = await fetch("/api/ai/detect-text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    targetLanguage,
+                }),
+            })
+
+            if (!res.ok) {
+                return {
+                    success: false,
+                    blocks: [],
+                    error: await parseApiError(res, locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"),
+                }
+            }
+
+            const data = await res.json()
+            return {
+                success: true,
+                blocks: data.blocks || [],
+            }
+        } catch (error) {
+            return {
+                success: false,
+                blocks: [],
+                error: error instanceof Error ? error.message : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"),
+            }
+        }
+    }
+
     const getShortError = (errorText: string) =>
         errorText.length > 240 ? `${errorText.slice(0, 240)}...` : errorText
 
@@ -95,7 +190,7 @@ export function EditorToolbar() {
         updateToolbarProgress: boolean,
         showFailureToast: boolean
     ) => {
-        if (!enablePretranslate || !settings.apiKey) {
+        if (!enablePretranslate || (!settings.useServerApi && !settings.apiKey)) {
             return basePrompt
         }
 
@@ -103,16 +198,10 @@ export function EditorToolbar() {
             setProgressDetail(locale === "zh" ? "视觉模型预翻译中..." : "Running vision pre-translation...")
         }
 
-        const detectResult = await detectTextBlocks({
-            imageData: imageToDataUrl(originalImg),
-            config: {
-                provider: settings.provider,
-                apiKey: settings.apiKey,
-                baseUrl: settings.baseUrl,
-                model: settings.model,
-            },
-            targetLanguage: "简体中文",
-        })
+        const detectResult = await runDetectTextRequest(
+            imageToDataUrl(originalImg),
+            "简体中文"
+        )
 
         if (!detectResult.success) {
             if (showFailureToast) {
@@ -192,14 +281,6 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
-        const requests = indexedSelections.map(({ selection }) => ({
-            imageId: selection.id,
-            request: {
-                imageData: cropSelection(originalImg, selection, PATCH_PADDING),
-                prompt: effectivePrompt,
-                config: settings,
-            },
-        }))
 
         const total = selections.length
         if (updateToolbarProgress) {
@@ -208,43 +289,101 @@ export function EditorToolbar() {
             setProgressDetail(locale === "zh" ? `准备处理 ${total} 个选区...` : `Preparing ${total} selections...`)
         }
 
-        const results = await batchGenerateImages(requests, {
-            isSerial: settings.isSerial,
-            concurrency: settings.isSerial ? 1 : Math.max(1, settings.concurrency || 1),
-            maxRetries: 2,
-            onItemStart: (selectionId, completed, totalCount) => {
+        const results = new Map<string, GenerateImageResponse>()
+        if (settings.useServerApi) {
+            for (let completed = 0; completed < indexedSelections.length; completed++) {
+                const { selection } = indexedSelections[completed]
                 if (trackSelectionProgress) {
-                    setSelectionProgress(imageId, selectionId, "processing")
+                    setSelectionProgress(imageId, selection.id, "processing")
                 }
                 if (updateToolbarProgress) {
-                    const selectionNo = selectionIndexMap.get(selectionId) ?? 0
-                    setProgress((completed / totalCount) * 100)
-                    setProgressText(`${completed}/${totalCount}`)
+                    const selectionNo = selectionIndexMap.get(selection.id) ?? 0
+                    setProgress((completed / total) * 100)
+                    setProgressText(`${completed}/${total}`)
                     setProgressDetail(
                         locale === "zh"
-                            ? `正在处理选区 #${selectionNo}/${totalCount}`
-                            : `Processing selection #${selectionNo}/${totalCount}`
+                            ? `正在处理选区 #${selectionNo}/${total}`
+                            : `Processing selection #${selectionNo}/${total}`
                     )
                 }
-            },
-            onProgress: (completed, totalCount, selectionId) => {
+
+                const result = await runGenerateRequest(
+                    cropSelection(originalImg, selection, PATCH_PADDING),
+                    effectivePrompt
+                )
+                results.set(selection.id, result)
+
                 if (updateToolbarProgress) {
-                    const selectionNo = selectionIndexMap.get(selectionId) ?? 0
-                    setProgress((completed / totalCount) * 100)
-                    setProgressText(`${completed}/${totalCount}`)
+                    const selectionNo = selectionIndexMap.get(selection.id) ?? 0
+                    setProgress(((completed + 1) / total) * 100)
+                    setProgressText(`${completed + 1}/${total}`)
                     setProgressDetail(
                         locale === "zh"
-                            ? `已完成选区 #${selectionNo}（${completed}/${totalCount}）`
-                            : `Completed selection #${selectionNo} (${completed}/${totalCount})`
+                            ? `已完成选区 #${selectionNo}（${completed + 1}/${total}）`
+                            : `Completed selection #${selectionNo} (${completed + 1}/${total})`
                     )
                 }
-            },
-            onError: (selectionId, error) => {
-                if (trackSelectionProgress) {
-                    setSelectionProgress(imageId, selectionId, "failed", error)
+
+                if (!result.success && trackSelectionProgress) {
+                    setSelectionProgress(
+                        imageId,
+                        selection.id,
+                        "failed",
+                        result.error || (locale === "zh" ? "生成失败" : "Generation failed")
+                    )
                 }
-            },
-        })
+            }
+        } else {
+            const requests = indexedSelections.map(({ selection }) => ({
+                imageId: selection.id,
+                request: {
+                    imageData: cropSelection(originalImg, selection, PATCH_PADDING),
+                    prompt: effectivePrompt,
+                    config: settings,
+                },
+            }))
+            const batchResults = await batchGenerateImages(requests, {
+                isSerial: settings.isSerial,
+                concurrency: settings.isSerial ? 1 : Math.max(1, settings.concurrency || 1),
+                maxRetries: 2,
+                onItemStart: (selectionId, completed, totalCount) => {
+                    if (trackSelectionProgress) {
+                        setSelectionProgress(imageId, selectionId, "processing")
+                    }
+                    if (updateToolbarProgress) {
+                        const selectionNo = selectionIndexMap.get(selectionId) ?? 0
+                        setProgress((completed / totalCount) * 100)
+                        setProgressText(`${completed}/${totalCount}`)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `正在处理选区 #${selectionNo}/${totalCount}`
+                                : `Processing selection #${selectionNo}/${totalCount}`
+                        )
+                    }
+                },
+                onProgress: (completed, totalCount, selectionId) => {
+                    if (updateToolbarProgress) {
+                        const selectionNo = selectionIndexMap.get(selectionId) ?? 0
+                        setProgress((completed / totalCount) * 100)
+                        setProgressText(`${completed}/${totalCount}`)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `已完成选区 #${selectionNo}（${completed}/${totalCount}）`
+                                : `Completed selection #${selectionNo} (${completed}/${totalCount})`
+                        )
+                    }
+                },
+                onError: (selectionId, error) => {
+                    if (trackSelectionProgress) {
+                        setSelectionProgress(imageId, selectionId, "failed", error)
+                    }
+                },
+            })
+
+            batchResults.forEach((value, key) => {
+                results.set(key, value)
+            })
+        }
 
         const patches: Array<{ base64: string; selection: Selection }> = []
         const failures: string[] = []
@@ -302,11 +441,7 @@ export function EditorToolbar() {
             ? createMaskedImage(originalImg, sourceSelections)
             : imageToDataUrl(originalImg)
 
-        const result = await generateImage({
-            imageData: inputImageData,
-            prompt: effectivePrompt,
-            config: settings,
-        })
+        const result = await runGenerateRequest(inputImageData, effectivePrompt)
 
         if (!result.success || !result.imageData) {
             if (trackSelectionProgress) {
@@ -505,6 +640,21 @@ export function EditorToolbar() {
         const templateSelections = applyToAll
             ? (currentImage?.selections || images.find((img) => img.selections?.length)?.selections || [])
             : []
+
+        if (settings.useServerApi) {
+            const COST_PER_GENERATION = 10
+            const totalUnits = imagesToProcess.reduce((acc, img) => {
+                const selections = applyToAll ? templateSelections : (img.selections || [])
+                const units = useMaskMode ? 1 : Math.max(1, selections.length || 0)
+                return acc + units
+            }, 0)
+            const totalCost = COST_PER_GENERATION * Math.max(1, totalUnits)
+            const deducted = await deductCoins(totalCost)
+            if (!deducted) {
+                return
+            }
+            toast.info(`已扣除 ${totalCost} Coins`)
+        }
 
         setProcessing(true)
         setProgress(0)

@@ -95,7 +95,12 @@ INSERT INTO system_settings (key, value, description, is_encrypted) VALUES
     ('linuxdo_credit_key', '', 'LINUX DO Credit Client Secret', true),
     ('linuxdo_credit_notify_url', '', 'LINUX DO Credit 回调地址', false),
     ('linuxdo_credit_return_url', '', 'LINUX DO Credit 返回地址', false),
-    ('linuxdo_credit_enabled', 'false', '是否启用 LINUX DO Credit 支付', false)
+    ('linuxdo_credit_enabled', 'false', '是否启用 LINUX DO Credit 支付', false),
+    ('server_api_enabled', 'false', '是否启用网站统一 AI API', false),
+    ('server_api_provider', 'gemini', '网站统一 AI Provider（gemini/openai）', false),
+    ('server_api_key', '', '网站统一 AI API Key', true),
+    ('server_api_base_url', 'https://api.openai.com/v1', '网站统一 OpenAI 兼容接口 Base URL', false),
+    ('server_api_model', 'gemini-2.5-flash-image', '网站统一 AI 默认模型', false)
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================

@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js"
+import type { AIProvider } from "@/types/database"
 
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -41,6 +42,36 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
         key: "linuxdo_credit_enabled",
         value: "false",
         description: "是否启用 LINUX DO Credit 支付",
+        is_encrypted: false,
+    },
+    {
+        key: "server_api_enabled",
+        value: "false",
+        description: "是否启用网站统一 AI API",
+        is_encrypted: false,
+    },
+    {
+        key: "server_api_provider",
+        value: "gemini",
+        description: "网站统一 AI Provider（gemini/openai）",
+        is_encrypted: false,
+    },
+    {
+        key: "server_api_key",
+        value: "",
+        description: "网站统一 AI API Key",
+        is_encrypted: true,
+    },
+    {
+        key: "server_api_base_url",
+        value: "https://api.openai.com/v1",
+        description: "网站统一 OpenAI 兼容接口 Base URL",
+        is_encrypted: false,
+    },
+    {
+        key: "server_api_model",
+        value: "gemini-2.5-flash-image",
+        description: "网站统一 AI 默认模型",
         is_encrypted: false,
     },
 ]
@@ -136,5 +167,47 @@ export async function getLinuxdoPaymentConfigStatus(): Promise<LinuxdoPaymentCon
         notifyUrlConfigured,
         returnUrlConfigured,
         isReady: enabled && pidConfigured && keyConfigured,
+    }
+}
+
+export type ServerAiRuntimeConfig = {
+    enabled: boolean
+    isReady: boolean
+    provider: AIProvider
+    config: {
+        provider: AIProvider
+        apiKey: string
+        baseUrl?: string
+        model: string
+    }
+}
+
+export async function getServerAiRuntimeConfig(): Promise<ServerAiRuntimeConfig> {
+    const settings = await getSystemSettings([
+        "server_api_enabled",
+        "server_api_provider",
+        "server_api_key",
+        "server_api_base_url",
+        "server_api_model",
+    ])
+
+    const provider: AIProvider = settings.server_api_provider === "openai" ? "openai" : "gemini"
+    const apiKey = settings.server_api_key || ""
+    const model = settings.server_api_model || (provider === "openai" ? "gpt-4o" : "gemini-2.5-flash-image")
+    const enabled = settings.server_api_enabled === "true"
+    const config = {
+        provider,
+        apiKey,
+        model,
+        baseUrl: provider === "openai"
+            ? (settings.server_api_base_url || "https://api.openai.com/v1")
+            : undefined,
+    }
+
+    return {
+        enabled,
+        isReady: enabled && Boolean(apiKey),
+        provider,
+        config,
     }
 }
