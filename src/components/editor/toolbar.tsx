@@ -77,8 +77,8 @@ export function EditorToolbar() {
     const MASK_CONTEXT_PADDING = 40
     const MASK_BLEND_PADDING = 2
     const PATCH_DIFF_RETRY_THRESHOLD = 0.014
-    const useMaskMode = settings.useMaskMode ?? true
-    const enablePretranslate = settings.enablePretranslate ?? false
+    const useMaskMode = false
+    const enablePretranslate = false
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
     const FOUR_K_LONG_EDGE = 3840
 
@@ -363,6 +363,9 @@ export function EditorToolbar() {
         showFailureToast: boolean,
         existingDetectedBlocks: DetectedTextBlock[] = []
     ): Promise<PretranslatePromptResult> => {
+        if (!enablePretranslate) {
+            return { prompt: basePrompt }
+        }
         const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
         let allBlocks: DetectedTextBlock[] = existingDetectedBlocks
 
@@ -1208,3 +1211,4 @@ export function EditorToolbar() {
         </div>
     )
 }
+

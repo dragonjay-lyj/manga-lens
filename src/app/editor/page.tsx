@@ -32,7 +32,6 @@ export default function EditorPage() {
     const navigationItems = [
         { href: "/projects", zh: "项目", en: "Projects" },
         { href: "/profile", zh: "个人中心", en: "Profile" },
-        { href: "/pricing", zh: "定价", en: "Pricing" },
         { href: "/docs", zh: "文档", en: "Docs" },
         { href: "/api-docs", zh: "API 文档", en: "API Docs" },
         { href: "/admin", zh: "管理后台", en: "Admin" },

@@ -24,6 +24,14 @@ import {
     CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from "@/components/ui/dialog"
+import {
     File,
     FolderOpen,
     Clipboard,
@@ -39,6 +47,7 @@ import { detectTextBlocks, GEMINI_MODELS, OPENAI_MODELS, type DetectTextResponse
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { RechargePanel } from "@/components/profile/recharge-panel"
 
 interface EditorSidebarProps {
     className?: string
@@ -48,6 +57,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
+    const [rechargeDialogOpen, setRechargeDialogOpen] = useState(false)
 
     const {
         images,
@@ -91,23 +101,24 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     }, [settings.provider, settings.model, updateSettings])
 
     // 获取 Coin 余额
-    useEffect(() => {
-        const fetchCoins = async () => {
-            setCoinsLoading(true)
-            try {
-                const res = await fetch("/api/user/coins")
-                if (res.ok) {
-                    const data = await res.json()
-                    setCoins(data.coins || 0)
-                }
-            } catch (error) {
-                console.error("Failed to fetch coins:", error)
-            } finally {
-                setCoinsLoading(false)
+    const refreshCoins = useCallback(async () => {
+        setCoinsLoading(true)
+        try {
+            const res = await fetch("/api/user/coins")
+            if (res.ok) {
+                const data = await res.json()
+                setCoins(data.coins || 0)
             }
+        } catch (error) {
+            console.error("Failed to fetch coins:", error)
+        } finally {
+            setCoinsLoading(false)
         }
-        fetchCoins()
     }, [setCoins, setCoinsLoading])
+
+    useEffect(() => {
+        void refreshCoins()
+    }, [refreshCoins])
 
     // 处理文件上传
     const handleFileUpload = useCallback((files: FileList | null) => {
@@ -155,8 +166,6 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     // }, [handleFileUpload])
 
     const models = settings.provider === "gemini" ? GEMINI_MODELS : OPENAI_MODELS
-    const useMaskMode = settings.useMaskMode ?? true
-    const enablePretranslate = settings.enablePretranslate ?? false
     const canRunAutoDetect = settings.useServerApi || Boolean(settings.apiKey)
     const detectedBlocks = currentImage?.detectedTextBlocks || []
 
@@ -606,6 +615,33 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                 {locale === "zh" ? "余额不足，请充值" : "Insufficient balance"}
                                             </p>
                                         )}
+
+                                        <Dialog open={rechargeDialogOpen} onOpenChange={setRechargeDialogOpen}>
+                                            <DialogTrigger asChild>
+                                                <Button type="button" size="sm" variant="outline" className="w-full mt-2">
+                                                    {locale === "zh" ? "充值 Coins" : "Recharge Coins"}
+                                                </Button>
+                                            </DialogTrigger>
+                                            <DialogContent className="sm:max-w-xl max-h-[85vh] overflow-y-auto">
+                                                <DialogHeader>
+                                                    <DialogTitle>
+                                                        {locale === "zh" ? "充值 Coins" : "Recharge Coins"}
+                                                    </DialogTitle>
+                                                    <DialogDescription>
+                                                        {locale === "zh"
+                                                            ? "充值后可继续使用网站 API 进行翻译生成。"
+                                                            : "Recharge to continue using the server API for generation."}
+                                                    </DialogDescription>
+                                                </DialogHeader>
+                                                <RechargePanel
+                                                    embedded
+                                                    onPaid={() => {
+                                                        void refreshCoins()
+                                                        setRechargeDialogOpen(false)
+                                                    }}
+                                                />
+                                            </DialogContent>
+                                        </Dialog>
                                     </div>
                                 )}
                             </div>
@@ -633,40 +669,6 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     {locale === "zh"
                                         ? "4K 能降低文字边缘发糊，但生成更慢、成本更高；仅 Gemini 图像模型生效。"
                                         : "4K helps text sharpness but costs more and runs slower; applies to Gemini image models."}
-                                </p>
-                            </div>
-
-                            <div className="space-y-3 p-3 rounded-lg bg-muted/50">
-                                <div className="flex items-center justify-between">
-                                    <Label htmlFor="use-mask-mode" className="text-sm cursor-pointer">
-                                        {locale === "zh" ? "全图遮罩模式（推荐）" : "Full-image mask mode (recommended)"}
-                                    </Label>
-                                    <Switch
-                                        id="use-mask-mode"
-                                        checked={useMaskMode}
-                                        onCheckedChange={(checked) => updateSettings({ useMaskMode: checked })}
-                                    />
-                                </div>
-                                <p className="text-xs text-muted-foreground">
-                                    {locale === "zh"
-                                        ? "只保留选区内容，整图一次请求，减少调用次数并保留布局上下文。"
-                                        : "Keep selected areas only and send once for better context with fewer calls."}
-                                </p>
-
-                                <div className="flex items-center justify-between pt-2 border-t border-border/50">
-                                    <Label htmlFor="enable-pretranslate" className="text-sm cursor-pointer">
-                                        {locale === "zh" ? "预翻译（视觉模型）" : "Pre-translate with vision model"}
-                                    </Label>
-                                    <Switch
-                                        id="enable-pretranslate"
-                                        checked={enablePretranslate}
-                                        onCheckedChange={(checked) => updateSettings({ enablePretranslate: checked })}
-                                    />
-                                </div>
-                                <p className="text-xs text-muted-foreground">
-                                    {locale === "zh"
-                                        ? "生成前先识别文字与位置并翻译为中文，再作为上下文增强重绘。"
-                                        : "Run OCR+translation before generation and inject it as layout-aware context."}
                                 </p>
                             </div>
 
@@ -845,3 +847,4 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         </div>
     )
 }
+

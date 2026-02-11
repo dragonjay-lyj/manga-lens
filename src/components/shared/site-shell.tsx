@@ -21,7 +21,6 @@ import {
 import { cn } from "@/lib/utils"
 
 const publicLinks = [
-    { href: "/pricing", zh: "定价", en: "Pricing" },
     { href: "/docs", zh: "文档", en: "Docs" },
     { href: "/api-docs", zh: "API 文档", en: "API Docs" },
 ]
