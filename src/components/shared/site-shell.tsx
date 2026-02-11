@@ -2,9 +2,7 @@
 
 import Link from "next/link"
 import { type ReactNode } from "react"
-import { useAuth, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs"
-import { Sparkles, Menu } from "lucide-react"
-import { useEditorStore } from "@/lib/stores/editor-store"
+import { Menu, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { IconButton } from "@/components/ui/icon-button"
 import { ThemeSwitcher } from "@/components/shared/theme-switcher"
@@ -18,17 +16,15 @@ import {
     SheetTitle,
     SheetTrigger,
 } from "@/components/ui/sheet"
+import { useEditorStore } from "@/lib/stores/editor-store"
 import { cn } from "@/lib/utils"
 
-const publicLinks = [
-    { href: "/docs", zh: "文档", en: "Docs" },
-    { href: "/api-docs", zh: "API 文档", en: "API Docs" },
-]
-
-const signedOnlyLinks = [
-    { href: "/projects", zh: "项目", en: "Projects" },
-    { href: "/profile", zh: "个人中心", en: "Profile" },
-    { href: "/admin", zh: "管理后台", en: "Admin" },
+const navLinks = [
+    { href: "/docs", zh: "文档", en: "Docs", prefetch: false },
+    { href: "/api-docs", zh: "API 文档", en: "API Docs", prefetch: false },
+    { href: "/projects", zh: "项目", en: "Projects", prefetch: false },
+    { href: "/profile", zh: "个人中心", en: "Profile", prefetch: false },
+    { href: "/admin", zh: "管理后台", en: "Admin", prefetch: false },
 ]
 
 type SiteShellProps = {
@@ -37,32 +33,30 @@ type SiteShellProps = {
 }
 
 export function SiteShell({ children, contentClassName }: SiteShellProps) {
-    const { isSignedIn } = useAuth()
     const { locale, setLocale } = useEditorStore()
-    const navLinks = isSignedIn ? [...publicLinks, ...signedOnlyLinks] : publicLinks
 
     return (
-        <div className="min-h-screen bg-background relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-                <div className="absolute top-20 -left-40 w-80 h-80 bg-primary/10 rounded-full blur-3xl" />
-                <div className="absolute bottom-20 -right-40 w-80 h-80 bg-accent/10 rounded-full blur-3xl" />
+        <div className="relative min-h-screen overflow-hidden bg-background">
+            <div className="pointer-events-none absolute left-0 top-0 hidden h-full w-full md:block">
+                <div className="absolute -left-40 top-20 h-80 w-80 rounded-full bg-primary/10 blur-3xl" />
+                <div className="absolute -right-40 bottom-20 h-80 w-80 rounded-full bg-accent/10 blur-3xl" />
             </div>
 
-            <header className="fixed top-4 left-4 right-4 z-50">
-                <nav className="max-w-7xl mx-auto glass-card bg-card/95 rounded-2xl px-4 sm:px-6 py-3 flex items-center justify-between gap-2">
+            <header className="fixed left-4 right-4 top-4 z-50">
+                <nav className="mx-auto flex max-w-7xl items-center justify-between gap-2 rounded-2xl border border-border/70 bg-card/95 px-4 py-3">
                     <Link href="/" className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-lg gradient-primary flex items-center justify-center">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary">
                             <Sparkles className="h-5 w-5 text-white" />
                         </div>
-                        <span className="font-display font-bold text-lg hidden sm:block">
-                            MangaLens
-                        </span>
+                        <span className="hidden font-display text-lg font-bold sm:block">MangaLens</span>
                     </Link>
 
-                    <div className="hidden lg:flex items-center gap-1">
+                    <div className="hidden items-center gap-1 lg:flex">
                         {navLinks.map((item) => (
                             <Button key={item.href} variant="ghost" size="sm" className="h-9 px-3" asChild>
-                                <Link href={item.href}>{locale === "zh" ? item.zh : item.en}</Link>
+                                <Link href={item.href} prefetch={item.prefetch}>
+                                    {locale === "zh" ? item.zh : item.en}
+                                </Link>
                             </Button>
                         ))}
                     </div>
@@ -85,12 +79,13 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
                                         {locale === "zh" ? "快速访问网站主要页面" : "Quick access to main pages"}
                                     </SheetDescription>
                                 </SheetHeader>
-                                <div className="p-4 space-y-2">
+                                <div className="space-y-2 p-4">
                                     {navLinks.map((item) => (
                                         <SheetClose asChild key={item.href}>
                                             <Link
                                                 href={item.href}
-                                                className="flex items-center h-11 rounded-md border border-border px-3 text-sm hover:bg-muted transition-colors"
+                                                prefetch={item.prefetch}
+                                                className="flex h-11 items-center rounded-md border border-border px-3 text-sm transition-colors hover:bg-muted"
                                             >
                                                 {locale === "zh" ? item.zh : item.en}
                                             </Link>
@@ -107,38 +102,23 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
                             <LanguageSwitcher locale={locale} onChange={setLocale} />
                         </div>
 
-                        {isSignedIn ? (
-                            <>
-                                <Button asChild>
-                                    <Link href="/editor">{locale === "zh" ? "进入编辑器" : "Open Editor"}</Link>
-                                </Button>
-                                <UserButton afterSignOutUrl="/" />
-                            </>
-                        ) : (
-                            <>
-                                <SignInButton mode="modal">
-                                    <Button variant="ghost" className="hidden sm:inline-flex">
-                                        {locale === "zh" ? "登录" : "Sign In"}
-                                    </Button>
-                                </SignInButton>
-                                <SignUpButton mode="modal">
-                                    <Button variant="secondary" className="hidden sm:inline-flex">
-                                        {locale === "zh" ? "注册" : "Sign Up"}
-                                    </Button>
-                                </SignUpButton>
-                                <Button asChild>
-                                    <Link href="/editor">{locale === "zh" ? "免费开始" : "Start Free"}</Link>
-                                </Button>
-                            </>
-                        )}
+                        <Button variant="outline" size="sm" asChild>
+                            <Link href="/sign-in" prefetch={false}>
+                                {locale === "zh" ? "登录" : "Sign In"}
+                            </Link>
+                        </Button>
+                        <Button size="sm" asChild>
+                            <Link href="/editor" prefetch={false}>
+                                {locale === "zh" ? "进入编辑器" : "Open Editor"}
+                            </Link>
+                        </Button>
                     </div>
                 </nav>
             </header>
 
-            <main id="main-content" className="pt-28 pb-10 px-4">
-                <div className={cn("w-full mx-auto", contentClassName)}>{children}</div>
+            <main id="main-content" className="px-4 pb-10 pt-28">
+                <div className={cn("mx-auto w-full", contentClassName)}>{children}</div>
             </main>
         </div>
     )
 }
-

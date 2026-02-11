@@ -1,17 +1,19 @@
 import type { Metadata } from "next"
 import { Inter, Plus_Jakarta_Sans } from "next/font/google"
-import { ClerkProvider } from "@clerk/nextjs"
 import { ThemeProvider } from "@/components/providers/theme-provider"
 import "./globals.css"
 
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
+  display: "swap",
 })
 
 const plusJakartaSans = Plus_Jakarta_Sans({
   subsets: ["latin"],
   variable: "--font-plus-jakarta-sans",
+  display: "swap",
+  preload: false,
 })
 
 export const metadata: Metadata = {
@@ -66,24 +68,22 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <ClerkProvider>
-      <html lang="zh-CN" suppressHydrationWarning>
-        <body className={`${inter.variable} ${plusJakartaSans.variable} antialiased`}>
-          <ThemeProvider
-            attribute="data-theme"
-            defaultTheme="dark"
-            enableSystem
-            disableTransitionOnChange={false}
-          >
-            <a href="#page-root" className="skip-link">
-              跳到主内容 / Skip to main content
-            </a>
-            <div id="page-root" tabIndex={-1}>
-              {children}
-            </div>
-          </ThemeProvider>
-        </body>
-      </html>
-    </ClerkProvider>
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body className={`${inter.variable} ${plusJakartaSans.variable} antialiased`}>
+        <ThemeProvider
+          attribute="data-theme"
+          defaultTheme="dark"
+          enableSystem
+          disableTransitionOnChange={false}
+        >
+          <a href="#page-root" className="skip-link">
+            跳到主内容 / Skip to main content
+          </a>
+          <div id="page-root" tabIndex={-1}>
+            {children}
+          </div>
+        </ThemeProvider>
+      </body>
+    </html>
   )
 }
