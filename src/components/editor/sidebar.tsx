@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/dialog"
 import {
     File,
+    FileJson,
     FolderOpen,
     Clipboard,
     X,
@@ -58,6 +59,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const folderInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
     const [rechargeDialogOpen, setRechargeDialogOpen] = useState(false)
+    const [manualJsonOpen, setManualJsonOpen] = useState(false)
+    const [manualJsonInput, setManualJsonInput] = useState("")
 
     const {
         images,
@@ -215,8 +218,12 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         return candidates
     }, [SAFE_DETECT_PAYLOAD_CHARS])
 
-    const runAutoDetect = useCallback(async (imageData: string): Promise<DetectTextResponse> => {
-        if (settings.useServerApi) {
+    const runAutoDetect = useCallback(async (
+        imageData: string,
+        imageWidth?: number,
+        imageHeight?: number
+    ): Promise<DetectTextResponse> => {
+        const tryServerDetect = async () => {
             const candidates = await buildDetectPayloadCandidates(imageData)
             let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
 
@@ -228,6 +235,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                     body: JSON.stringify({
                         imageData: payload,
                         targetLanguage: "简体中文",
+                        imageWidth,
+                        imageHeight,
+                        preferComicDetector: true,
                     }),
                 })
 
@@ -248,10 +258,24 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 return {
                     success: true,
                     blocks: data.blocks || [],
-                }
+                } as DetectTextResponse
             }
 
             throw new Error(lastError)
+        }
+
+        if (settings.useServerApi) {
+            return tryServerDetect()
+        }
+
+        // 非网站 API 模式下，也尝试优先使用后台配置的 comic-text-detector。
+        try {
+            const serverResult = await tryServerDetect()
+            if (serverResult.success && serverResult.blocks.length > 0) {
+                return serverResult
+            }
+        } catch {
+            // Fallback to user-provided model key.
         }
 
         return detectTextBlocks({
@@ -296,7 +320,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             const image = await loadImage(currentImage.originalUrl)
             const imageData = imageToDataUrl(image)
 
-            const result = await runAutoDetect(imageData)
+            const result = await runAutoDetect(imageData, image.width, image.height)
 
             if (!result.success) {
                 throw new Error(result.error || (locale === "zh" ? "自动识别失败" : "Auto detection failed"))
@@ -346,6 +370,141 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         runAutoDetect,
         updateSelections,
     ])
+
+    const parseManualJsonBlocks = useCallback((raw: string) => {
+        const text = raw.trim()
+        if (!text) return []
+
+        const parseText = (input: string): unknown => {
+            try {
+                return JSON.parse(input)
+            } catch {
+                const codeBlock = input.match(/```(?:json)?\s*([\s\S]*?)```/i)
+                if (codeBlock?.[1]) {
+                    return JSON.parse(codeBlock[1].trim())
+                }
+                throw new Error(locale === "zh" ? "JSON 格式错误" : "Invalid JSON format")
+            }
+        }
+
+        const parsed = parseText(text) as unknown
+        const rawBlocks = Array.isArray(parsed)
+            ? parsed
+            : (
+                parsed &&
+                typeof parsed === "object" &&
+                Array.isArray((parsed as { blocks?: unknown[] }).blocks)
+            )
+                ? ((parsed as { blocks: unknown[] }).blocks)
+                : []
+
+        const toNumber = (value: unknown) => {
+            if (typeof value === "number" && Number.isFinite(value)) return value
+            if (typeof value === "string" && value.trim()) {
+                const parsedNumber = Number(value)
+                if (Number.isFinite(parsedNumber)) return parsedNumber
+            }
+            return null
+        }
+
+        const clamp = (value: number) => Math.max(0, Math.min(1, value))
+
+        return rawBlocks.flatMap((item) => {
+            if (!item || typeof item !== "object") return []
+            const block = item as Record<string, unknown>
+            const bboxRaw = (block.bbox || block.box || block.position) as Record<string, unknown> | undefined
+            if (!bboxRaw) return []
+
+            const x = toNumber(bboxRaw.x ?? bboxRaw.left)
+            const y = toNumber(bboxRaw.y ?? bboxRaw.top)
+            const width = toNumber(bboxRaw.width ?? bboxRaw.w)
+            const height = toNumber(bboxRaw.height ?? bboxRaw.h)
+            if (x === null || y === null || width === null || height === null) return []
+            if (width <= 0 || height <= 0) return []
+
+            return [{
+                sourceText: String(block.sourceText ?? block.source_text ?? block.text ?? "").trim(),
+                translatedText: String(block.translatedText ?? block.translated_text ?? block.translation ?? "").trim(),
+                bbox: {
+                    x: clamp(x),
+                    y: clamp(y),
+                    width: clamp(width),
+                    height: clamp(height),
+                },
+            }]
+        })
+    }, [locale])
+
+    const handleCopyManualJsonPrompt = useCallback(async () => {
+        const manualPrompt = [
+            locale === "zh"
+                ? "请识别图片中的漫画文本并翻译为简体中文，按 JSON 返回："
+                : "Please detect manga text and translate to Simplified Chinese, return JSON:",
+            '{"blocks":[{"sourceText":"原文","translatedText":"译文","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}',
+            locale === "zh"
+                ? "要求：bbox 使用 0-1 归一化坐标；只返回 JSON，不要 markdown。"
+                : "Rules: bbox must be normalized (0-1). Return JSON only, no markdown.",
+        ].join("\n")
+
+        try {
+            await navigator.clipboard.writeText(manualPrompt)
+            toast.success(locale === "zh" ? "已复制提示词" : "Prompt copied")
+        } catch {
+            toast.error(locale === "zh" ? "复制失败，请手动复制" : "Copy failed, please copy manually")
+        }
+    }, [locale])
+
+    const handleImportManualJson = useCallback(async () => {
+        if (!currentImage) {
+            toast.error(locale === "zh" ? "请先选择图片" : "Please select an image first")
+            return
+        }
+        try {
+            const blocks = parseManualJsonBlocks(manualJsonInput)
+            if (!blocks.length) {
+                throw new Error(locale === "zh" ? "未解析到有效文本框" : "No valid text blocks parsed")
+            }
+
+            const image = await loadImage(currentImage.originalUrl)
+            const selections = blocks.map((block, index) => {
+                const x = Math.max(0, Math.round(block.bbox.x * image.width))
+                const y = Math.max(0, Math.round(block.bbox.y * image.height))
+                const width = Math.max(12, Math.round(block.bbox.width * image.width))
+                const height = Math.max(12, Math.round(block.bbox.height * image.height))
+                return {
+                    id: `json-${Date.now()}-${index}`,
+                    x: Math.min(x, Math.max(0, image.width - 1)),
+                    y: Math.min(y, Math.max(0, image.height - 1)),
+                    width: Math.min(width, Math.max(1, image.width - x)),
+                    height: Math.min(height, Math.max(1, image.height - y)),
+                }
+            })
+
+            updateSelections(currentImage.id, selections)
+            setDetectedTextBlocks(currentImage.id, blocks)
+            setManualJsonOpen(false)
+            setManualJsonInput("")
+            toast.success(
+                locale === "zh"
+                    ? `已导入 ${selections.length} 个选区`
+                    : `Imported ${selections.length} selections`
+            )
+        } catch (error) {
+            const message = error instanceof Error ? error.message : (locale === "zh" ? "JSON 导入失败" : "JSON import failed")
+            toast.error(message)
+        }
+    }, [currentImage, locale, manualJsonInput, parseManualJsonBlocks, setDetectedTextBlocks, updateSelections])
+
+    const handleDetectedTextEdit = useCallback((index: number, translatedText: string) => {
+        if (!currentImage) return
+        const nextBlocks = [...(currentImage.detectedTextBlocks || [])]
+        if (!nextBlocks[index]) return
+        nextBlocks[index] = {
+            ...nextBlocks[index],
+            translatedText,
+        }
+        setDetectedTextBlocks(currentImage.id, nextBlocks)
+    }, [currentImage, setDetectedTextBlocks])
 
     return (
         <div className={cn("w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden", className)}>
@@ -489,20 +648,91 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 {t.editor.sidebar.applyToAll}
                             </Label>
                         </div>
-                        <Button
-                            variant="secondary"
-                            size="sm"
-                            className="w-full"
-                            onClick={handleAutoDetectText}
-                            disabled={!currentImage || isAutoDetecting || !canRunAutoDetect}
-                        >
-                            {isAutoDetecting ? (
-                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            ) : (
-                                <Languages className="h-4 w-4 mr-2" />
-                            )}
-                            {locale === "zh" ? "自动检测文本并生成选区" : "Auto-detect text to selections"}
-                        </Button>
+                        <div className="grid grid-cols-2 gap-2">
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                className="w-full"
+                                onClick={handleAutoDetectText}
+                                disabled={!currentImage || isAutoDetecting || !canRunAutoDetect}
+                            >
+                                {isAutoDetecting ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                ) : (
+                                    <Languages className="h-4 w-4 mr-2" />
+                                )}
+                                {locale === "zh" ? "自动检测" : "Auto Detect"}
+                            </Button>
+                            <Dialog open={manualJsonOpen} onOpenChange={setManualJsonOpen}>
+                                <DialogTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="w-full"
+                                        disabled={!currentImage}
+                                    >
+                                        <FileJson className="h-4 w-4 mr-2" />
+                                        JSON
+                                    </Button>
+                                </DialogTrigger>
+                                <DialogContent className="sm:max-w-2xl">
+                                    <DialogHeader>
+                                        <DialogTitle>
+                                            {locale === "zh" ? "手动 JSON 导入" : "Manual JSON Import"}
+                                        </DialogTitle>
+                                        <DialogDescription>
+                                            {locale === "zh"
+                                                ? "当不走站内检测时，可把图片发给任意 AI 网页端，拿到 JSON 后粘贴回来。"
+                                                : "If you don't use built-in detection, ask any AI web client and paste the returned JSON here."}
+                                        </DialogDescription>
+                                    </DialogHeader>
+                                    <div className="space-y-3">
+                                        <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1">
+                                            <p>
+                                                {locale === "zh"
+                                                    ? "1) 点击“复制提示词”并发给外部 AI（附上当前图片）"
+                                                    : "1) Copy prompt and send it to external AI with the image"}
+                                            </p>
+                                            <p>
+                                                {locale === "zh"
+                                                    ? "2) 让对方仅返回 JSON（含 sourceText/translatedText/bbox）"
+                                                    : "2) Ask it to return JSON only (sourceText/translatedText/bbox)"}
+                                            </p>
+                                            <p>
+                                                {locale === "zh"
+                                                    ? "3) 粘贴 JSON，导入后会自动创建选区"
+                                                    : "3) Paste JSON here; selections will be created automatically"}
+                                            </p>
+                                        </div>
+                                        <Textarea
+                                            value={manualJsonInput}
+                                            onChange={(e) => setManualJsonInput(e.target.value)}
+                                            placeholder='{"blocks":[{"sourceText":"...","translatedText":"...","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}'
+                                            className="min-h-[220px] font-mono text-xs"
+                                        />
+                                        <div className="flex items-center justify-end gap-2">
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                onClick={handleCopyManualJsonPrompt}
+                                            >
+                                                {locale === "zh" ? "复制提示词" : "Copy Prompt"}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                onClick={handleImportManualJson}
+                                                disabled={!manualJsonInput.trim() || !currentImage}
+                                            >
+                                                {locale === "zh" ? "导入并生成选区" : "Import to selections"}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </DialogContent>
+                            </Dialog>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                            {locale === "zh" ? "自动检测文本并生成选区" : "Detect text and generate selections"}
+                        </p>
                         {!canRunAutoDetect && (
                             <p className="text-xs text-muted-foreground">
                                 {locale === "zh"
@@ -549,10 +779,17 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                         <span className="text-muted-foreground">{locale === "zh" ? "原文" : "Src"}:</span>{" "}
                                                         {block.sourceText || "-"}
                                                     </p>
-                                                    <p className="text-[11px] leading-snug">
-                                                        <span className="text-muted-foreground">{locale === "zh" ? "译文" : "Tr"}:</span>{" "}
-                                                        {block.translatedText || "-"}
-                                                    </p>
+                                                    <div className="mt-1 space-y-1">
+                                                        <Label className="text-[10px] text-muted-foreground">
+                                                            {locale === "zh" ? "译文（可手动编辑）" : "Translation (editable)"}
+                                                        </Label>
+                                                        <Input
+                                                            value={block.translatedText || ""}
+                                                            onChange={(e) => handleDetectedTextEdit(index, e.target.value)}
+                                                            placeholder={locale === "zh" ? "输入修正译文" : "Edit translated text"}
+                                                            className="h-8 text-xs"
+                                                        />
+                                                    </div>
                                                     <p className="text-[10px] text-muted-foreground">
                                                         bbox: x={block.bbox.x.toFixed(3)}, y={block.bbox.y.toFixed(3)}, w={block.bbox.width.toFixed(3)}, h={block.bbox.height.toFixed(3)}
                                                     </p>
@@ -669,6 +906,97 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     {locale === "zh"
                                         ? "4K 能降低文字边缘发糊，但生成更慢、成本更高；仅 Gemini 图像模型生效。"
                                         : "4K helps text sharpness but costs more and runs slower; applies to Gemini image models."}
+                                </p>
+                            </div>
+
+                            <div className="space-y-3 rounded-lg border border-border/60 bg-muted/40 p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="editor-pretranslate" className="cursor-pointer">
+                                            {locale === "zh" ? "预翻译（位置增强）" : "Pre-translate (layout hints)"}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "生成前先做视觉文本检测与翻译，并把文本位置写入提示词。"
+                                                : "Run vision OCR+translation first and inject text positions into prompts."}
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="editor-pretranslate"
+                                        checked={settings.enablePretranslate}
+                                        onCheckedChange={(checked) => updateSettings({ enablePretranslate: checked })}
+                                    />
+                                </div>
+
+                                <Separator />
+
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="editor-mask-mode" className="cursor-pointer">
+                                            {locale === "zh" ? "遮罩模式（单次全图请求）" : "Mask mode (single full-image call)"}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "只请求一次：默认遮罩仅保留选区，其余全白。"
+                                                : "Single request: keep selections, mask non-selected area with white."}
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="editor-mask-mode"
+                                        checked={settings.useMaskMode}
+                                        onCheckedChange={(checked) =>
+                                            updateSettings({
+                                                useMaskMode: checked,
+                                                useReverseMaskMode: checked ? (settings.useReverseMaskMode ?? false) : false,
+                                            })
+                                        }
+                                    />
+                                </div>
+
+                                {settings.useMaskMode && (
+                                    <div className="ml-1 flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 p-2.5">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="editor-inverse-mask" className="cursor-pointer">
+                                                {locale === "zh" ? "反向遮罩模式" : "Inverse mask mode"}
+                                            </Label>
+                                            <p className="text-xs text-muted-foreground">
+                                                {locale === "zh"
+                                                    ? "仅框选区域不发送（置白），其余画面作为上下文发送。"
+                                                    : "Selected regions are blanked out; the rest is sent as context."}
+                                            </p>
+                                        </div>
+                                        <Switch
+                                            id="editor-inverse-mask"
+                                            checked={settings.useReverseMaskMode ?? false}
+                                            onCheckedChange={(checked) => updateSettings({ useReverseMaskMode: checked })}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <Label htmlFor="editor-max-retries">
+                                    {locale === "zh" ? "失败自动重试次数" : "Auto retry count"}
+                                </Label>
+                                <Select
+                                    value={String(settings.maxRetries ?? 2)}
+                                    onValueChange={(value) => updateSettings({ maxRetries: Number(value) })}
+                                >
+                                    <SelectTrigger id="editor-max-retries">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {[0, 1, 2, 3, 4, 5].map((n) => (
+                                            <SelectItem key={n} value={String(n)}>
+                                                {n}
+                                            </SelectItem>
+                                        ))}
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                    {locale === "zh"
+                                        ? "网络波动/限流时自动重试，减少你盯界面的时间。"
+                                        : "Automatically retries on network/rate-limit errors to reduce manual watching."}
                                 </p>
                             </div>
 

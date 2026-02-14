@@ -80,6 +80,24 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
         description: "网站统一 AI 输出分辨率（Gemini: 1K/2K/4K）",
         is_encrypted: false,
     },
+    {
+        key: "comic_text_detector_enabled",
+        value: "false",
+        description: "是否启用 comic-text-detector 自动文本框检测",
+        is_encrypted: false,
+    },
+    {
+        key: "comic_text_detector_base_url",
+        value: "",
+        description: "comic-text-detector 服务地址（例如 http://127.0.0.1:5000）",
+        is_encrypted: false,
+    },
+    {
+        key: "comic_text_detector_api_key",
+        value: "",
+        description: "comic-text-detector 服务 API Key（可选）",
+        is_encrypted: true,
+    },
 ]
 
 let defaultsEnsured = false

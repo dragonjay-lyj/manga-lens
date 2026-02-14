@@ -49,7 +49,9 @@ export interface EditorSettings {
     imageSize: '1K' | '2K' | '4K'
     concurrency: number
     isSerial: boolean
+    maxRetries: number
     useMaskMode: boolean
+    useReverseMaskMode: boolean
     enablePretranslate: boolean
     exportFormat: ExportFormat
     exportQuality: number // 0-100，仅用于 jpg/webp
@@ -105,6 +107,7 @@ interface EditorState {
 
     updateSelections: (imageId: string, selections: Selection[]) => void
     clearSelections: (imageId: string) => void
+    mergeResultIntoOriginal: (imageId: string) => void
 
     updateSettings: (settings: Partial<EditorSettings>) => void
     setPrompt: (prompt: string) => void
@@ -152,7 +155,9 @@ const defaultSettings: EditorSettings = {
     imageSize: '2K',
     concurrency: 3,
     isSerial: false,
-    useMaskMode: true,
+    maxRetries: 2,
+    useMaskMode: false,
+    useReverseMaskMode: false,
     enablePretranslate: false,
     exportFormat: 'png',
     exportQuality: 90,
@@ -330,6 +335,34 @@ export const useEditorStore = create<EditorState>()(
                     images: state.images.map((img) =>
                         img.id === imageId ? { ...img, selections: [], selectionProgress: {} } : img
                     ),
+                }))
+            },
+            mergeResultIntoOriginal: (imageId) => {
+                const targetImage = get().images.find((img) => img.id === imageId)
+                if (!targetImage?.resultUrl) return
+                if (targetImage.originalUrl.startsWith('blob:')) {
+                    URL.revokeObjectURL(targetImage.originalUrl)
+                }
+
+                // 保存历史，支持撤销
+                get().saveToHistory()
+
+                set((state) => ({
+                    showResult: false,
+                    images: state.images.map((img) => {
+                        if (img.id !== imageId || !img.resultUrl) return img
+                        return {
+                            ...img,
+                            originalUrl: img.resultUrl,
+                            resultUrl: null,
+                            selections: [],
+                            selectionProgress: {},
+                            detectedTextBlocks: [],
+                            detectedTextUpdatedAt: undefined,
+                            status: 'idle',
+                            error: undefined,
+                        }
+                    }),
                 }))
             },
 

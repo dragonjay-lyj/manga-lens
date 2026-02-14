@@ -72,7 +72,7 @@ export default function RootLayout({
       <body className={`${inter.variable} ${plusJakartaSans.variable} antialiased`}>
         <ThemeProvider
           attribute="data-theme"
-          defaultTheme="dark"
+          defaultTheme="light"
           enableSystem
           disableTransitionOnChange={false}
         >

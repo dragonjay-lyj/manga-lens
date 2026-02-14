@@ -35,6 +35,9 @@ const AI_SETTING_KEYS = [
     "server_api_base_url",
     "server_api_model",
     "server_api_image_size",
+    "comic_text_detector_enabled",
+    "comic_text_detector_base_url",
+    "comic_text_detector_api_key",
 ]
 
 export default function AdminAiSettingsPage() {
@@ -131,6 +134,9 @@ export default function AdminAiSettingsPage() {
         return "2K"
     })()
     const keySetting = getSetting("server_api_key")
+    const comicDetectorEnabled = getValue("comic_text_detector_enabled") === "true"
+    const comicDetectorBaseUrl = getValue("comic_text_detector_base_url")
+    const comicDetectorKeySetting = getSetting("comic_text_detector_api_key")
 
     const status = useMemo(() => {
         const hasKey = Boolean(keySetting?.hasValue || (keySetting?.value && keySetting.value !== "******"))
@@ -307,9 +313,82 @@ export default function AdminAiSettingsPage() {
 
                     <div className="text-sm text-muted-foreground space-y-1">
                         <p className="font-medium text-foreground">建议配置</p>
-                        <p>1. Gemini 推荐模型：`gemini-2.5-flash-image`</p>
+                        <p>1. Gemini 推荐模型：`gemini-2.5-flash-image` 或 `gemini-3-pro-image-preview`</p>
                         <p>2. OpenAI 兼容接口需填写 Base URL 与可图像处理模型</p>
                         <p>3. 建议先用测试账号打开编辑器并开启“使用网站 API”验证链路</p>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                    <div>
+                        <CardTitle>comic-text-detector 文本框检测</CardTitle>
+                        <CardDescription>
+                            用于“自动检测文本并生成选区”，优先检测漫画文本框位置
+                        </CardDescription>
+                    </div>
+                    <Badge variant={comicDetectorEnabled ? "default" : "secondary"}>
+                        {comicDetectorEnabled ? "已启用" : "未启用"}
+                    </Badge>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                    <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
+                        <div className="space-y-0.5">
+                            <Label htmlFor="comic-detector-enabled">启用 comic-text-detector</Label>
+                            <p className="text-sm text-muted-foreground">
+                                启用后，文本检测接口会优先调用该服务
+                            </p>
+                        </div>
+                        <Switch
+                            id="comic-detector-enabled"
+                            checked={comicDetectorEnabled}
+                            onCheckedChange={(checked) =>
+                                updateSetting("comic_text_detector_enabled", checked ? "true" : "false")
+                            }
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="comic-detector-base-url">服务地址</Label>
+                        <Input
+                            id="comic-detector-base-url"
+                            value={comicDetectorBaseUrl}
+                            onChange={(e) => updateSetting("comic_text_detector_base_url", e.target.value)}
+                            placeholder="http://127.0.0.1:5000"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                            支持 /detect、/api/detect、/predict 等常见推理端点
+                        </p>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="comic-detector-api-key">服务 API Key（可选）</Label>
+                        <div className="flex gap-2">
+                            <Input
+                                id="comic-detector-api-key"
+                                type={showSecret ? "text" : "password"}
+                                value={comicDetectorKeySetting?.value ?? ""}
+                                onChange={(e) => updateSetting("comic_text_detector_api_key", e.target.value)}
+                                placeholder={comicDetectorKeySetting?.hasValue
+                                    ? "留空则保持原密钥不变，输入新值会覆盖"
+                                    : "无鉴权可留空"}
+                            />
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                className="h-11 w-11"
+                                aria-label={showSecret ? "隐藏 API Key" : "显示 API Key"}
+                                onClick={() => setShowSecret((prev) => !prev)}
+                            >
+                                {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </Button>
+                        </div>
+                        {comicDetectorKeySetting?.hasValue && !dirtyKeys.comic_text_detector_api_key && comicDetectorKeySetting.maskedPreview && (
+                            <p className="text-xs text-muted-foreground">
+                                当前密钥：{comicDetectorKeySetting.maskedPreview}
+                            </p>
+                        )}
                     </div>
                 </CardContent>
             </Card>

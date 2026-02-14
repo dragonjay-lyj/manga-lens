@@ -55,6 +55,7 @@ const REQUEST_TIMEOUT_MS = 90_000
 // Gemini 模型列表
 export const GEMINI_MODELS = [
     { value: 'gemini-2.5-flash-image', label: 'Gemini 2.5 Flash Image (推荐)' },
+    { value: 'gemini-3-pro-image-preview', label: 'Gemini 3 Pro Image Preview (4K 支持)' },
     { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (文本优先)' },
 ]
 
@@ -515,7 +516,13 @@ function buildDetectionPrompt(targetLanguage: string): string {
 async function detectWithGemini(request: DetectTextRequest): Promise<DetectTextResponse> {
     const { imageData, config } = request
     const targetLanguage = request.targetLanguage || '简体中文'
-    const model = 'gemini-2.5-flash'
+    const requestedModel = (config.model || '').trim()
+    const model =
+        requestedModel &&
+        requestedModel.startsWith('gemini-') &&
+        !/image/i.test(requestedModel)
+            ? requestedModel
+            : 'gemini-2.5-flash'
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
     const prompt = buildDetectionPrompt(targetLanguage)
 

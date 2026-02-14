@@ -10,6 +10,8 @@ import {
     Download,
     Package,
     Loader2,
+    FileCode2,
+    Layers2,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import { toast } from "sonner"
@@ -27,9 +29,13 @@ import {
     cropSelection,
     cropSelectionWithClearedArea,
     compositeMultiplePatches,
+    convertToFormat,
+    getFileExtension,
     downloadImage,
     downloadImagesAsZip,
+    downloadImagesAsHtml,
     createMaskedImage,
+    createInverseMaskedImage,
     compositeSelectionsFromFullImage,
     imageToDataUrl,
 } from "@/lib/utils/image-utils"
@@ -64,6 +70,7 @@ export function EditorToolbar() {
         setDetectedTextBlocks,
         clearDetectedTextBlocks,
         setProcessing,
+        mergeResultIntoOriginal,
     } = useEditorStore()
 
     const currentImage = useCurrentImage()
@@ -77,8 +84,12 @@ export function EditorToolbar() {
     const MASK_CONTEXT_PADDING = 40
     const MASK_BLEND_PADDING = 2
     const PATCH_DIFF_RETRY_THRESHOLD = 0.014
-    const useMaskMode = false
-    const enablePretranslate = false
+    const useMaskMode = settings.useMaskMode
+    const useReverseMaskMode = settings.useReverseMaskMode ?? false
+    const enablePretranslate = settings.enablePretranslate
+    const activeMaskMode = useMaskMode
+        ? (useReverseMaskMode ? "inverse-mask" : "mask")
+        : "patch"
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
     const FOUR_K_LONG_EDGE = 3840
 
@@ -86,6 +97,9 @@ export function EditorToolbar() {
         const data = await res.json().catch(() => ({}))
         return data?.error || `${fallback} (${res.status})`
     }
+
+    const resolveRetryLimit = (extra: number = 0) =>
+        Math.max(0, Math.min(8, (settings.maxRetries ?? 2) + extra))
 
     const buildDetectPayloadCandidates = async (
         dataUrl: string,
@@ -166,9 +180,42 @@ export function EditorToolbar() {
         }
     }
 
+    const runGenerateRequestWithRetry = async (
+        imageData: string,
+        promptText: string,
+        maxRetries: number = resolveRetryLimit()
+    ): Promise<GenerateImageResponse> => {
+        let lastResult: GenerateImageResponse = {
+            success: false,
+            error: locale === "zh" ? "生成失败" : "Generation failed",
+        }
+        const totalRetries = Math.max(0, maxRetries)
+
+        for (let attempt = 0; attempt <= totalRetries; attempt++) {
+            const result = await runGenerateRequest(imageData, promptText)
+            if (result.success && result.imageData) {
+                return result
+            }
+            lastResult = result
+
+            const errorText = (result.error || "").toLowerCase()
+            const canRetry =
+                /429|rate|timeout|timed out|network|temporarily|overload|503|502|504/.test(errorText)
+            if (!canRetry || attempt >= totalRetries) {
+                break
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)))
+        }
+
+        return lastResult
+    }
+
     const runDetectTextRequest = async (
         imageData: string,
-        targetLanguage: string
+        targetLanguage: string,
+        imageWidth?: number,
+        imageHeight?: number
     ): Promise<DetectTextResponse> => {
         const detectCandidates = settings.useServerApi
             ? await buildDetectPayloadCandidates(imageData, [
@@ -204,6 +251,9 @@ export function EditorToolbar() {
                     body: JSON.stringify({
                         imageData: requestImageData,
                         targetLanguage,
+                        imageWidth,
+                        imageHeight,
+                        preferComicDetector: true,
                     }),
                 })
 
@@ -376,7 +426,9 @@ export function EditorToolbar() {
 
             const detectResult = await runDetectTextRequest(
                 imageToDataUrl(originalImg),
-                "简体中文"
+                "简体中文",
+                originalImg.width,
+                originalImg.height
             )
 
             if (!detectResult.success) {
@@ -527,36 +579,6 @@ export function EditorToolbar() {
             return cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
         }
 
-        const runGenerateRequestWithRetry = async (
-            imageData: string,
-            promptText: string,
-            maxRetries: number
-        ): Promise<GenerateImageResponse> => {
-            let lastResult: GenerateImageResponse = {
-                success: false,
-                error: locale === "zh" ? "生成失败" : "Generation failed",
-            }
-
-            for (let attempt = 0; attempt <= maxRetries; attempt++) {
-                const result = await runGenerateRequest(imageData, promptText)
-                if (result.success && result.imageData) {
-                    return result
-                }
-                lastResult = result
-
-                const errorText = (result.error || "").toLowerCase()
-                const canRetry =
-                    /429|rate|timeout|timed out|network|temporarily|overload|503|502|504/.test(errorText)
-                if (!canRetry || attempt >= maxRetries) {
-                    break
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)))
-            }
-
-            return lastResult
-        }
-
         const workItems = indexedSelections.map(({ selection, index }) => {
             const isHard = isHardSelection(selection)
             return {
@@ -612,7 +634,7 @@ export function EditorToolbar() {
                     const result = await runGenerateRequestWithRetry(
                         inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING),
                         promptBySelection.get(selection.id) || effectivePrompt,
-                        isHard ? 2 : 1
+                        resolveRetryLimit(isHard ? 1 : 0)
                     )
                     results.set(selection.id, result)
                     completed += 1
@@ -652,7 +674,7 @@ export function EditorToolbar() {
             const batchResults = await batchGenerateImages(requests, {
                 isSerial: settings.isSerial,
                 concurrency: settings.isSerial ? 1 : Math.max(1, settings.concurrency || 1),
-                maxRetries: 2,
+                maxRetries: resolveRetryLimit(),
                 onItemStart: (selectionId, completed, totalCount) => {
                     if (trackSelectionProgress) {
                         setSelectionProgress(imageId, selectionId, "processing")
@@ -721,7 +743,11 @@ export function EditorToolbar() {
                         }
                         const hardPrompt = buildHardTextFallbackPrompt(selectionPrompt)
 
-                        const retryWithPrompt = await runGenerateRequestWithRetry(sourcePatch, hardPrompt, 1)
+                        const retryWithPrompt = await runGenerateRequestWithRetry(
+                            sourcePatch,
+                            hardPrompt,
+                            Math.max(1, resolveRetryLimit())
+                        )
                         if (retryWithPrompt.success && retryWithPrompt.imageData) {
                             const retryDiff = await computeImageDifferenceRatio(sourcePatch, retryWithPrompt.imageData)
                             if (retryDiff > bestDiffRatio) {
@@ -849,14 +875,26 @@ export function EditorToolbar() {
         if (updateToolbarProgress) {
             setProgress(0)
             setProgressText("0/1")
-            setProgressDetail(locale === "zh" ? "遮罩模式请求中..." : "Mask-mode request in progress...")
+            setProgressDetail(
+                useReverseMaskMode
+                    ? (locale === "zh" ? "反向遮罩模式请求中..." : "Inverse-mask request in progress...")
+                    : (locale === "zh" ? "遮罩模式请求中..." : "Mask-mode request in progress...")
+            )
         }
 
         const inputImageData = sourceSelections.length
-            ? createMaskedImage(originalImg, sourceSelections, "#ffffff", MASK_CONTEXT_PADDING)
+            ? (
+                useReverseMaskMode
+                    ? createInverseMaskedImage(originalImg, sourceSelections, "#ffffff", MASK_CONTEXT_PADDING)
+                    : createMaskedImage(originalImg, sourceSelections, "#ffffff", MASK_CONTEXT_PADDING)
+            )
             : imageToDataUrl(originalImg)
 
-        const result = await runGenerateRequest(inputImageData, effectivePrompt)
+        const result = await runGenerateRequestWithRetry(
+            inputImageData,
+            effectivePrompt,
+            resolveRetryLimit()
+        )
 
         if (!result.success || !result.imageData) {
             if (trackSelectionProgress) {
@@ -914,8 +952,8 @@ export function EditorToolbar() {
                 }
                 toast.warning(
                     locale === "zh"
-                        ? "遮罩模式疑似留白，已自动切换分片模式重试。"
-                        : "Mask mode looked blank; retried automatically with patch mode."
+                        ? `${useReverseMaskMode ? "反向" : ""}遮罩模式疑似留白，已自动切换分片模式重试。`
+                        : `${useReverseMaskMode ? "Inverse-" : ""}mask mode looked blank; retried automatically with patch mode.`
                 )
                 return processSelectionsPatchMode(
                     imageId,
@@ -935,7 +973,11 @@ export function EditorToolbar() {
         if (updateToolbarProgress) {
             setProgress(100)
             setProgressText("1/1")
-            setProgressDetail(locale === "zh" ? "遮罩模式处理完成" : "Mask-mode processing complete")
+            setProgressDetail(
+                useReverseMaskMode
+                    ? (locale === "zh" ? "反向遮罩模式处理完成" : "Inverse-mask processing complete")
+                    : (locale === "zh" ? "遮罩模式处理完成" : "Mask-mode processing complete")
+            )
         }
 
         if (!sourceSelections.length) {
@@ -996,7 +1038,7 @@ export function EditorToolbar() {
             imageId,
             originalImg,
             effectiveSelections,
-            basePrompt,
+            pretranslateContext.prompt,
             updateToolbarProgress,
             hasUserSelections
         )
@@ -1087,7 +1129,7 @@ export function EditorToolbar() {
             setShowResult(true)
             void logUsage("generate", {
                 source: settings.useServerApi ? "server_api" : "custom_key",
-                mode: useMaskMode ? "mask" : "patch",
+                mode: activeMaskMode,
                 selectionCount: currentImage.selections?.length || 0,
             })
             toast.success(t.common.success)
@@ -1173,7 +1215,7 @@ export function EditorToolbar() {
                     setImageStatus(img.id, "completed", resultUrl)
                     void logUsage("batch_generate", {
                         source: settings.useServerApi ? "server_api" : "custom_key",
-                        mode: useMaskMode ? "mask" : "patch",
+                        mode: activeMaskMode,
                         selectionCount: selections.length,
                     })
                 } catch (error) {
@@ -1214,11 +1256,30 @@ export function EditorToolbar() {
         }
     }
 
+    const buildExportFilename = (baseName: string) => {
+        const ext = getFileExtension(settings.exportFormat)
+        return `${baseName}.${ext}`
+    }
+
+    const toExportDataUrl = async (dataUrl: string) => {
+        if (settings.exportFormat === "png") return dataUrl
+        return convertToFormat(dataUrl, settings.exportFormat, settings.exportQuality)
+    }
+
     // 下载当前结果
-    const handleDownloadResult = () => {
+    const handleDownloadResult = async () => {
         if (!currentImage?.resultUrl) return
-        downloadImage(currentImage.resultUrl, `result-${Date.now()}.png`)
-        void logUsage("export", { type: "single" })
+        try {
+            const exported = await toExportDataUrl(currentImage.resultUrl)
+            downloadImage(exported, buildExportFilename(`result-${Date.now()}`))
+            void logUsage("export", { type: "single", format: settings.exportFormat })
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `Export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
     }
 
     // 打包下载所有结果
@@ -1229,18 +1290,68 @@ export function EditorToolbar() {
             return
         }
 
-        const filesToDownload = completedImages.map((img, index) => ({
-            name: `result-${index + 1}.png`,
-            dataUrl: img.resultUrl!,
-        }))
+        try {
+            const filesToDownload = await Promise.all(
+                completedImages.map(async (img, index) => ({
+                    name: buildExportFilename(`result-${index + 1}`),
+                    dataUrl: await toExportDataUrl(img.resultUrl!),
+                }))
+            )
 
-        await downloadImagesAsZip(filesToDownload)
-        void logUsage("export", { type: "batch", count: completedImages.length })
-        toast.success(
-            locale === "zh"
-                ? `已下载 ${completedImages.length} 张图片`
-                : `Downloaded ${completedImages.length} images`
-        )
+            await downloadImagesAsZip(filesToDownload)
+            void logUsage("export", { type: "batch", count: completedImages.length, format: settings.exportFormat })
+            toast.success(
+                locale === "zh"
+                    ? `已下载 ${completedImages.length} 张图片`
+                    : `Downloaded ${completedImages.length} images`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `Export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }
+
+    const handleDownloadHtml = async () => {
+        const completedImages = images.filter((img) => img.resultUrl)
+        if (completedImages.length === 0) {
+            toast.warning(locale === "zh" ? "没有可导出的结果" : "No results to export")
+            return
+        }
+
+        try {
+            await downloadImagesAsHtml(
+                completedImages.map((img, index) => ({
+                    name: img.file?.name || `result-${index + 1}`,
+                    originalDataUrl: img.originalUrl,
+                    resultDataUrl: img.resultUrl!,
+                    selectionCount: img.selections?.length || 0,
+                    prompt: prompt || undefined,
+                })),
+                `manga-lens-results-${Date.now()}.html`
+            )
+            void logUsage("export", { type: "html", count: completedImages.length })
+            toast.success(
+                locale === "zh"
+                    ? `已导出 HTML（${completedImages.length} 张）`
+                    : `HTML exported (${completedImages.length} images)`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `HTML 导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `HTML export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }
+
+    const handleMergeLayers = () => {
+        if (!currentImage?.resultUrl) return
+        mergeResultIntoOriginal(currentImage.id)
+        toast.success(locale === "zh" ? "已合并图层，可继续编辑" : "Layers merged, continue editing")
+        void logUsage("export", { type: "merge_layers" })
     }
 
     const hasResult = currentImage?.resultUrl
@@ -1307,6 +1418,15 @@ export function EditorToolbar() {
 
                 <Button
                     variant="outline"
+                    onClick={handleMergeLayers}
+                    disabled={!hasResult || isProcessing}
+                >
+                    <Layers2 className="h-4 w-4 mr-2" />
+                    {locale === "zh" ? "合并图层" : "Merge"}
+                </Button>
+
+                <Button
+                    variant="outline"
                     onClick={handleDownloadResult}
                     disabled={!hasResult}
                 >
@@ -1321,6 +1441,15 @@ export function EditorToolbar() {
                 >
                     <Package className="h-4 w-4 mr-2" />
                     {t.editor.toolbar.downloadAll}
+                </Button>
+
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadHtml}
+                    disabled={!hasCompletedImages}
+                >
+                    <FileCode2 className="h-4 w-4 mr-2" />
+                    HTML
                 </Button>
             </div>
         </div>

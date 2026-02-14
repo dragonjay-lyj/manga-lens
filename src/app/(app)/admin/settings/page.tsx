@@ -38,7 +38,7 @@ export default function SettingsPage() {
         siteName: "MangaLens",
         siteUrl: "https://manga-lens.com",
         defaultLocale: "zh-CN",
-        defaultTheme: "dark",
+        defaultTheme: "light",
         enableRegistration: true,
         enableGoogleAuth: true,
         maintenanceMode: false,

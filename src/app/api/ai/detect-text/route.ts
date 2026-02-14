@@ -2,11 +2,15 @@ import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 import { detectTextBlocks } from "@/lib/ai/ai-service"
-import { getServerAiRuntimeConfig } from "@/lib/settings"
+import { detectTextWithComicTextDetector } from "@/lib/ai/comic-text-detector"
+import { getServerAiRuntimeConfig, getSystemSettings } from "@/lib/settings"
 
 type DetectBody = {
     imageData?: string
     targetLanguage?: string
+    imageWidth?: number
+    imageHeight?: number
+    preferComicDetector?: boolean
 }
 
 export async function POST(request: Request) {
@@ -22,6 +26,46 @@ export async function POST(request: Request) {
         const imageData = body.imageData?.trim()
         if (!imageData) {
             return NextResponse.json({ error: "缺少 imageData" }, { status: 400 })
+        }
+
+        const detectorSettings = await getSystemSettings([
+            "comic_text_detector_enabled",
+            "comic_text_detector_base_url",
+            "comic_text_detector_api_key",
+        ])
+        const preferComicDetector = body.preferComicDetector !== false
+        const comicDetectorEnabled = detectorSettings.comic_text_detector_enabled === "true"
+        const comicDetectorBaseUrl =
+            detectorSettings.comic_text_detector_base_url ||
+            process.env.COMIC_TEXT_DETECTOR_BASE_URL ||
+            ""
+        const comicDetectorApiKey =
+            detectorSettings.comic_text_detector_api_key ||
+            process.env.COMIC_TEXT_DETECTOR_API_KEY ||
+            ""
+
+        if (preferComicDetector && comicDetectorEnabled && comicDetectorBaseUrl) {
+            const detectorResult = await detectTextWithComicTextDetector(
+                {
+                    baseUrl: comicDetectorBaseUrl,
+                    apiKey: comicDetectorApiKey,
+                },
+                {
+                    imageData,
+                    targetLanguage: body.targetLanguage || "简体中文",
+                    imageWidth: Number.isFinite(body.imageWidth) ? body.imageWidth : undefined,
+                    imageHeight: Number.isFinite(body.imageHeight) ? body.imageHeight : undefined,
+                }
+            )
+
+            if (detectorResult.success) {
+                return NextResponse.json({
+                    success: true,
+                    blocks: detectorResult.blocks,
+                    provider: "comic-text-detector",
+                    model: "comic-text-detector",
+                })
+            }
         }
 
         const runtime = await getServerAiRuntimeConfig()
@@ -56,4 +100,3 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "文本检测失败" }, { status: 500 })
     }
 }
-

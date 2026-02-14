@@ -260,6 +260,33 @@ export function createMaskedImage(
 }
 
 /**
+ * 创建反向遮罩：保留原图，仅将选区填充为白色（用于“选区不发给 AI”）
+ */
+export function createInverseMaskedImage(
+    image: HTMLImageElement,
+    selections: Selection[],
+    fillColor: string = '#ffffff',
+    padding: number = 0
+): string {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')!
+    canvas.width = image.width
+    canvas.height = image.height
+
+    // 先保留整张原图上下文
+    ctx.drawImage(image, 0, 0)
+    ctx.fillStyle = fillColor
+
+    // 仅清空选区，让模型补全选区内容
+    for (const selection of selections) {
+        const region = getSelectionCropRegion(image.width, image.height, selection, padding)
+        ctx.fillRect(region.cropX, region.cropY, region.cropWidth, region.cropHeight)
+    }
+
+    return canvas.toDataURL('image/png')
+}
+
+/**
  * 将生成的补丁合成回原图
  */
 export function compositeImage(
@@ -543,4 +570,107 @@ export async function downloadImagesAsZip(
 
     const content = await zip.generateAsync({ type: 'blob' })
     saveAs(content, zipFilename)
+}
+
+export interface HtmlExportEntry {
+    name: string
+    resultDataUrl: string
+    originalDataUrl?: string
+    selectionCount?: number
+    prompt?: string
+}
+
+function escapeHtml(input: string): string {
+    return input
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+}
+
+/**
+ * 导出 HTML 对比报告（内嵌 base64，单文件可离线查看）
+ */
+export async function downloadImagesAsHtml(
+    images: HtmlExportEntry[],
+    filename: string = 'manga-lens-results.html'
+): Promise<void> {
+    if (!images.length) return
+
+    const generatedAt = new Date().toLocaleString()
+    const cards = images.map((item, index) => {
+        const title = escapeHtml(item.name || `Image ${index + 1}`)
+        const prompt = item.prompt ? `<pre>${escapeHtml(item.prompt)}</pre>` : ''
+        const selectionInfo = typeof item.selectionCount === 'number'
+            ? `<p><strong>Selections:</strong> ${item.selectionCount}</p>`
+            : ''
+        const originalColumn = item.originalDataUrl
+            ? `
+                <div class="col">
+                    <h4>Original</h4>
+                    <img src="${item.originalDataUrl}" alt="Original image ${index + 1}" />
+                </div>
+            `
+            : ''
+
+        return `
+            <article class="card">
+                <header>
+                    <h3>${title}</h3>
+                    <span>#${index + 1}</span>
+                </header>
+                <div class="grid ${item.originalDataUrl ? 'two-col' : 'one-col'}">
+                    ${originalColumn}
+                    <div class="col">
+                        <h4>Result</h4>
+                        <img src="${item.resultDataUrl}" alt="Result image ${index + 1}" />
+                    </div>
+                </div>
+                ${selectionInfo}
+                ${prompt}
+            </article>
+        `
+    }).join('\n')
+
+    const html = [
+        '<!doctype html>',
+        '<html lang="en">',
+        '<head>',
+        '  <meta charset="utf-8" />',
+        '  <meta name="viewport" content="width=device-width, initial-scale=1" />',
+        '  <title>MangaLens Export</title>',
+        '  <style>',
+        '    :root { color-scheme: light dark; }',
+        '    body { margin: 0; padding: 24px; font-family: "Segoe UI", "PingFang SC", sans-serif; background: #f5f5f5; color: #111; }',
+        '    main { max-width: 1200px; margin: 0 auto; }',
+        '    h1 { margin: 0 0 6px; }',
+        '    .meta { color: #666; margin: 0 0 20px; }',
+        '    .card { background: #fff; border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin-bottom: 16px; }',
+        '    .card header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; }',
+        '    .card h3 { margin: 0; font-size: 16px; word-break: break-all; }',
+        '    .card span { color: #777; font-size: 12px; }',
+        '    .grid { display: grid; gap: 10px; }',
+        '    .grid.two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }',
+        '    .grid.one-col { grid-template-columns: minmax(0, 1fr); }',
+        '    .col h4 { margin: 0 0 8px; font-size: 13px; color: #555; }',
+        '    img { width: 100%; height: auto; border-radius: 8px; border: 1px solid #e1e1e1; background: #fafafa; }',
+        '    p { margin: 10px 0 0; font-size: 13px; }',
+        '    pre { margin: 10px 0 0; padding: 10px; background: #f7f7f7; border-radius: 8px; border: 1px solid #e7e7e7; white-space: pre-wrap; word-break: break-word; }',
+        '    @media (max-width: 880px) { .grid.two-col { grid-template-columns: 1fr; } body { padding: 14px; } }',
+        '  </style>',
+        '</head>',
+        '<body>',
+        '  <main>',
+        '    <h1>MangaLens Export</h1>',
+        `    <p class="meta">Generated at: ${escapeHtml(generatedAt)} | Total images: ${images.length}</p>`,
+        cards,
+        '  </main>',
+        '</body>',
+        '</html>',
+    ].join('\n')
+
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const { saveAs } = await import('file-saver')
+    saveAs(blob, filename)
 }

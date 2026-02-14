@@ -56,6 +56,10 @@ const faqs = [
         question: "处理速度很慢怎么办？",
         answer: "检查网络连接，或尝试使用更小的选区。批量处理时可以降低并发数来减少 API 压力。",
     },
+    {
+        question: "支持自动检测漫画文本框吗？",
+        answer: "支持。可在编辑器侧边栏点击“自动检测文本并生成选区”。若管理员在 /admin/settings/ai 启用了 comic-text-detector，会优先使用该检测服务。",
+    },
 ]
 
 export default function DocsPage() {
