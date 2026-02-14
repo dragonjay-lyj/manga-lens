@@ -472,16 +472,111 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
-        const buildPatchInput = (selection: Selection) =>
-            cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
+        const total = selections.length
+        const hasManySelections = total >= 10
+        const serverConcurrency = settings.isSerial
+            ? 1
+            : Math.max(1, Math.min(4, settings.concurrency || 1))
+
+        const isHardSelection = (selection: Selection) => {
+            const area = Math.max(1, selection.width * selection.height)
+            const minEdge = Math.max(1, Math.min(selection.width, selection.height))
+            const aspectRatio = Math.max(
+                selection.width / Math.max(1, selection.height),
+                selection.height / Math.max(1, selection.width)
+            )
+            return area < 16_000 || minEdge < 72 || aspectRatio >= 3.2
+        }
+
+        const buildSelectionPrompt = (selection: Selection, isHard: boolean) => {
+            const isLikelyVertical = selection.height > selection.width * 1.25
+            const isLikelyHorizontal = selection.width > selection.height * 1.25
+            const layoutHint = isLikelyVertical
+                ? "该选区大概率是竖排文本，请保持竖排（从上到下、从右到左列）。"
+                : isLikelyHorizontal
+                    ? "该选区大概率是横排文本，请保持横排（从左到右、从上到下）。"
+                    : "请保持该选区的原始排版方向。"
+            const hardHints = isHard
+                ? [
+                    "这是复杂/拟声词高难选区：必须清除并替换掉所有可见原文。",
+                    "允许先局部重绘背景再放置中文，避免原文和译文重叠。",
+                    "若文本无法完全识别，给出最贴近语境的保守译法，不能留空。",
+                ]
+                : []
+
+            return [
+                effectivePrompt,
+                "",
+                "【当前选区约束】",
+                layoutHint,
+                ...hardHints,
+            ].join("\n")
+        }
+
+        const buildSelectionInput = (selection: Selection, isHard: boolean) => {
+            if (isHard) {
+                const adaptivePadding = PATCH_CONTEXT_PADDING + (hasManySelections ? 8 : 12)
+                return cropSelectionWithClearedArea(
+                    originalImg,
+                    selection,
+                    adaptivePadding,
+                    "#ffffff",
+                    1
+                )
+            }
+            return cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
+        }
+
+        const runGenerateRequestWithRetry = async (
+            imageData: string,
+            promptText: string,
+            maxRetries: number
+        ): Promise<GenerateImageResponse> => {
+            let lastResult: GenerateImageResponse = {
+                success: false,
+                error: locale === "zh" ? "生成失败" : "Generation failed",
+            }
+
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                const result = await runGenerateRequest(imageData, promptText)
+                if (result.success && result.imageData) {
+                    return result
+                }
+                lastResult = result
+
+                const errorText = (result.error || "").toLowerCase()
+                const canRetry =
+                    /429|rate|timeout|timed out|network|temporarily|overload|503|502|504/.test(errorText)
+                if (!canRetry || attempt >= maxRetries) {
+                    break
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)))
+            }
+
+            return lastResult
+        }
+
+        const workItems = indexedSelections.map(({ selection, index }) => {
+            const isHard = isHardSelection(selection)
+            return {
+                selection,
+                index,
+                isHard,
+                prompt: buildSelectionPrompt(selection, isHard),
+                inputPatch: buildSelectionInput(selection, isHard),
+            }
+        })
         const inputPatchBySelection = new Map(
-            indexedSelections.map(({ selection }) => [
-                selection.id,
-                buildPatchInput(selection),
-            ])
+            workItems.map((item) => [item.selection.id, item.inputPatch])
+        )
+        const promptBySelection = new Map(
+            workItems.map((item) => [item.selection.id, item.prompt])
+        )
+        const hardSelectionIds = new Set(
+            workItems.filter((item) => item.isHard).map((item) => item.selection.id)
         )
 
-        const total = selections.length
         if (updateToolbarProgress) {
             setProgress(0)
             setProgressText(`0/${total}`)
@@ -490,54 +585,67 @@ export function EditorToolbar() {
 
         const results = new Map<string, GenerateImageResponse>()
         if (settings.useServerApi) {
-            for (let completed = 0; completed < indexedSelections.length; completed++) {
-                const { selection } = indexedSelections[completed]
-                if (trackSelectionProgress) {
-                    setSelectionProgress(imageId, selection.id, "processing")
-                }
-                if (updateToolbarProgress) {
-                    const selectionNo = selectionIndexMap.get(selection.id) ?? 0
-                    setProgress((completed / total) * 100)
-                    setProgressText(`${completed}/${total}`)
-                    setProgressDetail(
-                        locale === "zh"
-                            ? `正在处理选区 #${selectionNo}/${total}`
-                            : `Processing selection #${selectionNo}/${total}`
-                    )
-                }
+            const queue = [...workItems]
+            const workerCount = Math.max(1, Math.min(serverConcurrency, queue.length))
+            let completed = 0
 
-                const result = await runGenerateRequest(
-                    inputPatchBySelection.get(selection.id) || buildPatchInput(selection),
-                    effectivePrompt
-                )
-                results.set(selection.id, result)
+            const runWorker = async () => {
+                while (queue.length > 0) {
+                    const item = queue.shift()
+                    if (!item) break
 
-                if (updateToolbarProgress) {
-                    const selectionNo = selectionIndexMap.get(selection.id) ?? 0
-                    setProgress(((completed + 1) / total) * 100)
-                    setProgressText(`${completed + 1}/${total}`)
-                    setProgressDetail(
-                        locale === "zh"
-                            ? `已完成选区 #${selectionNo}（${completed + 1}/${total}）`
-                            : `Completed selection #${selectionNo} (${completed + 1}/${total})`
-                    )
-                }
+                    const { selection, isHard } = item
+                    if (trackSelectionProgress) {
+                        setSelectionProgress(imageId, selection.id, "processing")
+                    }
+                    if (updateToolbarProgress) {
+                        const selectionNo = selectionIndexMap.get(selection.id) ?? 0
+                        setProgress((completed / total) * 100)
+                        setProgressText(`${completed}/${total}`)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `正在处理选区 #${selectionNo}/${total}（并发 ${workerCount}）`
+                                : `Processing selection #${selectionNo}/${total} (parallel ${workerCount})`
+                        )
+                    }
 
-                if (!result.success && trackSelectionProgress) {
-                    setSelectionProgress(
-                        imageId,
-                        selection.id,
-                        "failed",
-                        result.error || (locale === "zh" ? "生成失败" : "Generation failed")
+                    const result = await runGenerateRequestWithRetry(
+                        inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING),
+                        promptBySelection.get(selection.id) || effectivePrompt,
+                        isHard ? 2 : 1
                     )
+                    results.set(selection.id, result)
+                    completed += 1
+
+                    if (updateToolbarProgress) {
+                        const selectionNo = selectionIndexMap.get(selection.id) ?? 0
+                        setProgress((completed / total) * 100)
+                        setProgressText(`${completed}/${total}`)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `已完成选区 #${selectionNo}（${completed}/${total}）`
+                                : `Completed selection #${selectionNo} (${completed}/${total})`
+                        )
+                    }
+
+                    if (!result.success && trackSelectionProgress) {
+                        setSelectionProgress(
+                            imageId,
+                            selection.id,
+                            "failed",
+                            result.error || (locale === "zh" ? "生成失败" : "Generation failed")
+                        )
+                    }
                 }
             }
+
+            await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
         } else {
-                const requests = indexedSelections.map(({ selection }) => ({
+            const requests = workItems.map(({ selection }) => ({
                 imageId: selection.id,
                 request: {
-                    imageData: inputPatchBySelection.get(selection.id) || buildPatchInput(selection),
-                    prompt: effectivePrompt,
+                    imageData: inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING),
+                    prompt: promptBySelection.get(selection.id) || effectivePrompt,
                     config: settings,
                 },
             }))
@@ -588,15 +696,22 @@ export function EditorToolbar() {
         const failures: string[] = []
         let lowResolutionWarned = false
 
-        for (const { selection, index } of indexedSelections) {
+        for (const { selection, index } of workItems) {
             let result = results.get(selection.id)
             if (result?.success && result.imageData) {
                 const sourcePatch = inputPatchBySelection.get(selection.id)
+                const isHard = hardSelectionIds.has(selection.id)
+                const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
                 if (sourcePatch) {
                     let bestImageData = result.imageData
-                    let bestDiffRatio = await computeImageDifferenceRatio(sourcePatch, bestImageData)
+                    const shouldRunDiffRetry = isHard || !hasManySelections
+                    let bestDiffRatio = 1
 
-                    if (bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD) {
+                    if (shouldRunDiffRetry) {
+                        bestDiffRatio = await computeImageDifferenceRatio(sourcePatch, bestImageData)
+                    }
+
+                    if (shouldRunDiffRetry && bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
                                 locale === "zh"
@@ -604,9 +719,9 @@ export function EditorToolbar() {
                                     : `Selection #${index} changed too little, retrying with stronger prompt...`
                             )
                         }
-                        const hardPrompt = buildHardTextFallbackPrompt(effectivePrompt)
+                        const hardPrompt = buildHardTextFallbackPrompt(selectionPrompt)
 
-                        const retryWithPrompt = await runGenerateRequest(sourcePatch, hardPrompt)
+                        const retryWithPrompt = await runGenerateRequestWithRetry(sourcePatch, hardPrompt, 1)
                         if (retryWithPrompt.success && retryWithPrompt.imageData) {
                             const retryDiff = await computeImageDifferenceRatio(sourcePatch, retryWithPrompt.imageData)
                             if (retryDiff > bestDiffRatio) {
@@ -615,15 +730,15 @@ export function EditorToolbar() {
                             }
                         }
 
-                        if (bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD) {
+                        if (bestDiffRatio < PATCH_DIFF_RETRY_THRESHOLD && !isHard) {
                             const clearedPatch = cropSelectionWithClearedArea(
                                 originalImg,
                                 selection,
-                                PATCH_CONTEXT_PADDING,
+                                PATCH_CONTEXT_PADDING + 10,
                                 "#ffffff",
                                 1
                             )
-                            const retryWithCleared = await runGenerateRequest(clearedPatch, hardPrompt)
+                            const retryWithCleared = await runGenerateRequestWithRetry(clearedPatch, hardPrompt, 1)
                             if (retryWithCleared.success && retryWithCleared.imageData) {
                                 const retryDiff = await computeImageDifferenceRatio(sourcePatch, retryWithCleared.imageData)
                                 if (retryDiff > bestDiffRatio) {
