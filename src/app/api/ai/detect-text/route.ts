@@ -59,9 +59,16 @@ export async function POST(request: Request) {
             )
 
             if (detectorResult.success) {
+                const lineCount = detectorResult.blocks.reduce((sum, block) => sum + (block.lines?.length || 0), 0)
+                const segmentCount = detectorResult.blocks.reduce((sum, block) => sum + (block.segments?.length || 0), 0)
                 return NextResponse.json({
                     success: true,
                     blocks: detectorResult.blocks,
+                    summary: {
+                        blockCount: detectorResult.blocks.length,
+                        lineCount,
+                        segmentCount,
+                    },
                     provider: "comic-text-detector",
                     model: "comic-text-detector",
                 })
@@ -89,9 +96,16 @@ export async function POST(request: Request) {
             )
         }
 
+        const lineCount = result.blocks.reduce((sum, block) => sum + (block.lines?.length || 0), 0)
+        const segmentCount = result.blocks.reduce((sum, block) => sum + (block.segments?.length || 0), 0)
         return NextResponse.json({
             success: true,
             blocks: result.blocks,
+            summary: {
+                blockCount: result.blocks.length,
+                lineCount,
+                segmentCount,
+            },
             provider: runtime.provider,
             model: runtime.config.model,
         })

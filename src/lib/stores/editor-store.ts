@@ -17,10 +17,53 @@ export interface DetectedTextBBox {
     height: number
 }
 
+export interface DetectedTextStyleHints {
+    textColor?: string
+    outlineColor?: string
+    strokeColor?: string
+    strokeWidth?: number
+    textOpacity?: number
+    fontFamily?: string
+    angle?: number
+    orientation?: "vertical" | "horizontal" | "auto"
+    alignment?: "start" | "center" | "end" | "justify" | "auto"
+    fontWeight?: string
+}
+
+export interface DetectedTextSegment {
+    x: number
+    y: number
+    width: number
+    height: number
+}
+
 export interface DetectedTextItem {
     sourceText: string
     translatedText: string
     bbox: DetectedTextBBox
+    sourceLanguage?: string
+    lines?: string[]
+    segments?: DetectedTextSegment[]
+    style?: DetectedTextStyleHints
+    richTextHtml?: string
+}
+
+export interface GuideLine {
+    id: string
+    orientation: "horizontal" | "vertical"
+    position: number
+}
+
+export interface AnnotationShape {
+    id: string
+    type: "rect" | "ellipse"
+    x: number
+    y: number
+    width: number
+    height: number
+    strokeColor: string
+    fillColor: string
+    opacity: number
 }
 
 // 图片项类型
@@ -29,10 +72,14 @@ export interface ImageItem {
     file: File
     originalUrl: string
     resultUrl: string | null
+    repairMaskUrl: string | null
+    repairMaskUpdatedAt?: string
     selections: Selection[]
     selectionProgress: Record<string, SelectionProcessState>
     detectedTextBlocks: DetectedTextItem[]
     detectedTextUpdatedAt?: string
+    guides: GuideLine[]
+    annotationShapes: AnnotationShape[]
     status: 'idle' | 'processing' | 'completed' | 'failed'
     error?: string
 }
@@ -50,6 +97,9 @@ export interface EditorSettings {
     concurrency: number
     isSerial: boolean
     maxRetries: number
+    translationDirection: "ja2zh" | "en2zh" | "ja2en" | "en2ja"
+    comicType: "auto" | "manga" | "western"
+    textStylePreset: "match-original" | "comic-bold" | "clean-serif"
     useMaskMode: boolean
     useReverseMaskMode: boolean
     enablePretranslate: boolean
@@ -108,6 +158,12 @@ interface EditorState {
     updateSelections: (imageId: string, selections: Selection[]) => void
     clearSelections: (imageId: string) => void
     mergeResultIntoOriginal: (imageId: string) => void
+    setRepairMask: (imageId: string, maskUrl: string | null) => void
+    clearRepairMask: (imageId: string) => void
+    setGuides: (imageId: string, guides: GuideLine[]) => void
+    clearGuides: (imageId: string) => void
+    setAnnotationShapes: (imageId: string, shapes: AnnotationShape[]) => void
+    clearAnnotationShapes: (imageId: string) => void
 
     updateSettings: (settings: Partial<EditorSettings>) => void
     setPrompt: (prompt: string) => void
@@ -156,6 +212,9 @@ const defaultSettings: EditorSettings = {
     concurrency: 3,
     isSerial: false,
     maxRetries: 2,
+    translationDirection: "ja2zh",
+    comicType: "auto",
+    textStylePreset: "match-original",
     useMaskMode: false,
     useReverseMaskMode: false,
     enablePretranslate: false,
@@ -259,9 +318,12 @@ export const useEditorStore = create<EditorState>()(
                     file,
                     originalUrl: URL.createObjectURL(file),
                     resultUrl: null,
+                    repairMaskUrl: null,
                     selections: [],
                     selectionProgress: {},
                     detectedTextBlocks: [],
+                    guides: [],
+                    annotationShapes: [],
                     status: 'idle',
                 }))
 
@@ -355,14 +417,90 @@ export const useEditorStore = create<EditorState>()(
                             ...img,
                             originalUrl: img.resultUrl,
                             resultUrl: null,
+                            repairMaskUrl: null,
+                            repairMaskUpdatedAt: undefined,
                             selections: [],
                             selectionProgress: {},
                             detectedTextBlocks: [],
                             detectedTextUpdatedAt: undefined,
+                            guides: [],
+                            annotationShapes: [],
                             status: 'idle',
                             error: undefined,
                         }
                     }),
+                }))
+            },
+
+            setRepairMask: (imageId, maskUrl) => {
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? {
+                                ...img,
+                                repairMaskUrl: maskUrl,
+                                repairMaskUpdatedAt: maskUrl ? new Date().toISOString() : undefined,
+                            }
+                            : img
+                    ),
+                }))
+            },
+
+            clearRepairMask: (imageId) => {
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? {
+                                ...img,
+                                repairMaskUrl: null,
+                                repairMaskUpdatedAt: undefined,
+                            }
+                            : img
+                    ),
+                }))
+            },
+
+            setGuides: (imageId, guides) => {
+                get().saveToHistory()
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? { ...img, guides }
+                            : img
+                    ),
+                }))
+            },
+
+            clearGuides: (imageId) => {
+                get().saveToHistory()
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? { ...img, guides: [] }
+                            : img
+                    ),
+                }))
+            },
+
+            setAnnotationShapes: (imageId, shapes) => {
+                get().saveToHistory()
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? { ...img, annotationShapes: shapes }
+                            : img
+                    ),
+                }))
+            },
+
+            clearAnnotationShapes: (imageId) => {
+                get().saveToHistory()
+                set((state) => ({
+                    images: state.images.map((img) =>
+                        img.id === imageId
+                            ? { ...img, annotationShapes: [] }
+                            : img
+                    ),
                 }))
             },
 

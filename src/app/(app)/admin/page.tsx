@@ -11,7 +11,6 @@ import {
     TrendingUp,
     TrendingDown,
     RefreshCw,
-    Loader2,
 } from "lucide-react"
 import { AdminSkeleton } from "@/components/shared/skeleton-loaders"
 

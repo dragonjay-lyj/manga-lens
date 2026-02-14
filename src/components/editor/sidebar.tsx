@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useCallback, useEffect, useState } from "react"
+import { useRef, useCallback, useEffect, useMemo, useState } from "react"
 import Image from "next/image"
 import { useEditorStore } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
@@ -49,18 +49,42 @@ import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { RechargePanel } from "@/components/profile/recharge-panel"
+import { RichTextEditor } from "@/components/editor/rich-text-editor"
 
 interface EditorSidebarProps {
     className?: string
 }
 
+function richHtmlToPlainText(html: string): string {
+    if (!html) return ""
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(html, "text/html")
+    doc.querySelectorAll("br").forEach((br) => br.replaceWith("\n"))
+    doc.querySelectorAll("p,div,li").forEach((node) => {
+        node.appendChild(doc.createTextNode("\n"))
+    })
+    return (doc.body.textContent || "")
+        .replace(/\u00a0/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+}
+
 export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
+    const wordImportInputRef = useRef<HTMLInputElement>(null)
+    const textLayerImportInputRef = useRef<HTMLInputElement>(null)
+    const findInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
     const [rechargeDialogOpen, setRechargeDialogOpen] = useState(false)
     const [manualJsonOpen, setManualJsonOpen] = useState(false)
     const [manualJsonInput, setManualJsonInput] = useState("")
+    const [findText, setFindText] = useState("")
+    const [replaceText, setReplaceText] = useState("")
+    const [replaceScope, setReplaceScope] = useState<"translated" | "source" | "both">("translated")
+    const [selectedBlockIndexes, setSelectedBlockIndexes] = useState<number[]>([])
+    const [bulkTextValue, setBulkTextValue] = useState("")
+    const [copiedBlocks, setCopiedBlocks] = useState<Array<{ sourceText: string; translatedText: string; richTextHtml?: string; bbox: { x: number; y: number; width: number; height: number }; style?: Record<string, unknown> }>>([])
 
     const {
         images,
@@ -86,6 +110,18 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
     const t = getMessages(locale)
     const currentImage = images.find((img) => img.id === currentImageId) || null
+    const fileNameCollator = useMemo(
+        () =>
+            new Intl.Collator(locale === "zh" ? "zh-Hans-u-kn-true" : "en-u-kn-true", {
+                numeric: true,
+                sensitivity: "base",
+            }),
+        [locale]
+    )
+    const sortedImages = useMemo(
+        () => [...images].sort((a, b) => fileNameCollator.compare(a.file.name, b.file.name)),
+        [images, fileNameCollator]
+    )
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
 
     // 自动迁移已下线的 Gemini 模型
@@ -122,6 +158,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     useEffect(() => {
         void refreshCoins()
     }, [refreshCoins])
+
+    useEffect(() => {
+        const handleFocusFind = (event: Event) => {
+            const detail = (event as CustomEvent<{ global?: boolean }>).detail
+            findInputRef.current?.focus()
+            if (detail?.global) {
+                toast.info(locale === "zh" ? "已定位到全局查找，请输入后点击“全局替换”" : "Global find ready. Type keyword then click Replace all.")
+            }
+        }
+
+        window.addEventListener("mangalens:focus-find", handleFocusFind)
+        return () => {
+            window.removeEventListener("mangalens:focus-find", handleFocusFind)
+        }
+    }, [locale])
 
     // 处理文件上传
     const handleFileUpload = useCallback((files: FileList | null) => {
@@ -170,7 +221,19 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
     const models = settings.provider === "gemini" ? GEMINI_MODELS : OPENAI_MODELS
     const canRunAutoDetect = settings.useServerApi || Boolean(settings.apiKey)
-    const detectedBlocks = currentImage?.detectedTextBlocks || []
+    const detectedBlocks = useMemo(() => currentImage?.detectedTextBlocks || [], [currentImage?.detectedTextBlocks])
+    const selectedBlockSet = useMemo(() => new Set(selectedBlockIndexes), [selectedBlockIndexes])
+
+    useEffect(() => {
+        setSelectedBlockIndexes([])
+        setBulkTextValue("")
+    }, [currentImage?.id])
+    const getTargetLanguageForDetection = useCallback(() => {
+        const direction = settings.translationDirection ?? "ja2zh"
+        if (direction === "ja2en") return "English"
+        if (direction === "en2ja") return "日本語"
+        return "简体中文"
+    }, [settings.translationDirection])
 
     const parseApiError = useCallback(async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
@@ -234,7 +297,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         imageData: payload,
-                        targetLanguage: "简体中文",
+                        targetLanguage: getTargetLanguageForDetection(),
                         imageWidth,
                         imageHeight,
                         preferComicDetector: true,
@@ -279,18 +342,19 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         }
 
         return detectTextBlocks({
-            imageData,
-            config: {
+                imageData,
+                config: {
                 provider: settings.provider,
                 apiKey: settings.apiKey,
                 baseUrl: settings.baseUrl,
                 model: settings.model,
                 imageSize: settings.imageSize || "2K",
-            },
-            targetLanguage: "简体中文",
-        })
+                },
+                targetLanguage: getTargetLanguageForDetection(),
+            })
     }, [
         buildDetectPayloadCandidates,
+        getTargetLanguageForDetection,
         locale,
         parseApiError,
         settings.apiKey,
@@ -422,24 +486,64 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             if (x === null || y === null || width === null || height === null) return []
             if (width <= 0 || height <= 0) return []
 
+            const styleRaw = (block.style || block.styleHints || block.layout) as Record<string, unknown> | undefined
+            const lines = Array.isArray(block.lines)
+                ? block.lines.map((line) => String(line ?? "").trim()).filter(Boolean)
+                : []
+            const segmentRaw = Array.isArray(block.segments) ? block.segments : []
+            const segments = segmentRaw.flatMap((segment) => {
+                if (!segment || typeof segment !== "object") return []
+                const s = segment as Record<string, unknown>
+                const sx = toNumber(s.x ?? s.left)
+                const sy = toNumber(s.y ?? s.top)
+                const sw = toNumber(s.width ?? s.w)
+                const sh = toNumber(s.height ?? s.h)
+                if (sx === null || sy === null || sw === null || sh === null || sw <= 0 || sh <= 0) return []
+                return [{
+                    x: clamp(sx),
+                    y: clamp(sy),
+                    width: clamp(sw),
+                    height: clamp(sh),
+                }]
+            })
+
             return [{
                 sourceText: String(block.sourceText ?? block.source_text ?? block.text ?? "").trim(),
                 translatedText: String(block.translatedText ?? block.translated_text ?? block.translation ?? "").trim(),
+                richTextHtml: String(block.richTextHtml ?? block.rich_text_html ?? block.translatedText ?? block.translated_text ?? block.translation ?? "").trim() || undefined,
                 bbox: {
                     x: clamp(x),
                     y: clamp(y),
                     width: clamp(width),
                     height: clamp(height),
                 },
+                sourceLanguage: String(block.sourceLanguage ?? block.source_language ?? block.lang ?? "").trim() || undefined,
+                lines: lines.length ? lines : undefined,
+                segments: segments.length ? segments : undefined,
+                style: styleRaw
+                    ? {
+                        textColor: typeof styleRaw.textColor === "string" ? styleRaw.textColor : (typeof styleRaw.color === "string" ? styleRaw.color : undefined),
+                        outlineColor: typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : (typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : undefined),
+                        strokeColor: typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : (typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : undefined),
+                        strokeWidth: toNumber(styleRaw.strokeWidth ?? styleRaw.stroke_width) ?? undefined,
+                        textOpacity: toNumber(styleRaw.textOpacity ?? styleRaw.opacity) ?? undefined,
+                        fontFamily: typeof styleRaw.fontFamily === "string" ? styleRaw.fontFamily : undefined,
+                        angle: toNumber(styleRaw.angle ?? styleRaw.rotation) ?? undefined,
+                        orientation: typeof styleRaw.orientation === "string" ? styleRaw.orientation as "vertical" | "horizontal" | "auto" : undefined,
+                        alignment: typeof styleRaw.alignment === "string" ? styleRaw.alignment as "start" | "center" | "end" | "justify" | "auto" : undefined,
+                        fontWeight: typeof styleRaw.fontWeight === "string" ? styleRaw.fontWeight : undefined,
+                    }
+                    : undefined,
             }]
         })
     }, [locale])
 
     const handleCopyManualJsonPrompt = useCallback(async () => {
+        const targetLanguage = getTargetLanguageForDetection()
         const manualPrompt = [
             locale === "zh"
-                ? "请识别图片中的漫画文本并翻译为简体中文，按 JSON 返回："
-                : "Please detect manga text and translate to Simplified Chinese, return JSON:",
+                ? `请识别图片中的漫画文本并翻译为${targetLanguage}，按 JSON 返回：`
+                : `Please detect manga text and translate to ${targetLanguage}, return JSON:`,
             '{"blocks":[{"sourceText":"原文","translatedText":"译文","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}',
             locale === "zh"
                 ? "要求：bbox 使用 0-1 归一化坐标；只返回 JSON，不要 markdown。"
@@ -452,7 +556,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         } catch {
             toast.error(locale === "zh" ? "复制失败，请手动复制" : "Copy failed, please copy manually")
         }
-    }, [locale])
+    }, [getTargetLanguageForDetection, locale])
 
     const handleImportManualJson = useCallback(async () => {
         if (!currentImage) {
@@ -495,16 +599,508 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         }
     }, [currentImage, locale, manualJsonInput, parseManualJsonBlocks, setDetectedTextBlocks, updateSelections])
 
-    const handleDetectedTextEdit = useCallback((index: number, translatedText: string) => {
+    const handleDetectedTextEdit = useCallback((index: number, richTextHtml: string) => {
         if (!currentImage) return
         const nextBlocks = [...(currentImage.detectedTextBlocks || [])]
         if (!nextBlocks[index]) return
+        const normalizedHtml = richTextHtml.trim()
         nextBlocks[index] = {
             ...nextBlocks[index],
-            translatedText,
+            translatedText: richHtmlToPlainText(normalizedHtml),
+            richTextHtml: normalizedHtml,
         }
         setDetectedTextBlocks(currentImage.id, nextBlocks)
     }, [currentImage, setDetectedTextBlocks])
+
+    const toggleBlockSelection = useCallback((index: number, checked: boolean) => {
+        setSelectedBlockIndexes((prev) => {
+            if (checked) {
+                return prev.includes(index) ? prev : [...prev, index]
+            }
+            return prev.filter((item) => item !== index)
+        })
+    }, [])
+
+    const handleSelectAllBlocks = useCallback(() => {
+        setSelectedBlockIndexes(detectedBlocks.map((_, index) => index))
+    }, [detectedBlocks])
+
+    const handleClearBlockSelection = useCallback(() => {
+        setSelectedBlockIndexes([])
+    }, [])
+
+    const handleApplyBulkText = useCallback(() => {
+        if (!currentImage) return
+        if (!selectedBlockIndexes.length) {
+            toast.warning(locale === "zh" ? "请先选择文本块" : "Select text blocks first")
+            return
+        }
+        if (!bulkTextValue.trim()) {
+            toast.warning(locale === "zh" ? "请输入批量文本" : "Enter bulk text")
+            return
+        }
+
+        const richHtml = bulkTextValue
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\n/g, "<br/>")
+
+        const selectedSet = new Set(selectedBlockIndexes)
+        const nextBlocks = (currentImage.detectedTextBlocks || []).map((block, index) =>
+            selectedSet.has(index)
+                ? {
+                    ...block,
+                    translatedText: bulkTextValue,
+                    richTextHtml: richHtml,
+                }
+                : block
+        )
+        setDetectedTextBlocks(currentImage.id, nextBlocks)
+        toast.success(
+            locale === "zh"
+                ? `已将同一文本应用到 ${selectedSet.size} 个文本块`
+                : `Applied same text to ${selectedSet.size} blocks`
+        )
+    }, [bulkTextValue, currentImage, locale, selectedBlockIndexes, setDetectedTextBlocks])
+
+    const handlePasteClipboardToSelected = useCallback(async () => {
+        if (!navigator.clipboard) {
+            toast.error(locale === "zh" ? "当前浏览器不支持剪贴板读取" : "Clipboard read is not supported")
+            return
+        }
+        try {
+            const text = await navigator.clipboard.readText()
+            if (!text.trim()) {
+                toast.warning(locale === "zh" ? "剪贴板为空" : "Clipboard is empty")
+                return
+            }
+            setBulkTextValue(text)
+            const selectedSet = new Set(selectedBlockIndexes)
+            if (currentImage && selectedSet.size) {
+                const richHtml = text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/\n/g, "<br/>")
+                const nextBlocks = (currentImage.detectedTextBlocks || []).map((block, index) =>
+                    selectedSet.has(index)
+                        ? {
+                            ...block,
+                            translatedText: text,
+                            richTextHtml: richHtml,
+                        }
+                        : block
+                )
+                setDetectedTextBlocks(currentImage.id, nextBlocks)
+                toast.success(
+                    locale === "zh"
+                        ? `已粘贴并应用到 ${selectedSet.size} 个文本块`
+                        : `Pasted and applied to ${selectedSet.size} blocks`
+                )
+                return
+            }
+            toast.success(locale === "zh" ? "已粘贴到批量文本输入框" : "Pasted into bulk text input")
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "读取剪贴板失败" : "Failed to read clipboard"))
+        }
+    }, [currentImage, locale, selectedBlockIndexes, setDetectedTextBlocks])
+
+    const handleCopySelectedBlocks = useCallback(() => {
+        if (!currentImage) return
+        const selectedSet = new Set(selectedBlockIndexes)
+        const blocks = (currentImage.detectedTextBlocks || [])
+            .filter((_, index) => selectedSet.has(index))
+            .map((block) => ({
+                sourceText: block.sourceText,
+                translatedText: block.translatedText,
+                richTextHtml: block.richTextHtml,
+                bbox: { ...block.bbox },
+                style: block.style ? { ...block.style } as Record<string, unknown> : undefined,
+            }))
+
+        if (!blocks.length) {
+            toast.warning(locale === "zh" ? "请先选择要复制的文本块" : "Select blocks to copy first")
+            return
+        }
+        setCopiedBlocks(blocks)
+        toast.success(
+            locale === "zh"
+                ? `已复制 ${blocks.length} 个文本块`
+                : `Copied ${blocks.length} text blocks`
+        )
+    }, [currentImage, locale, selectedBlockIndexes])
+
+    const handlePasteCopiedBlocksSideBySide = useCallback(async () => {
+        if (!currentImage) return
+        if (!copiedBlocks.length) {
+            toast.warning(locale === "zh" ? "请先复制文本块" : "Copy blocks first")
+            return
+        }
+
+        const image = await loadImage(currentImage.originalUrl)
+        const existing = currentImage.detectedTextBlocks || []
+        const maxRight = existing.reduce((max, block) => Math.max(max, block.bbox.x + block.bbox.width), 0)
+        const minX = Math.min(...copiedBlocks.map((block) => block.bbox.x))
+        const minY = Math.min(...copiedBlocks.map((block) => block.bbox.y))
+        const maxX = Math.max(...copiedBlocks.map((block) => block.bbox.x + block.bbox.width))
+        const widthSpan = maxX - minX
+        const targetStartX = Math.min(0.98 - widthSpan, Math.max(0.02, maxRight + 0.02))
+
+        const appendedBlocks = copiedBlocks.map((block) => {
+            const rawX = targetStartX + (block.bbox.x - minX)
+            const rawY = minY + (block.bbox.y - minY)
+            const x = Math.max(0, Math.min(1 - block.bbox.width, rawX))
+            const y = Math.max(0, Math.min(1 - block.bbox.height, rawY))
+            return {
+                ...block,
+                sourceText: block.sourceText,
+                translatedText: block.translatedText,
+                richTextHtml: block.richTextHtml || block.translatedText,
+                style: block.style as never,
+                bbox: {
+                    x,
+                    y,
+                    width: block.bbox.width,
+                    height: block.bbox.height,
+                },
+            }
+        })
+
+        const nextBlocks = [...existing, ...appendedBlocks]
+        setDetectedTextBlocks(currentImage.id, nextBlocks)
+
+        const baseSelections = currentImage.selections || []
+        const newSelections = appendedBlocks.map((block, index) => {
+            const x = Math.max(0, Math.round(block.bbox.x * image.width))
+            const y = Math.max(0, Math.round(block.bbox.y * image.height))
+            const width = Math.max(12, Math.round(block.bbox.width * image.width))
+            const height = Math.max(12, Math.round(block.bbox.height * image.height))
+            return {
+                id: `paste-block-${Date.now()}-${index}`,
+                x,
+                y,
+                width,
+                height,
+            }
+        })
+        updateSelections(currentImage.id, [...baseSelections, ...newSelections])
+        setSelectedBlockIndexes(
+            appendedBlocks.map((_, index) => existing.length + index)
+        )
+        toast.success(
+            locale === "zh"
+                ? `已并排粘贴 ${appendedBlocks.length} 个文本块`
+                : `Pasted ${appendedBlocks.length} blocks side by side`
+        )
+    }, [copiedBlocks, currentImage, locale, setDetectedTextBlocks, updateSelections])
+
+    const replaceDetectedBlocksText = useCallback((
+        blocks: typeof detectedBlocks,
+        findKeyword: string,
+        replaceValue: string,
+        scope: "translated" | "source" | "both"
+    ) => {
+        if (!findKeyword) return { changed: 0, blocks }
+
+        let changed = 0
+        const escaped = findKeyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        const matcher = new RegExp(escaped, "g")
+        const nextBlocks = blocks.map((block) => {
+            let nextSource = block.sourceText || ""
+            let nextTranslated = block.translatedText || ""
+            const prevSource = nextSource
+            const prevTranslated = nextTranslated
+
+            if (scope === "source" || scope === "both") {
+                nextSource = nextSource.replace(matcher, replaceValue)
+            }
+            if (scope === "translated" || scope === "both") {
+                nextTranslated = nextTranslated.replace(matcher, replaceValue)
+            }
+
+            if (nextSource !== prevSource || nextTranslated !== prevTranslated) {
+                changed++
+            }
+
+            return {
+                ...block,
+                sourceText: nextSource,
+                translatedText: nextTranslated,
+                richTextHtml: nextTranslated !== prevTranslated
+                    ? nextTranslated
+                    : block.richTextHtml,
+            }
+        })
+
+        return { changed, blocks: nextBlocks }
+    }, [])
+
+    const handleReplaceCurrent = useCallback(() => {
+        if (!currentImage) return
+        if (!findText.trim()) {
+            toast.warning(locale === "zh" ? "请输入查找内容" : "Please enter text to find")
+            return
+        }
+
+        const result = replaceDetectedBlocksText(
+            currentImage.detectedTextBlocks || [],
+            findText,
+            replaceText,
+            replaceScope
+        )
+        if (!result.changed) {
+            toast.info(locale === "zh" ? "当前页未匹配到文本" : "No matches in current image")
+            return
+        }
+        setDetectedTextBlocks(currentImage.id, result.blocks)
+        toast.success(
+            locale === "zh"
+                ? `当前页替换 ${result.changed} 处`
+                : `${result.changed} replacements in current image`
+        )
+    }, [currentImage, findText, locale, replaceDetectedBlocksText, replaceScope, replaceText, setDetectedTextBlocks])
+
+    const handleReplaceGlobal = useCallback(() => {
+        if (!findText.trim()) {
+            toast.warning(locale === "zh" ? "请输入查找内容" : "Please enter text to find")
+            return
+        }
+
+        let totalChanged = 0
+        let changedImages = 0
+        images.forEach((img) => {
+            const blocks = img.detectedTextBlocks || []
+            if (!blocks.length) return
+            const result = replaceDetectedBlocksText(blocks, findText, replaceText, replaceScope)
+            if (result.changed > 0) {
+                changedImages++
+                totalChanged += result.changed
+                setDetectedTextBlocks(img.id, result.blocks)
+            }
+        })
+
+        if (!totalChanged) {
+            toast.info(locale === "zh" ? "全局未匹配到文本" : "No global matches")
+            return
+        }
+        toast.success(
+            locale === "zh"
+                ? `全局替换 ${totalChanged} 处（${changedImages} 张图）`
+                : `${totalChanged} global replacements (${changedImages} images)`
+        )
+    }, [findText, images, locale, replaceDetectedBlocksText, replaceScope, replaceText, setDetectedTextBlocks])
+
+    const handleExportWord = useCallback(async () => {
+        if (!currentImage || !(currentImage.detectedTextBlocks || []).length) {
+            toast.warning(locale === "zh" ? "没有可导出的文本块" : "No text blocks to export")
+            return
+        }
+
+        try {
+            const {
+                Document,
+                Packer,
+                Paragraph,
+                Table,
+                TableCell,
+                TableRow,
+                WidthType,
+                HeadingLevel,
+            } = await import("docx")
+            const { saveAs } = await import("file-saver")
+
+            const headerRow = new TableRow({
+                children: ["#", "Source", "Translation", "bbox"].map((text) =>
+                    new TableCell({
+                        children: [new Paragraph({ text, heading: HeadingLevel.HEADING_5 })],
+                    })
+                ),
+            })
+
+            const bodyRows = (currentImage.detectedTextBlocks || []).map((block, index) => (
+                new TableRow({
+                    children: [
+                        new TableCell({
+                            children: [new Paragraph(String(index + 1))],
+                        }),
+                        new TableCell({
+                            children: [new Paragraph(block.sourceText || "")],
+                        }),
+                        new TableCell({
+                            children: [new Paragraph(block.translatedText || "")],
+                        }),
+                        new TableCell({
+                            children: [
+                                new Paragraph(
+                                    `${block.bbox.x.toFixed(4)},${block.bbox.y.toFixed(4)},${block.bbox.width.toFixed(4)},${block.bbox.height.toFixed(4)}`
+                                ),
+                            ],
+                        }),
+                    ],
+                })
+            ))
+
+            const table = new Table({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                rows: [headerRow, ...bodyRows],
+            })
+
+            const doc = new Document({
+                sections: [{
+                    children: [
+                        new Paragraph({
+                            text: "MangaLens Text Export",
+                            heading: HeadingLevel.HEADING_2,
+                        }),
+                        new Paragraph(`Image: ${currentImage.file.name}`),
+                        table,
+                    ],
+                }],
+            })
+
+            const blob = await Packer.toBlob(doc)
+            saveAs(blob, `${currentImage.file.name.replace(/\.[^.]+$/, "")}-text.docx`)
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `DOCX 导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `DOCX export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }, [currentImage, locale])
+
+    const handleImportWord = useCallback(async (file: File) => {
+        if (!currentImage) return
+        try {
+            let html = ""
+            if (file.name.toLowerCase().endsWith(".docx")) {
+                const mammoth = await import("mammoth/mammoth.browser")
+                const result = await mammoth.convertToHtml({ arrayBuffer: await file.arrayBuffer() })
+                html = result.value || ""
+            } else {
+                html = await file.text()
+            }
+
+            const parser = new DOMParser()
+            const doc = parser.parseFromString(html, "text/html")
+            const rows = Array.from(doc.querySelectorAll("tbody tr"))
+            const fallbackRows = rows.length ? rows : Array.from(doc.querySelectorAll("tr"))
+            if (!fallbackRows.length) {
+                throw new Error(
+                    locale === "zh"
+                        ? "未解析到可用行，请导入由本工具导出的 DOCX 文档"
+                        : "No rows found. Import a DOCX file exported by this app."
+                )
+            }
+
+            const blocks = [...(currentImage.detectedTextBlocks || [])]
+            let changed = 0
+            fallbackRows.forEach((row) => {
+                const cells = row.querySelectorAll("td")
+                if (cells.length < 3) return
+                const index = Number((cells[0].textContent || "").trim()) - 1
+                const translated = (cells[2].textContent || "").trim()
+                if (!Number.isFinite(index) || index < 0 || index >= blocks.length) return
+                if (translated && blocks[index].translatedText !== translated) {
+                    blocks[index] = {
+                        ...blocks[index],
+                        translatedText: translated,
+                        richTextHtml: translated,
+                    }
+                    changed++
+                }
+            })
+
+            if (!changed) {
+                toast.info(locale === "zh" ? "未检测到可更新的译文" : "No translatable rows were updated")
+                return
+            }
+            setDetectedTextBlocks(currentImage.id, blocks)
+            toast.success(locale === "zh" ? `已导入并更新 ${changed} 条译文` : `Imported ${changed} translations`)
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "Word 导入失败" : "Word import failed"))
+        }
+    }, [currentImage, locale, setDetectedTextBlocks])
+
+    const handleExportDetectedJson = useCallback(() => {
+        if (!currentImage) return
+        const payload = {
+            imageId: currentImage.id,
+            fileName: currentImage.file.name,
+            exportedAt: new Date().toISOString(),
+            blocks: currentImage.detectedTextBlocks || [],
+        }
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `${currentImage.file.name.replace(/\.[^.]+$/, "")}-detected-text.json`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, [currentImage])
+
+    const handleExportTextLayer = useCallback(() => {
+        if (!currentImage) return
+        const payload = {
+            schemaVersion: 1,
+            type: "mangalens.text-layer",
+            imageId: currentImage.id,
+            fileName: currentImage.file.name,
+            exportedAt: new Date().toISOString(),
+            blocks: currentImage.detectedTextBlocks || [],
+        }
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "text/plain;charset=utf-8" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `${currentImage.file.name.replace(/\.[^.]+$/, "")}-text-layer.json`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, [currentImage])
+
+    const handleImportTextLayer = useCallback(async (file: File) => {
+        if (!currentImage) return
+        try {
+            const raw = await file.text()
+            const parsed = JSON.parse(raw) as { blocks?: unknown[] }
+            if (!Array.isArray(parsed.blocks)) {
+                throw new Error(locale === "zh" ? "无效文本层文件：缺少 blocks" : "Invalid text-layer file: missing blocks")
+            }
+            const normalized = parseManualJsonBlocks(JSON.stringify({ blocks: parsed.blocks }))
+            if (!normalized.length) {
+                throw new Error(locale === "zh" ? "未解析到可用文本块" : "No valid text blocks parsed")
+            }
+            setDetectedTextBlocks(currentImage.id, normalized)
+
+            const image = await loadImage(currentImage.originalUrl)
+            const selections = normalized.map((block, index) => {
+                const x = Math.max(0, Math.round(block.bbox.x * image.width))
+                const y = Math.max(0, Math.round(block.bbox.y * image.height))
+                const width = Math.max(12, Math.round(block.bbox.width * image.width))
+                const height = Math.max(12, Math.round(block.bbox.height * image.height))
+                return {
+                    id: `text-layer-${Date.now()}-${index}`,
+                    x,
+                    y,
+                    width,
+                    height,
+                }
+            })
+            updateSelections(currentImage.id, selections)
+            toast.success(
+                locale === "zh"
+                    ? `已导入 ${normalized.length} 个文本层并恢复选区`
+                    : `Imported ${normalized.length} text layers and restored selections`
+            )
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "导入文本层失败" : "Failed to import text layer"))
+        }
+    }, [currentImage, locale, parseManualJsonBlocks, setDetectedTextBlocks, updateSelections])
 
     return (
         <div className={cn("w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden", className)}>
@@ -573,7 +1169,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 {t.editor.sidebar.files} ({images.length})
                             </p>
                             <div className="grid grid-cols-3 gap-2">
-                                {images.map((img) => (
+                                {sortedImages.map((img) => (
                                     <div
                                         key={img.id}
                                         className={cn(
@@ -647,6 +1243,70 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             <Label htmlFor="apply-to-all" className="text-sm cursor-pointer">
                                 {t.editor.sidebar.applyToAll}
                             </Label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <div className="space-y-1.5">
+                                <Label htmlFor="translation-direction" className="text-xs">
+                                    {locale === "zh" ? "翻译方向" : "Direction"}
+                                </Label>
+                                <Select
+                                    value={settings.translationDirection ?? "ja2zh"}
+                                    onValueChange={(value: "ja2zh" | "en2zh" | "ja2en" | "en2ja") =>
+                                        updateSettings({ translationDirection: value })
+                                    }
+                                >
+                                    <SelectTrigger id="translation-direction" className="h-9">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="ja2zh">日 → 中</SelectItem>
+                                        <SelectItem value="en2zh">英 → 中</SelectItem>
+                                        <SelectItem value="ja2en">日 → 英</SelectItem>
+                                        <SelectItem value="en2ja">英 → 日</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                            <div className="space-y-1.5">
+                                <Label htmlFor="comic-type" className="text-xs">
+                                    {locale === "zh" ? "漫画类型" : "Comic type"}
+                                </Label>
+                                <Select
+                                    value={settings.comicType ?? "auto"}
+                                    onValueChange={(value: "auto" | "manga" | "western") =>
+                                        updateSettings({ comicType: value })
+                                    }
+                                >
+                                    <SelectTrigger id="comic-type" className="h-9">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="auto">{locale === "zh" ? "自动" : "Auto"}</SelectItem>
+                                        <SelectItem value="manga">{locale === "zh" ? "日漫" : "Manga"}</SelectItem>
+                                        <SelectItem value="western">{locale === "zh" ? "美漫" : "Western"}</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label htmlFor="text-style-preset" className="text-xs">
+                                {locale === "zh" ? "字体样式预设" : "Text style preset"}
+                            </Label>
+                            <Select
+                                value={settings.textStylePreset ?? "match-original"}
+                                onValueChange={(value: "match-original" | "comic-bold" | "clean-serif") =>
+                                    updateSettings({ textStylePreset: value })
+                                }
+                            >
+                                <SelectTrigger id="text-style-preset" className="h-9">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="match-original">{locale === "zh" ? "匹配原文" : "Match original"}</SelectItem>
+                                    <SelectItem value="comic-bold">{locale === "zh" ? "漫画粗体" : "Comic bold"}</SelectItem>
+                                    <SelectItem value="clean-serif">{locale === "zh" ? "清晰衬线" : "Clean serif"}</SelectItem>
+                                </SelectContent>
+                            </Select>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                             <Button
@@ -747,22 +1407,183 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <p className="text-xs font-medium">
                                         {locale === "zh" ? "预翻译结果" : "Pre-translation Results"} ({detectedBlocks.length})
                                     </p>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-7 px-2 text-xs"
-                                        onClick={() => currentImage && clearDetectedTextBlocks(currentImage.id)}
-                                        disabled={!currentImage || detectedBlocks.length === 0}
-                                    >
-                                        {locale === "zh" ? "清空" : "Clear"}
-                                    </Button>
+                                    <div className="flex items-center gap-1">
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={handleExportTextLayer}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "文本层" : "Text Layer"}
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={() => textLayerImportInputRef.current?.click()}
+                                            disabled={!currentImage}
+                                        >
+                                            {locale === "zh" ? "导入文本层" : "Import Layer"}
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={handleExportDetectedJson}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            JSON
+                                        </Button>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={() => currentImage && clearDetectedTextBlocks(currentImage.id)}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "清空" : "Clear"}
+                                        </Button>
+                                    </div>
                                 </div>
+                                <input
+                                    ref={textLayerImportInputRef}
+                                    type="file"
+                                    accept=".json,.txt"
+                                    className="hidden"
+                                    aria-label={locale === "zh" ? "导入文本层文件" : "Import text layer file"}
+                                    onChange={(e) => {
+                                        const file = e.target.files?.[0]
+                                        if (!file) return
+                                        void handleImportTextLayer(file)
+                                        e.currentTarget.value = ""
+                                    }}
+                                />
                                 {currentImage?.detectedTextUpdatedAt && (
                                     <p className="text-[11px] text-muted-foreground">
                                         {locale === "zh" ? "更新时间" : "Updated"}:{" "}
                                         {new Date(currentImage.detectedTextUpdatedAt).toLocaleString()}
                                     </p>
                                 )}
+
+                                <div className="rounded-md border border-border/60 bg-background/60 p-2.5 space-y-2">
+                                    <p className="text-[11px] font-medium">
+                                        {locale === "zh" ? "文本查找替换（条漫友好）" : "Find & Replace (webtoon friendly)"}
+                                    </p>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <Input
+                                            ref={findInputRef}
+                                            value={findText}
+                                            onChange={(e) => setFindText(e.target.value)}
+                                            placeholder={locale === "zh" ? "查找" : "Find"}
+                                            className="h-8 text-xs"
+                                        />
+                                        <Input
+                                            value={replaceText}
+                                            onChange={(e) => setReplaceText(e.target.value)}
+                                            placeholder={locale === "zh" ? "替换为" : "Replace with"}
+                                            className="h-8 text-xs"
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <Select
+                                            value={replaceScope}
+                                            onValueChange={(value: "translated" | "source" | "both") => setReplaceScope(value)}
+                                        >
+                                            <SelectTrigger className="h-8">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="translated">{locale === "zh" ? "仅译文" : "Translation"}</SelectItem>
+                                                <SelectItem value="source">{locale === "zh" ? "仅原文" : "Source"}</SelectItem>
+                                                <SelectItem value="both">{locale === "zh" ? "原文+译文" : "Both"}</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                        <Button type="button" variant="outline" className="h-8 text-xs" onClick={handleReplaceCurrent}>
+                                            {locale === "zh" ? "当前页替换" : "Replace page"}
+                                        </Button>
+                                        <Button type="button" variant="outline" className="h-8 text-xs" onClick={handleReplaceGlobal}>
+                                            {locale === "zh" ? "全局替换" : "Replace all"}
+                                        </Button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={handleExportWord}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "导出 Word" : "Export Word"}
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={() => wordImportInputRef.current?.click()}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "导入 Word" : "Import Word"}
+                                        </Button>
+                                        <input
+                                            id="editor-word-import"
+                                            ref={wordImportInputRef}
+                                            type="file"
+                                            accept=".docx,.doc,.html,.htm"
+                                            aria-label={locale === "zh" ? "导入 Word 文档" : "Import Word document"}
+                                            className="hidden"
+                                            onChange={(e) => {
+                                                const file = e.target.files?.[0]
+                                                if (!file) return
+                                                void handleImportWord(file)
+                                                e.currentTarget.value = ""
+                                            }}
+                                        />
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-muted/30 p-2 space-y-2">
+                                        <p className="text-[11px] font-medium">
+                                            {locale === "zh"
+                                                ? "多选文本块批量操作（同文案/复制并排）"
+                                                : "Multi-block operations (same text / side-by-side paste)"}
+                                        </p>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Button type="button" variant="outline" className="h-8 text-xs" onClick={handleSelectAllBlocks}>
+                                                {locale === "zh" ? "全选文本块" : "Select all blocks"}
+                                            </Button>
+                                            <Button type="button" variant="outline" className="h-8 text-xs" onClick={handleClearBlockSelection}>
+                                                {locale === "zh" ? "清空选择" : "Clear selection"}
+                                            </Button>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Button type="button" variant="outline" className="h-8 text-xs" onClick={handleCopySelectedBlocks}>
+                                                {locale === "zh" ? "复制选中块" : "Copy selected"}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="h-8 text-xs"
+                                                onClick={() => void handlePasteCopiedBlocksSideBySide()}
+                                                disabled={!copiedBlocks.length}
+                                            >
+                                                {locale === "zh" ? "并排粘贴" : "Paste side-by-side"}
+                                            </Button>
+                                        </div>
+                                        <Textarea
+                                            value={bulkTextValue}
+                                            onChange={(e) => setBulkTextValue(e.target.value)}
+                                            placeholder={locale === "zh" ? "输入同一文本（可 Ctrl+V）" : "Enter same text for selected blocks"}
+                                            className="min-h-[64px] text-xs"
+                                        />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Button type="button" className="h-8 text-xs" onClick={handleApplyBulkText}>
+                                                {locale === "zh" ? "应用到选中块" : "Apply to selected"}
+                                            </Button>
+                                            <Button type="button" variant="outline" className="h-8 text-xs" onClick={() => void handlePasteClipboardToSelected()}>
+                                                {locale === "zh" ? "粘贴并应用" : "Paste & apply"}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </div>
 
                                 {detectedBlocks.length === 0 ? (
                                     <p className="text-[11px] text-muted-foreground">
@@ -775,24 +1596,46 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         <div className="space-y-2">
                                             {detectedBlocks.slice(0, 20).map((block, index) => (
                                                 <div key={`${index}-${block.sourceText}-${block.translatedText}`} className="rounded-md border border-border/60 bg-background/80 p-2">
+                                                    <div className="mb-1 flex items-center justify-between">
+                                                        <label className="inline-flex items-center gap-2 text-[11px] text-muted-foreground">
+                                                            <input
+                                                                type="checkbox"
+                                                                className="h-3.5 w-3.5"
+                                                                checked={selectedBlockSet.has(index)}
+                                                                aria-label={locale === "zh" ? `选择文本块 #${index + 1}` : `Select block #${index + 1}`}
+                                                                onChange={(e) => toggleBlockSelection(index, e.target.checked)}
+                                                            />
+                                                            {locale === "zh" ? `文本块 #${index + 1}` : `Block #${index + 1}`}
+                                                        </label>
+                                                    </div>
                                                     <p className="text-[11px] leading-snug">
                                                         <span className="text-muted-foreground">{locale === "zh" ? "原文" : "Src"}:</span>{" "}
                                                         {block.sourceText || "-"}
                                                     </p>
                                                     <div className="mt-1 space-y-1">
                                                         <Label className="text-[10px] text-muted-foreground">
-                                                            {locale === "zh" ? "译文（可手动编辑）" : "Translation (editable)"}
+                                                            {locale === "zh" ? "译文（富文本 WYSIWYG）" : "Translation (WYSIWYG)"}
                                                         </Label>
-                                                        <Input
-                                                            value={block.translatedText || ""}
-                                                            onChange={(e) => handleDetectedTextEdit(index, e.target.value)}
+                                                        <RichTextEditor
+                                                            value={block.richTextHtml || block.translatedText || ""}
+                                                            locale={locale}
                                                             placeholder={locale === "zh" ? "输入修正译文" : "Edit translated text"}
-                                                            className="h-8 text-xs"
+                                                            onChange={(html) => handleDetectedTextEdit(index, html)}
                                                         />
                                                     </div>
                                                     <p className="text-[10px] text-muted-foreground">
                                                         bbox: x={block.bbox.x.toFixed(3)}, y={block.bbox.y.toFixed(3)}, w={block.bbox.width.toFixed(3)}, h={block.bbox.height.toFixed(3)}
                                                     </p>
+                                                    {(block.lines?.length || block.style) && (
+                                                        <p className="text-[10px] text-muted-foreground">
+                                                            {block.lines?.length
+                                                                ? `${locale === "zh" ? "行文本" : "Lines"}: ${block.lines.join(" / ")}`
+                                                                : `${locale === "zh" ? "排版参考" : "Layout hints"}: `}
+                                                            {block.style
+                                                                ? ` ${locale === "zh" ? "颜色" : "Color"}=${block.style.textColor || "?"}, ${locale === "zh" ? "轮廓" : "Outline"}=${block.style.outlineColor || "?"}, ${locale === "zh" ? "描边" : "Stroke"}=${block.style.strokeColor || "?"}/${block.style.strokeWidth ?? "?"}, ${locale === "zh" ? "透明" : "Opacity"}=${block.style.textOpacity ?? "?"}, ${locale === "zh" ? "角度" : "Angle"}=${block.style.angle ?? "?"}, ${locale === "zh" ? "朝向" : "Orientation"}=${block.style.orientation || "auto"}`
+                                                                : ""}
+                                                        </p>
+                                                    )}
                                                 </div>
                                             ))}
                                         </div>

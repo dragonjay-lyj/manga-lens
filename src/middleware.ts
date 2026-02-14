@@ -8,14 +8,6 @@ const isProtectedRoute = createRouteMatcher([
     "/profile(.*)",
 ])
 
-// 定义公开路由
-const isPublicRoute = createRouteMatcher([
-    "/",
-    "/sign-in(.*)",
-    "/sign-up(.*)",
-    "/api/webhooks(.*)",
-])
-
 export default clerkMiddleware(async (auth, req) => {
     // 如果是受保护的路由，要求用户登录
     if (isProtectedRoute(req)) {

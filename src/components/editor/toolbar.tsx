@@ -12,6 +12,7 @@ import {
     Loader2,
     FileCode2,
     Layers2,
+    Brush,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import { toast } from "sonner"
@@ -20,6 +21,7 @@ import {
     buildMangaEditPrompt,
     detectTextBlocks,
     generateImage,
+    getTranslationDirectionMeta,
     type DetectTextResponse,
     type DetectedTextBlock,
     type GenerateImageResponse,
@@ -37,6 +39,8 @@ import {
     createMaskedImage,
     createInverseMaskedImage,
     compositeSelectionsFromFullImage,
+    createImageWithBrushMaskFilled,
+    compositeMaskedPixelsFromFullImage,
     imageToDataUrl,
 } from "@/lib/utils/image-utils"
 import type { Selection } from "@/types/database"
@@ -64,6 +68,7 @@ export function EditorToolbar() {
         isProcessing,
         setShowResult,
         setImageStatus,
+        updateSelections,
         initializeSelectionProgress,
         setSelectionProgress,
         clearSelectionProgress,
@@ -71,10 +76,12 @@ export function EditorToolbar() {
         clearDetectedTextBlocks,
         setProcessing,
         mergeResultIntoOriginal,
+        clearRepairMask,
     } = useEditorStore()
 
     const currentImage = useCurrentImage()
     const t = getMessages(locale)
+    const directionMeta = getTranslationDirectionMeta(settings.translationDirection ?? "ja2zh")
 
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
@@ -100,6 +107,36 @@ export function EditorToolbar() {
 
     const resolveRetryLimit = (extra: number = 0) =>
         Math.max(0, Math.min(8, (settings.maxRetries ?? 2) + extra))
+
+    const getTargetLanguageForDetection = () => {
+        const direction = settings.translationDirection ?? "ja2zh"
+        if (direction === "ja2en") return "English"
+        if (direction === "en2ja") return "日本語"
+        return "简体中文"
+    }
+
+    const blocksToSelections = (
+        blocks: DetectedTextBlock[],
+        imageWidth: number,
+        imageHeight: number,
+        idPrefix: string
+    ): Selection[] => (
+        blocks
+            .map((block, index) => {
+                const x = Math.max(0, Math.round(block.bbox.x * imageWidth))
+                const y = Math.max(0, Math.round(block.bbox.y * imageHeight))
+                const width = Math.max(12, Math.round(block.bbox.width * imageWidth))
+                const height = Math.max(12, Math.round(block.bbox.height * imageHeight))
+                return {
+                    id: `${idPrefix}-${Date.now()}-${index}`,
+                    x: Math.min(x, Math.max(0, imageWidth - 1)),
+                    y: Math.min(y, Math.max(0, imageHeight - 1)),
+                    width: Math.min(width, Math.max(1, imageWidth - x)),
+                    height: Math.min(height, Math.max(1, imageHeight - y)),
+                }
+            })
+            .filter((selection) => selection.width > 4 && selection.height > 4)
+    )
 
     const buildDetectPayloadCandidates = async (
         dataUrl: string,
@@ -322,8 +359,8 @@ export function EditorToolbar() {
         basePrompt,
         "",
         "【复杂背景强化】",
-        "1) 这是一块复杂背景/拟声词区域，请务必替换所有可见日文文本。",
-        "2) 若背景干扰阅读，请先局部重绘背景再放置中文文本。",
+        `1) 这是一块复杂背景/拟声词区域，请务必替换所有可见${directionMeta.sourceLangLabel}文本。`,
+        `2) 若背景干扰阅读，请先局部重绘背景再放置${directionMeta.targetLangLabel}文本。`,
         "3) 禁止保持原文不变，禁止仅擦除不重绘。",
         "4) 保持原有方向（竖排就竖排）、字重和描边风格。",
     ].join("\n")
@@ -426,7 +463,7 @@ export function EditorToolbar() {
 
             const detectResult = await runDetectTextRequest(
                 imageToDataUrl(originalImg),
-                "简体中文",
+                getTargetLanguageForDetection(),
                 originalImg.width,
                 originalImg.height
             )
@@ -488,11 +525,20 @@ export function EditorToolbar() {
             )
         }
 
-        const lines = scopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => (
-            `${index + 1}. 原文: ${block.sourceText || "(空)"} | 译文: ${block.translatedText || "(空)"} | `
-            + `bbox: x=${block.bbox.x.toFixed(3)}, y=${block.bbox.y.toFixed(3)}, `
-            + `w=${block.bbox.width.toFixed(3)}, h=${block.bbox.height.toFixed(3)}`
-        ))
+        const lines = scopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
+            const styleHint = block.style
+                ? `style: color=${block.style.textColor || "?"}, outline=${block.style.outlineColor || "?"}, angle=${block.style.angle ?? "?"}, orientation=${block.style.orientation || "auto"}, align=${block.style.alignment || "auto"}, weight=${block.style.fontWeight || "auto"}`
+                : "style: (none)"
+            const lineHint = block.lines?.length
+                ? `lines: ${block.lines.join(" / ")}`
+                : "lines: (none)"
+            return (
+                `${index + 1}. 原文: ${block.sourceText || "(空)"} | 译文: ${block.translatedText || "(空)"} | `
+                + `bbox: x=${block.bbox.x.toFixed(3)}, y=${block.bbox.y.toFixed(3)}, `
+                + `w=${block.bbox.width.toFixed(3)}, h=${block.bbox.height.toFixed(3)} | `
+                + `${lineHint} | ${styleHint}`
+            )
+        })
 
         return {
             prompt: [
@@ -526,9 +572,12 @@ export function EditorToolbar() {
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
         const total = selections.length
         const hasManySelections = total >= 10
-        const serverConcurrency = settings.isSerial
+        const requestedConcurrency = settings.isSerial
             ? 1
             : Math.max(1, Math.min(4, settings.concurrency || 1))
+        const effectiveConcurrency = hasManySelections
+            ? Math.max(1, Math.min(2, requestedConcurrency))
+            : requestedConcurrency
 
         const isHardSelection = (selection: Selection) => {
             const area = Math.max(1, selection.width * selection.height)
@@ -584,10 +633,16 @@ export function EditorToolbar() {
             return {
                 selection,
                 index,
+                area: Math.max(1, selection.width * selection.height),
                 isHard,
                 prompt: buildSelectionPrompt(selection, isHard),
                 inputPatch: buildSelectionInput(selection, isHard),
             }
+        })
+        const scheduledWorkItems = [...workItems].sort((a, b) => {
+            if (a.area !== b.area) return a.area - b.area
+            if (a.isHard !== b.isHard) return a.isHard ? -1 : 1
+            return a.index - b.index
         })
         const inputPatchBySelection = new Map(
             workItems.map((item) => [item.selection.id, item.inputPatch])
@@ -602,13 +657,21 @@ export function EditorToolbar() {
         if (updateToolbarProgress) {
             setProgress(0)
             setProgressText(`0/${total}`)
-            setProgressDetail(locale === "zh" ? `准备处理 ${total} 个选区...` : `Preparing ${total} selections...`)
+            setProgressDetail(
+                total >= 8
+                    ? (
+                        locale === "zh"
+                            ? `准备处理 ${total} 个选区（小选区优先，${effectiveConcurrency > 1 ? `并发 ${effectiveConcurrency}` : "串行"}）...`
+                            : `Preparing ${total} selections (small-first, ${effectiveConcurrency > 1 ? `parallel ${effectiveConcurrency}` : "serial"})...`
+                    )
+                    : (locale === "zh" ? `准备处理 ${total} 个选区...` : `Preparing ${total} selections...`)
+            )
         }
 
         const results = new Map<string, GenerateImageResponse>()
         if (settings.useServerApi) {
-            const queue = [...workItems]
-            const workerCount = Math.max(1, Math.min(serverConcurrency, queue.length))
+            const queue = [...scheduledWorkItems]
+            const workerCount = Math.max(1, Math.min(effectiveConcurrency, queue.length))
             let completed = 0
 
             const runWorker = async () => {
@@ -663,7 +726,7 @@ export function EditorToolbar() {
 
             await Promise.all(Array.from({ length: workerCount }, () => runWorker()))
         } else {
-            const requests = workItems.map(({ selection }) => ({
+            const requests = scheduledWorkItems.map(({ selection }) => ({
                 imageId: selection.id,
                 request: {
                     imageData: inputPatchBySelection.get(selection.id) || cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING),
@@ -673,7 +736,7 @@ export function EditorToolbar() {
             }))
             const batchResults = await batchGenerateImages(requests, {
                 isSerial: settings.isSerial,
-                concurrency: settings.isSerial ? 1 : Math.max(1, settings.concurrency || 1),
+                concurrency: effectiveConcurrency,
                 maxRetries: resolveRetryLimit(),
                 onItemStart: (selectionId, completed, totalCount) => {
                     if (trackSelectionProgress) {
@@ -1044,6 +1107,63 @@ export function EditorToolbar() {
         )
     }
 
+    const processImageWithRepairMask = async (
+        imageId: string,
+        imageUrl: string,
+        repairMaskUrl: string,
+        basePrompt: string,
+        updateToolbarProgress: boolean
+    ) => {
+        const originalImg = await loadImage(imageUrl)
+        if (updateToolbarProgress) {
+            setProgress(10)
+            setProgressText("1/2")
+            setProgressDetail(
+                locale === "zh"
+                    ? "按画笔掩膜准备修复输入..."
+                    : "Preparing repair image from brush mask..."
+            )
+        }
+
+        const maskedInput = await createImageWithBrushMaskFilled(originalImg, repairMaskUrl, "#ffffff")
+        const repairPrompt = [
+            basePrompt,
+            "",
+            locale === "zh"
+                ? "【修复画笔模式】仅重绘白色掩膜区域，保持其他区域像素不变。"
+                : "[Repair brush mode] Repaint only white masked regions. Keep all other pixels unchanged.",
+            locale === "zh"
+                ? "必须保持原图分辨率、角色结构与背景透视，不要扩大修改范围。"
+                : "Keep original resolution, character structure and perspective. Do not expand edit area.",
+        ].join("\n")
+
+        const result = await runGenerateRequestWithRetry(
+            maskedInput,
+            repairPrompt,
+            resolveRetryLimit()
+        )
+
+        if (!result.success || !result.imageData) {
+            throw new Error(result.error || (locale === "zh" ? "修复画笔生成失败" : "Repair brush generation failed"))
+        }
+
+        if (updateToolbarProgress) {
+            setProgress(70)
+            setProgressText("2/2")
+            setProgressDetail(
+                locale === "zh"
+                    ? "正在将修复结果按像素掩膜回贴..."
+                    : "Compositing repaired pixels with brush mask..."
+            )
+        }
+
+        return compositeMaskedPixelsFromFullImage(
+            originalImg,
+            result.imageData,
+            repairMaskUrl
+        )
+    }
+
     // 扣费并更新余额
     const deductCoins = async (amount: number): Promise<boolean> => {
         try {
@@ -1114,7 +1234,11 @@ export function EditorToolbar() {
         setImageStatus(currentImage.id, "processing")
 
         try {
-            const basePrompt = buildMangaEditPrompt(prompt)
+            const basePrompt = buildMangaEditPrompt(prompt, {
+                direction: settings.translationDirection,
+                comicType: settings.comicType,
+                textStylePreset: settings.textStylePreset,
+            })
             const resultUrl = await processImage(
                 currentImage.id,
                 currentImage.originalUrl,
@@ -1188,7 +1312,11 @@ export function EditorToolbar() {
         let failedCount = 0
 
         try {
-            const basePrompt = buildMangaEditPrompt(prompt)
+            const basePrompt = buildMangaEditPrompt(prompt, {
+                direction: settings.translationDirection,
+                comicType: settings.comicType,
+                textStylePreset: settings.textStylePreset,
+            })
 
             for (let i = 0; i < imagesToProcess.length; i++) {
                 const img = imagesToProcess[i]
@@ -1279,6 +1407,181 @@ export function EditorToolbar() {
                     ? `导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `Export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        }
+    }
+
+    // 一键机翻：自动检测文本框 + 自动生成
+    const handleOneClickMachineTranslate = async () => {
+        if (!currentImage) {
+            toast.error(t.errors.noImage)
+            return
+        }
+
+        if (!settings.useServerApi && !settings.apiKey) {
+            toast.error(t.errors.apiKeyRequired)
+            return
+        }
+
+        if (!settings.useServerApi && settings.provider === "gemini" && settings.model && !settings.model.includes("image")) {
+            toast.warning("当前 Gemini 模型可能不支持图像输出，建议使用 gemini-2.5-flash-image")
+        }
+
+        setProcessing(true)
+        setImageStatus(currentImage.id, "processing")
+        setProgress(0)
+        setProgressText("0/2")
+        setProgressDetail(locale === "zh" ? "正在自动检测文本..." : "Detecting text blocks...")
+
+        try {
+            const originalImg = await loadImage(currentImage.originalUrl)
+            const detectResult = await runDetectTextRequest(
+                imageToDataUrl(originalImg),
+                getTargetLanguageForDetection(),
+                originalImg.width,
+                originalImg.height
+            )
+
+            if (!detectResult.success) {
+                throw new Error(detectResult.error || (locale === "zh" ? "自动检测失败" : "Auto-detection failed"))
+            }
+
+            const detectedBlocks = detectResult.blocks || []
+            const detectedSelections = blocksToSelections(
+                detectedBlocks,
+                originalImg.width,
+                originalImg.height,
+                "one-click"
+            )
+
+            if (detectedSelections.length > 0) {
+                updateSelections(currentImage.id, detectedSelections)
+            } else {
+                clearSelectionProgress(currentImage.id)
+            }
+            setDetectedTextBlocks(currentImage.id, detectedBlocks)
+
+            if (settings.useServerApi) {
+                const COST_PER_GENERATION = 10
+                const generationUnits = useMaskMode ? 1 : Math.max(1, detectedSelections.length || 0)
+                const totalCost = COST_PER_GENERATION * generationUnits
+                const deducted = await deductCoins(totalCost)
+                if (!deducted) {
+                    setImageStatus(currentImage.id, "idle")
+                    return
+                }
+                toast.info(`已扣除 ${totalCost} Coins`)
+            }
+
+            setProgress(50)
+            setProgressText("1/2")
+            setProgressDetail(
+                locale === "zh"
+                    ? `检测完成，命中 ${detectedSelections.length} 个选区，开始生成...`
+                    : `Detected ${detectedSelections.length} selections, generating...`
+            )
+
+            const basePrompt = buildMangaEditPrompt(prompt, {
+                direction: settings.translationDirection,
+                comicType: settings.comicType,
+                textStylePreset: settings.textStylePreset,
+            })
+
+            const resultUrl = await processImage(
+                currentImage.id,
+                currentImage.originalUrl,
+                detectedSelections,
+                detectedBlocks,
+                basePrompt,
+                true,
+                true
+            )
+
+            setImageStatus(currentImage.id, "completed", resultUrl)
+            setShowResult(true)
+            void logUsage("generate", {
+                source: settings.useServerApi ? "server_api" : "custom_key",
+                mode: activeMaskMode,
+                selectionCount: detectedSelections.length,
+                workflow: "one_click_mt",
+            })
+            toast.success(
+                locale === "zh"
+                    ? `一键机翻完成（${detectedSelections.length} 个选区）`
+                    : `One-click translation completed (${detectedSelections.length} selections)`
+            )
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "未知错误"
+            setImageStatus(currentImage.id, "failed", undefined, errorMessage)
+            toast.error(
+                (locale === "zh" ? "一键机翻失败: " : "One-click translation failed: ") + getShortError(errorMessage),
+                { duration: 8000 }
+            )
+        } finally {
+            setProcessing(false)
+            setProgress(0)
+            setProgressText("")
+            setProgressDetail("")
+        }
+    }
+
+    const handleRepairBrushGenerate = async () => {
+        if (!currentImage) {
+            toast.error(t.errors.noImage)
+            return
+        }
+        if (!currentImage.repairMaskUrl) {
+            toast.warning(locale === "zh" ? "请先用修复画笔在画布上涂抹区域" : "Paint a repair mask on canvas first")
+            return
+        }
+
+        if (settings.useServerApi) {
+            const COST_PER_GENERATION = 10
+            const deducted = await deductCoins(COST_PER_GENERATION)
+            if (!deducted) {
+                return
+            }
+            toast.info(`已扣除 ${COST_PER_GENERATION} Coins`)
+        } else if (!settings.apiKey) {
+            toast.error(t.errors.apiKeyRequired)
+            return
+        }
+
+        setProcessing(true)
+        setImageStatus(currentImage.id, "processing")
+
+        try {
+            const basePrompt = buildMangaEditPrompt(prompt, {
+                direction: settings.translationDirection,
+                comicType: settings.comicType,
+                textStylePreset: settings.textStylePreset,
+            })
+            const resultUrl = await processImageWithRepairMask(
+                currentImage.id,
+                currentImage.originalUrl,
+                currentImage.repairMaskUrl,
+                basePrompt,
+                true
+            )
+            setImageStatus(currentImage.id, "completed", resultUrl)
+            clearRepairMask(currentImage.id)
+            setShowResult(true)
+            toast.success(locale === "zh" ? "修复画笔生成完成" : "Repair brush generation completed")
+            void logUsage("generate", {
+                source: settings.useServerApi ? "server_api" : "custom_key",
+                mode: "repair_brush",
+            })
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "未知错误"
+            setImageStatus(currentImage.id, "failed", undefined, errorMessage)
+            toast.error(
+                (locale === "zh" ? "修复画笔生成失败: " : "Repair brush generation failed: ") + getShortError(errorMessage),
+                { duration: 8000 }
+            )
+        } finally {
+            setProcessing(false)
+            setProgress(0)
+            setProgressText("")
+            setProgressDetail("")
         }
     }
 
@@ -1401,6 +1704,32 @@ export function EditorToolbar() {
                         <Play className="h-4 w-4 mr-2" />
                     )}
                     {t.editor.toolbar.generate}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleOneClickMachineTranslate}
+                    disabled={isProcessing || !currentImage}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Play className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "一键机翻" : "One-click MT"}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleRepairBrushGenerate}
+                    disabled={isProcessing || !currentImage?.repairMaskUrl}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Brush className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
                 </Button>
 
                 <Button

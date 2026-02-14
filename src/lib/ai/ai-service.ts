@@ -31,10 +31,34 @@ export interface TextBlockBBox {
     height: number // 0-1 normalized
 }
 
+export interface TextLayoutStyleHints {
+    textColor?: string
+    outlineColor?: string
+    strokeColor?: string
+    strokeWidth?: number
+    textOpacity?: number
+    fontFamily?: string
+    angle?: number
+    orientation?: "vertical" | "horizontal" | "auto"
+    alignment?: "start" | "center" | "end" | "justify" | "auto"
+    fontWeight?: string
+}
+
+export interface TextSegmentBBox {
+    x: number
+    y: number
+    width: number
+    height: number
+}
+
 export interface DetectedTextBlock {
     sourceText: string
     translatedText: string
     bbox: TextBlockBBox
+    sourceLanguage?: string
+    lines?: string[]
+    segments?: TextSegmentBBox[]
+    style?: TextLayoutStyleHints
 }
 
 export interface DetectTextRequest {
@@ -72,12 +96,58 @@ const TRANSLATION_KEYWORDS =
 const VERTICAL_LAYOUT_KEYWORDS = /(竖排|縦書き|vertical)/i
 const HORIZONTAL_LAYOUT_KEYWORDS = /(横排|horizontal)/i
 
+export type TranslationDirection = "ja2zh" | "en2zh" | "ja2en" | "en2ja"
+
+export function getTranslationDirectionMeta(direction: TranslationDirection) {
+    if (direction === "en2zh") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "en",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "ja2en") {
+        return {
+            sourceLangLabel: "日语",
+            targetLangLabel: "英语",
+            sourceLangCode: "ja",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "en2ja") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "日语",
+            sourceLangCode: "en",
+            targetLangCode: "ja",
+        }
+    }
+    return {
+        sourceLangLabel: "日语",
+        targetLangLabel: "简体中文",
+        sourceLangCode: "ja",
+        targetLangCode: "zh",
+    }
+}
+
 /**
  * 对漫画局部重绘请求追加稳定约束，降低“竖排错乱/覆盖周边”概率。
  */
-export function buildMangaEditPrompt(userPrompt: string): string {
+export function buildMangaEditPrompt(
+    userPrompt: string,
+    options?: {
+        direction?: TranslationDirection
+        comicType?: "auto" | "manga" | "western"
+        textStylePreset?: "match-original" | "comic-bold" | "clean-serif"
+    }
+): string {
     const rawPrompt = userPrompt.trim()
     const isLikelyTranslation = rawPrompt.length === 0 || TRANSLATION_KEYWORDS.test(rawPrompt)
+    const direction = options?.direction ?? "ja2zh"
+    const comicType = options?.comicType ?? "auto"
+    const textStylePreset = options?.textStylePreset ?? "match-original"
+    const directionMeta = getTranslationDirectionMeta(direction)
 
     if (!isLikelyTranslation) {
         return [
@@ -90,12 +160,28 @@ export function buildMangaEditPrompt(userPrompt: string): string {
         ].join('\n')
     }
 
-    const task = rawPrompt || '请将图片中的日文对话翻译替换为自然、通顺的简体中文。'
+    const defaultTaskByDirection: Record<TranslationDirection, string> = {
+        ja2zh: "请将图片中的日文文本翻译并替换为自然、通顺的简体中文。",
+        en2zh: "请将图片中的英文文本翻译并替换为自然、通顺的简体中文。",
+        ja2en: "Please translate Japanese text in the image to natural English and replace it in place.",
+        en2ja: "画像内の英語テキストを自然な日本語に翻訳し、元位置に置き換えてください。",
+    }
+    const effectiveTask = rawPrompt || defaultTaskByDirection[direction]
     const layoutRule = VERTICAL_LAYOUT_KEYWORDS.test(rawPrompt)
         ? '文字排版要求：使用竖排（从上到下，从右到左列），并保持标点位置自然。'
         : HORIZONTAL_LAYOUT_KEYWORDS.test(rawPrompt)
             ? '文字排版要求：使用横排中文（从左到右、从上到下）。'
             : '文字排版要求：优先保持原文排版方向与行列结构（原文竖排就竖排，原文横排就横排）。'
+    const comicRule = comicType === "manga"
+        ? "页面类型：日漫/黑白网点风格。优先保持竖排阅读习惯与字距密度。"
+        : comicType === "western"
+            ? "页面类型：美漫/西文阅读习惯。优先保持横排、大小写与对齐节奏。"
+            : "页面类型：自动判断（日漫/美漫皆可），优先保持原有阅读方向。"
+    const stylePresetRule = textStylePreset === "comic-bold"
+        ? "字体预设：漫画粗体。保持强对比、黑体感和稳定描边。"
+        : textStylePreset === "clean-serif"
+            ? "字体预设：清晰衬线体。保证可读性，适合长文本和条漫。"
+            : "字体预设：尽量匹配原文（字重/轮廓/倾斜/颜色）。"
 
     return [
         '你是漫画局部翻译修图引擎，只输出编辑后的图片。',
@@ -103,15 +189,17 @@ export function buildMangaEditPrompt(userPrompt: string): string {
         '1) 只替换原有文字，人物、线条、网点、气泡形状和背景必须保持不变。',
         '2) 输出必须与输入区域视觉一致，不要额外边框、不要裁切、不要改变构图。',
         '3) 先清除原文再排版，避免重影、乱码、错位和符号拆分（例如 “（）” 分离）。',
-        '4) 将原文翻译为简体中文。',
+        `4) 将原文从${directionMeta.sourceLangLabel}翻译为${directionMeta.targetLangLabel}。`,
         `5) ${layoutRule}`,
-        '6) 字体风格必须贴近原文：保持原有字重、笔画粗细、描边/阴影、间距、大小与排版密度；避免使用通用默认字体感。',
-        '7) 文本应继续落在原气泡可读区域内，行数与对齐尽量接近原文，避免明显溢出或留白异常。',
-        '8) 翻译要贴合语境、口语自然，可适度意译但不能改变剧情信息。',
-        '9) 严禁只擦除不重绘：最终图片中每个对白区域都必须有清晰可读的目标语言文本，不能留空白块。',
-        '10) 若个别词无法识别，可用最接近语境的保守译法或音译占位，但绝不能留空。',
-        '11) 仅返回图片，不要返回说明文本。',
-        `用户要求：${task}`,
+        `6) ${comicRule}`,
+        `7) ${stylePresetRule}`,
+        '8) 字体风格必须贴近原文：保持原有字重、笔画粗细、描边/阴影、间距、大小与排版密度；避免使用通用默认字体感。',
+        '9) 文本应继续落在原气泡可读区域内，行数与对齐尽量接近原文，避免明显溢出或留白异常。',
+        '10) 翻译要贴合语境、口语自然，可适度意译但不能改变剧情信息。',
+        '11) 严禁只擦除不重绘：最终图片中每个对白区域都必须有清晰可读的目标语言文本，不能留空白块。',
+        '12) 若个别词无法识别，可用最接近语境的保守译法或音译占位，但绝不能留空。',
+        '13) 仅返回图片，不要返回说明文本。',
+        `用户要求：${effectiveTask}`,
     ].join('\n')
 }
 
@@ -236,6 +324,54 @@ function normalizeDetectedBlocks(payload: unknown): DetectedTextBlock[] {
         if (left === null || top === null || width === null || height === null) continue
         if (width <= 0 || height <= 0) continue
 
+        const sourceLanguage = String(
+            block.sourceLanguage ??
+            block.source_language ??
+            block.lang ??
+            ""
+        ).trim() || undefined
+
+        const normalizeSegment = (item: unknown): TextSegmentBBox | null => {
+            if (!item || typeof item !== "object") return null
+            const box = item as Record<string, unknown>
+            const sx = toNumber(box.x ?? box.left)
+            const sy = toNumber(box.y ?? box.top)
+            const sw = toNumber(box.width ?? box.w)
+            const sh = toNumber(box.height ?? box.h)
+            if (sx === null || sy === null || sw === null || sh === null) return null
+            if (sw <= 0 || sh <= 0) return null
+            return {
+                x: clampNormalized(sx),
+                y: clampNormalized(sy),
+                width: clampNormalized(sw),
+                height: clampNormalized(sh),
+            }
+        }
+
+        const lines = Array.isArray(block.lines)
+            ? block.lines.map((line) => String(line ?? "").trim()).filter(Boolean)
+            : Array.isArray(block.lineTexts)
+                ? (block.lineTexts as unknown[]).map((line) => String(line ?? "").trim()).filter(Boolean)
+                : undefined
+        const segmentsRaw = Array.isArray(block.segments) ? block.segments : Array.isArray(block.segment_boxes) ? block.segment_boxes : []
+        const segments = (segmentsRaw as unknown[]).map(normalizeSegment).filter((segment): segment is TextSegmentBBox => Boolean(segment))
+
+        const styleRaw = (block.style ?? block.styleHints ?? block.layout) as Record<string, unknown> | undefined
+        const style: TextLayoutStyleHints | undefined = styleRaw
+            ? {
+                textColor: typeof styleRaw.textColor === "string" ? styleRaw.textColor : (typeof styleRaw.color === "string" ? styleRaw.color : undefined),
+                outlineColor: typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : (typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : undefined),
+                strokeColor: typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : (typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : undefined),
+                strokeWidth: toNumber(styleRaw.strokeWidth ?? styleRaw.stroke_width) ?? undefined,
+                textOpacity: toNumber(styleRaw.textOpacity ?? styleRaw.opacity) ?? undefined,
+                fontFamily: typeof styleRaw.fontFamily === "string" ? styleRaw.fontFamily : undefined,
+                angle: toNumber(styleRaw.angle ?? styleRaw.rotation) ?? undefined,
+                orientation: typeof styleRaw.orientation === "string" ? (styleRaw.orientation as TextLayoutStyleHints["orientation"]) : undefined,
+                alignment: typeof styleRaw.alignment === "string" ? (styleRaw.alignment as TextLayoutStyleHints["alignment"]) : undefined,
+                fontWeight: typeof styleRaw.fontWeight === "string" ? styleRaw.fontWeight : undefined,
+            }
+            : undefined
+
         normalized.push({
             sourceText,
             translatedText,
@@ -245,6 +381,10 @@ function normalizeDetectedBlocks(payload: unknown): DetectedTextBlock[] {
                 width: clampNormalized(width),
                 height: clampNormalized(height),
             },
+            sourceLanguage,
+            lines: lines?.length ? lines : undefined,
+            segments: segments.length ? segments : undefined,
+            style,
         })
     }
 
@@ -505,11 +645,13 @@ function buildDetectionPrompt(targetLanguage: string): string {
     return [
         `请检测图片中的所有文本块，并翻译为${targetLanguage}。`,
         '输出必须是 JSON，格式如下：',
-        '{"blocks":[{"sourceText":"原文","translatedText":"译文","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}',
+        '{"blocks":[{"sourceText":"原文","translatedText":"译文","sourceLanguage":"ja","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15},"lines":["..."],"segments":[{"x":0.1,"y":0.2,"width":0.3,"height":0.06}],"style":{"textColor":"#000000","outlineColor":"#ffffff","strokeColor":"#ffffff","strokeWidth":1,"textOpacity":1,"fontFamily":"Noto Sans CJK SC","angle":0,"orientation":"vertical","alignment":"center","fontWeight":"bold"}}]}',
         '要求：',
         '1) bbox 使用 0-1 归一化坐标（相对整张图），x/y 为左上角。',
-        '2) 只输出 JSON，不要输出 markdown 或解释。',
-        '3) translatedText 使用自然、口语化译文。',
+        '2) lines 返回按阅读顺序拆分后的文本行；segments 返回更细粒度文本分割框（可选）。',
+        '3) style 需估计颜色、轮廓、角度、朝向、对齐和字重（可选，但尽量提供）。',
+        '4) 只输出 JSON，不要输出 markdown 或解释。',
+        '5) translatedText 使用自然、口语化译文。',
     ].join('\n')
 }
 

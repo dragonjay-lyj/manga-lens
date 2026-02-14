@@ -2,7 +2,6 @@
 
 import { useEffect, useCallback } from "react"
 import { useEditorStore, useCurrentImage } from "@/lib/stores/editor-store"
-import { downloadImage, downloadImagesAsZip } from "@/lib/utils/image-utils"
 import { toast } from "sonner"
 
 interface KeyboardShortcutsOptions {
@@ -30,6 +29,7 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
         setZoom,
         resetView,
         setShowResult,
+        setCurrentImage,
         removeImage,
         clearSelections,
         undo,
@@ -81,6 +81,20 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
             if (isCtrlOrCmd && e.key === "s") {
                 e.preventDefault()
                 toast.info("项目已自动保存到本地")
+                return
+            }
+
+            // Ctrl+F: 当前页查找
+            if (isCtrlOrCmd && e.key.toLowerCase() === "f") {
+                e.preventDefault()
+                window.dispatchEvent(new CustomEvent("mangalens:focus-find", { detail: { global: false } }))
+                return
+            }
+
+            // Ctrl+G: 全局查找
+            if (isCtrlOrCmd && e.key.toLowerCase() === "g") {
+                e.preventDefault()
+                window.dispatchEvent(new CustomEvent("mangalens:focus-find", { detail: { global: true } }))
                 return
             }
 
@@ -138,6 +152,22 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
                 return
             }
 
+            // A / D / PageUp / PageDown: 翻页（切换图片）
+            if (images.length > 1 && (e.key.toLowerCase() === "a" || e.key === "PageUp")) {
+                e.preventDefault()
+                const currentIndex = images.findIndex((img) => img.id === currentImageId)
+                const prevIndex = currentIndex <= 0 ? images.length - 1 : currentIndex - 1
+                setCurrentImage(images[prevIndex]?.id || null)
+                return
+            }
+            if (images.length > 1 && (e.key.toLowerCase() === "d" || e.key === "PageDown")) {
+                e.preventDefault()
+                const currentIndex = images.findIndex((img) => img.id === currentImageId)
+                const nextIndex = currentIndex < 0 || currentIndex >= images.length - 1 ? 0 : currentIndex + 1
+                setCurrentImage(images[nextIndex]?.id || null)
+                return
+            }
+
             // Enter: 生成
             if (e.key === "Enter" && isCtrlOrCmd) {
                 e.preventDefault()
@@ -166,6 +196,9 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
             removeImage,
             clearSelections,
             options,
+            images,
+            currentImageId,
+            setCurrentImage,
         ]
     )
 

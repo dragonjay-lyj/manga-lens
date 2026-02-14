@@ -246,6 +246,56 @@ function normalizeBlocks(payload: unknown, size: DetectorSize): DetectedTextBloc
             ""
         ).trim()
 
+        const sourceLanguage = String(
+            item.sourceLanguage ??
+            item.source_language ??
+            item.lang ??
+            ""
+        ).trim() || undefined
+
+        const lines = Array.isArray(item.lines)
+            ? item.lines.map((line) => String(line ?? "").trim()).filter(Boolean)
+            : Array.isArray(item.line_texts)
+                ? (item.line_texts as unknown[]).map((line) => String(line ?? "").trim()).filter(Boolean)
+                : undefined
+
+        const segmentRaw = Array.isArray(item.segments)
+            ? item.segments
+            : Array.isArray(item.segment_boxes)
+                ? item.segment_boxes
+                : []
+        const segments = (segmentRaw as unknown[]).flatMap((segment) => {
+            if (!segment || typeof segment !== "object") return []
+            const s = segment as Record<string, unknown>
+            const x = toNumber(s.x ?? s.left)
+            const y = toNumber(s.y ?? s.top)
+            const width = toNumber(s.width ?? s.w)
+            const height = toNumber(s.height ?? s.h)
+            if (x === null || y === null || width === null || height === null || width <= 0 || height <= 0) return []
+            return [{
+                x: clamp01(normalizeCoordinate(x, resolvedSize.width)),
+                y: clamp01(normalizeCoordinate(y, resolvedSize.height)),
+                width: clamp01(normalizeLength(width, resolvedSize.width)),
+                height: clamp01(normalizeLength(height, resolvedSize.height)),
+            }]
+        })
+
+        const styleRaw = (item.style ?? item.styleHints ?? item.layout) as Record<string, unknown> | undefined
+        const style = styleRaw
+            ? {
+                textColor: typeof styleRaw.textColor === "string" ? styleRaw.textColor : (typeof styleRaw.color === "string" ? styleRaw.color : undefined),
+                outlineColor: typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : (typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : undefined),
+                strokeColor: typeof styleRaw.strokeColor === "string" ? styleRaw.strokeColor : (typeof styleRaw.outlineColor === "string" ? styleRaw.outlineColor : undefined),
+                strokeWidth: toNumber(styleRaw.strokeWidth ?? styleRaw.stroke_width) ?? undefined,
+                textOpacity: toNumber(styleRaw.textOpacity ?? styleRaw.opacity) ?? undefined,
+                fontFamily: typeof styleRaw.fontFamily === "string" ? styleRaw.fontFamily : undefined,
+                angle: toNumber(styleRaw.angle ?? styleRaw.rotation) ?? undefined,
+                orientation: typeof styleRaw.orientation === "string" ? styleRaw.orientation as "vertical" | "horizontal" | "auto" : undefined,
+                alignment: typeof styleRaw.alignment === "string" ? styleRaw.alignment as "start" | "center" | "end" | "justify" | "auto" : undefined,
+                fontWeight: typeof styleRaw.fontWeight === "string" ? styleRaw.fontWeight : undefined,
+            }
+            : undefined
+
         const key = [
             bbox.x.toFixed(4),
             bbox.y.toFixed(4),
@@ -260,6 +310,10 @@ function normalizeBlocks(payload: unknown, size: DetectorSize): DetectedTextBloc
             sourceText,
             translatedText,
             bbox,
+            sourceLanguage,
+            lines: lines?.length ? lines : undefined,
+            segments: segments.length ? segments : undefined,
+            style,
         })
     }
 

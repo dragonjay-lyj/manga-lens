@@ -287,6 +287,70 @@ export function createInverseMaskedImage(
 }
 
 /**
+ * 基于像素级画笔遮罩创建“待修复输入图”：
+ * - 保留原图上下文
+ * - 仅将画笔涂抹区域填充为指定颜色，交给模型重绘
+ */
+export async function createImageWithBrushMaskFilled(
+    image: HTMLImageElement,
+    maskDataUrl: string,
+    fillColor: string = '#ffffff'
+): Promise<string> {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')!
+    canvas.width = image.width
+    canvas.height = image.height
+    ctx.drawImage(image, 0, 0)
+
+    const maskImage = await loadImage(maskDataUrl)
+    const fillLayer = document.createElement('canvas')
+    const fillCtx = fillLayer.getContext('2d')!
+    fillLayer.width = image.width
+    fillLayer.height = image.height
+
+    fillCtx.fillStyle = fillColor
+    fillCtx.fillRect(0, 0, fillLayer.width, fillLayer.height)
+    fillCtx.globalCompositeOperation = 'destination-in'
+    fillCtx.drawImage(maskImage, 0, 0, fillLayer.width, fillLayer.height)
+    fillCtx.globalCompositeOperation = 'source-over'
+
+    ctx.drawImage(fillLayer, 0, 0)
+    return canvas.toDataURL('image/png')
+}
+
+/**
+ * 将全图生成结果按像素级画笔遮罩贴回原图
+ */
+export async function compositeMaskedPixelsFromFullImage(
+    originalImage: HTMLImageElement,
+    fullResultBase64: string,
+    maskDataUrl: string
+): Promise<string> {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')!
+    canvas.width = originalImage.width
+    canvas.height = originalImage.height
+    ctx.drawImage(originalImage, 0, 0)
+
+    const [resultImage, maskImage] = await Promise.all([
+        loadImage(fullResultBase64),
+        loadImage(maskDataUrl),
+    ])
+
+    const patchLayer = document.createElement('canvas')
+    const patchCtx = patchLayer.getContext('2d')!
+    patchLayer.width = originalImage.width
+    patchLayer.height = originalImage.height
+    patchCtx.drawImage(resultImage, 0, 0, patchLayer.width, patchLayer.height)
+    patchCtx.globalCompositeOperation = 'destination-in'
+    patchCtx.drawImage(maskImage, 0, 0, patchLayer.width, patchLayer.height)
+    patchCtx.globalCompositeOperation = 'source-over'
+
+    ctx.drawImage(patchLayer, 0, 0)
+    return canvas.toDataURL('image/png')
+}
+
+/**
  * 将生成的补丁合成回原图
  */
 export function compositeImage(
