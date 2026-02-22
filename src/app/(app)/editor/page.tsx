@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useCallback } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { EditorCanvas } from "@/components/editor/canvas"
 import { EditorSidebar } from "@/components/editor/sidebar"
 import { EditorToolbar } from "@/components/editor/toolbar"
@@ -13,7 +13,8 @@ import { ErrorBoundary } from "@/components/shared/error-boundary"
 import { DragDropZone } from "@/components/shared/drag-drop-zone"
 import { UserButton } from "@clerk/nextjs"
 import { useEditorStore } from "@/lib/stores/editor-store"
-import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
+import { TRANSLATION_DIRECTIONS, type TranslationDirection } from "@/lib/ai/ai-service"
+import { EDITOR_IMAGE_ACCEPT, expandEditorUploadFiles, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import { useKeyboardShortcuts } from "@/lib/hooks/use-keyboard-shortcuts"
 import { IconButton } from "@/components/ui/icon-button"
 import { Button } from "@/components/ui/button"
@@ -31,7 +32,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Sparkles, Home, Menu, PanelLeft } from "lucide-react"
 
 export default function EditorPage() {
-    const { locale, setLocale, addImages } = useEditorStore()
+    const { locale, setLocale, addImages, updateSettings } = useEditorStore()
+    const appliedQueryRef = useRef<string | null>(null)
     const navigationItems = [
         { href: "/projects", zh: "项目", en: "Projects" },
         { href: "/profile", zh: "个人中心", en: "Profile" },
@@ -43,11 +45,58 @@ export default function EditorPage() {
     // 启用键盘快捷键
     useKeyboardShortcuts()
 
+    useEffect(() => {
+        if (typeof window === "undefined") return
+        const searchParams = new URLSearchParams(window.location.search)
+        const serialized = searchParams.toString()
+        if (!serialized || appliedQueryRef.current === serialized) return
+
+        const nextSettings: Parameters<typeof updateSettings>[0] = {}
+        const provider = searchParams.get("provider")
+        if (provider === "gemini" || provider === "openai") {
+            nextSettings.provider = provider
+        }
+        const model = searchParams.get("model")
+        if (model) {
+            nextSettings.model = model
+        }
+        const direction = searchParams.get("direction")
+        if (direction && TRANSLATION_DIRECTIONS.includes(direction as TranslationDirection)) {
+            nextSettings.translationDirection = direction as TranslationDirection
+        }
+        if (Object.keys(nextSettings).length > 0) {
+            updateSettings(nextSettings)
+        }
+
+        const lang = searchParams.get("lang") || searchParams.get("locale")
+        if (lang === "zh" || lang === "en") {
+            setLocale(lang)
+        }
+
+        appliedQueryRef.current = serialized
+    }, [setLocale, updateSettings])
+
     // 处理拖拽上传
     const handleFilesDropped = useCallback(async (files: File[]) => {
-        const normalizeResult = await normalizeEditorImageFiles(files)
+        const expandedResult = await expandEditorUploadFiles(files)
+        const normalizeResult = await normalizeEditorImageFiles(expandedResult.files)
         if (normalizeResult.files.length > 0) {
             addImages(normalizeResult.files)
+        }
+
+        if (expandedResult.archiveExpandedEntries > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已从 ${expandedResult.archiveSourceFiles} 个压缩包中解包 ${expandedResult.archiveExpandedEntries} 个文件`
+                    : `Extracted ${expandedResult.archiveExpandedEntries} files from ${expandedResult.archiveSourceFiles} archive(s)`
+            )
+        }
+        if (expandedResult.unsupportedArchives.length > 0) {
+            toast.warning(
+                locale === "zh"
+                    ? `暂不支持直接读取 ${expandedResult.unsupportedArchives.length} 个 RAR/7z 压缩包`
+                    : `${expandedResult.unsupportedArchives.length} RAR/7z archives are not supported yet`
+            )
         }
 
         if (normalizeResult.convertedCount > 0) {
@@ -66,15 +115,16 @@ export default function EditorPage() {
             )
         }
 
-        if (normalizeResult.failed.length > 0) {
-            const preview = normalizeResult.failed
+        const allFailed = [...expandedResult.failed, ...normalizeResult.failed]
+        if (allFailed.length > 0) {
+            const preview = allFailed
                 .slice(0, 2)
                 .map((item) => `${item.fileName} (${item.reason})`)
                 .join("; ")
             toast.warning(
                 locale === "zh"
-                    ? `有 ${normalizeResult.failed.length} 个文件未导入：${preview}`
-                    : `${normalizeResult.failed.length} files were not imported: ${preview}`
+                    ? `有 ${allFailed.length} 个文件未导入：${preview}`
+                    : `${allFailed.length} files were not imported: ${preview}`
             )
         }
     }, [addImages, locale])

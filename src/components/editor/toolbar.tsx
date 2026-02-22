@@ -15,6 +15,7 @@ import {
     FileText,
     Layers2,
     Brush,
+    Sparkles,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import { toast } from "sonner"
@@ -22,11 +23,15 @@ import {
     batchGenerateImages,
     buildMangaEditPrompt,
     detectTextBlocks,
+    filterBlocksByAngleThreshold,
+    getDetectionTargetLanguageFromDirection,
+    getSourceLanguageLabel,
     generateImage,
     getTranslationDirectionMeta,
     type DetectTextResponse,
     type DetectedTextBlock,
     type GenerateImageResponse,
+    type TextDetectionRegion,
 } from "@/lib/ai/ai-service"
 import {
     loadImage,
@@ -131,12 +136,58 @@ export function EditorToolbar() {
         })
     }, [settings.defaultVerticalText])
 
+    const selectionToNormalizedRegion = useCallback((
+        selection: Selection,
+        imageWidth: number,
+        imageHeight: number
+    ): TextDetectionRegion => ({
+        x: Math.max(0, Math.min(1, selection.x / Math.max(1, imageWidth))),
+        y: Math.max(0, Math.min(1, selection.y / Math.max(1, imageHeight))),
+        width: Math.max(0, Math.min(1, selection.width / Math.max(1, imageWidth))),
+        height: Math.max(0, Math.min(1, selection.height / Math.max(1, imageHeight))),
+    }), [])
+
+    const resolveDetectionRegionHints = useCallback((
+        selections: Selection[],
+        imageWidth: number,
+        imageHeight: number
+    ) => {
+        if (!selections.length) return {}
+        const normalized = selections.map((selection) =>
+            selectionToNormalizedRegion(selection, imageWidth, imageHeight)
+        )
+        const mode = settings.detectionRegionMode ?? "full"
+        if (mode === "selection_only") {
+            return { includeRegions: normalized }
+        }
+        if (mode === "selection_ignore") {
+            return { excludeRegions: normalized }
+        }
+        return {}
+    }, [selectionToNormalizedRegion, settings.detectionRegionMode])
+
     const getTargetLanguageForDetection = () => {
         const direction = settings.translationDirection ?? "ja2zh"
-        if (direction === "ja2en") return "English"
-        if (direction === "en2ja") return "日本語"
-        return "简体中文"
+        return getDetectionTargetLanguageFromDirection(direction)
     }
+
+    const getSourceLanguageAllowlistForDetection = () => settings.sourceLanguageAllowlist ?? []
+
+    const getSourceLanguageHintForDetection = () => {
+        const allowlist = getSourceLanguageAllowlistForDetection()
+        if (allowlist.length) {
+            return allowlist.map((code) => getSourceLanguageLabel(code)).join(locale === "zh" ? "、" : ", ")
+        }
+        const direction = settings.translationDirection ?? "ja2zh"
+        return getTranslationDirectionMeta(direction).sourceLangLabel
+    }
+
+    const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) =>
+        filterBlocksByAngleThreshold(
+            blocks,
+            settings.angleThreshold ?? 1,
+            settings.enableAngleFilter ?? false
+        )
 
     const blocksToSelections = (
         blocks: DetectedTextBlock[],
@@ -274,9 +325,14 @@ export function EditorToolbar() {
     const runDetectTextRequest = async (
         imageData: string,
         targetLanguage: string,
+        selectionsHint: Selection[] = [],
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const detectionRegionHints =
+            imageWidth && imageHeight
+                ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
+                : {}
         const detectCandidates = settings.useServerApi
             ? await buildDetectPayloadCandidates(imageData, [
                 { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
@@ -298,7 +354,13 @@ export function EditorToolbar() {
                     model: settings.model,
                 },
                 targetLanguage,
-            })
+                sourceLanguageHint: getSourceLanguageHintForDetection(),
+                sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
+                ...detectionRegionHints,
+            }).then((response) => ({
+                ...response,
+                blocks: response.success ? applyAngleThresholdFilter(response.blocks || []) : (response.blocks || []),
+            }))
         }
 
         let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
@@ -311,9 +373,12 @@ export function EditorToolbar() {
                     body: JSON.stringify({
                         imageData: requestImageData,
                         targetLanguage,
+                        sourceLanguageHint: getSourceLanguageHintForDetection(),
+                        sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
                         imageWidth,
                         imageHeight,
                         preferComicDetector: true,
+                        ...detectionRegionHints,
                     }),
                 })
 
@@ -337,7 +402,7 @@ export function EditorToolbar() {
                 const data = await res.json()
                 return {
                     success: true,
-                    blocks: data.blocks || [],
+                    blocks: applyAngleThresholdFilter(data.blocks || []),
                 }
             } catch (error) {
                 lastError = error instanceof Error
@@ -400,6 +465,21 @@ export function EditorToolbar() {
             : "4) Keep stroke/outline style readable and consistent.",
     ].join("\n")
 
+    const buildCenterFillFallbackPrompt = (basePrompt: string) => [
+        basePrompt,
+        "",
+        locale === "zh" ? "【防截断回退】" : "[Overflow fallback]",
+        locale === "zh"
+            ? `1) 以原始文本中心点为排版锚点，在更大可读范围内放置${directionMeta.targetLangLabel}文本，不要硬性贴边。`
+            : `1) Use the original text center as anchor and reflow in a wider readable region without hard clipping.`,
+        locale === "zh"
+            ? "2) 禁止把译文裁切在原框边缘；可自动换行、缩小字号并适度扩展留白。"
+            : "2) Never clip translated text at the original box edge; allow line-wrap, size reduction and extra padding.",
+        locale === "zh"
+            ? "3) 保持气泡内阅读顺序和对齐，自然居中。"
+            : "3) Keep reading order and alignment natural inside the bubble.",
+    ].join("\n")
+
     const clampSelectionToImageBounds = (selection: Selection, image: HTMLImageElement): Selection => {
         const x = Math.max(0, Math.min(image.width - 1, Math.round(selection.x)))
         const y = Math.max(0, Math.min(image.height - 1, Math.round(selection.y)))
@@ -434,6 +514,25 @@ export function EditorToolbar() {
             y: selection.y - padY,
             width: selection.width + padX * 2,
             height: selection.height + padY * 2,
+        }, image)
+    }
+
+    const expandSelectionFromCenter = (
+        selection: Selection,
+        image: HTMLImageElement,
+        scaleX: number,
+        scaleY: number
+    ): Selection => {
+        const cx = selection.x + selection.width / 2
+        const cy = selection.y + selection.height / 2
+        const width = Math.max(12, Math.round(selection.width * scaleX))
+        const height = Math.max(12, Math.round(selection.height * scaleY))
+        return clampSelectionToImageBounds({
+            ...selection,
+            x: Math.round(cx - width / 2),
+            y: Math.round(cy - height / 2),
+            width,
+            height,
         }, image)
     }
 
@@ -554,6 +653,59 @@ export function EditorToolbar() {
         return darkPixels / totalPixels
     }
 
+    const buildChapterBulkPrompt = useCallback((
+        basePrompt: string,
+        chapterImages: Array<{
+            detectedTextBlocks?: DetectedTextBlock[]
+        }>
+    ) => {
+        if (!(settings.chapterBulkTranslate ?? false)) {
+            return basePrompt
+        }
+
+        const glossaryLines: string[] = []
+        const seen = new Set<string>()
+        for (const image of chapterImages) {
+            const blocks = image.detectedTextBlocks || []
+            for (const block of blocks) {
+                const source = (block.sourceText || "").trim()
+                if (!source) continue
+                const normalizedKey = source.toLowerCase()
+                if (seen.has(normalizedKey)) continue
+                seen.add(normalizedKey)
+                const translated = (block.translatedText || "").trim()
+                glossaryLines.push(
+                    translated
+                        ? `${glossaryLines.length + 1}. ${source} => ${translated}`
+                        : `${glossaryLines.length + 1}. ${source}`
+                )
+                if (glossaryLines.length >= 80) break
+            }
+            if (glossaryLines.length >= 80) break
+        }
+
+        if (!glossaryLines.length) {
+            return basePrompt
+        }
+
+        return [
+            basePrompt,
+            "",
+            locale === "zh"
+                ? "【章节批量上下文（术语一致性参考）】"
+                : "Chapter-level context (consistency hints):",
+            ...(locale === "zh"
+                ? [
+                    "以下是本章节已识别文本，请优先保持人名/术语/语气一致：",
+                    ...glossaryLines,
+                ]
+                : [
+                    "Use the following chapter text memory to keep names and terminology consistent:",
+                    ...glossaryLines,
+                ]),
+        ].join("\n")
+    }, [locale, settings.chapterBulkTranslate])
+
     const buildPretranslateContextPrompt = async (
         imageId: string,
         originalImg: HTMLImageElement,
@@ -567,7 +719,7 @@ export function EditorToolbar() {
             return { prompt: basePrompt }
         }
         const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
-        let allBlocks: DetectedTextBlock[] = existingDetectedBlocks
+        let allBlocks: DetectedTextBlock[] = applyAngleThresholdFilter(existingDetectedBlocks)
 
         if (enablePretranslate && canRunPretranslate) {
             if (updateToolbarProgress) {
@@ -577,6 +729,7 @@ export function EditorToolbar() {
             const detectResult = await runDetectTextRequest(
                 imageToDataUrl(originalImg),
                 getTargetLanguageForDetection(),
+                selections,
                 originalImg.width,
                 originalImg.height
             )
@@ -667,6 +820,7 @@ export function EditorToolbar() {
     const processSelectionsPatchMode = async (
         imageId: string,
         originalImg: HTMLImageElement,
+        composeBaseImg: HTMLImageElement,
         selections: Selection[],
         effectivePrompt: string,
         updateToolbarProgress: boolean,
@@ -1048,6 +1202,35 @@ export function EditorToolbar() {
                         }
                     }
                 }
+                if (!englishTarget && directionMeta.targetLangCode === "zh" && sourcePatch) {
+                    const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
+                    const likelyOverflow = edgeInkRatio > 0.46
+                    if (likelyOverflow) {
+                        if (updateToolbarProgress) {
+                            setProgressDetail(
+                                locale === "zh"
+                                    ? `选区 #${index} 中文排版疑似截断，正在按中心点扩框重试...`
+                                    : `Selection #${index} likely clipped for Chinese, retrying with center-based expansion...`
+                            )
+                        }
+                        const overflowSelection = expandSelectionFromCenter(selection, originalImg, 1.34, 1.28)
+                        const overflowPrompt = buildCenterFillFallbackPrompt(selectionPrompt)
+                        const overflowPatch = cropSelection(
+                            originalImg,
+                            overflowSelection,
+                            PATCH_CONTEXT_PADDING + 10
+                        )
+                        const retryOverflow = await runGenerateRequestWithRetry(overflowPatch, overflowPrompt, 1)
+                        if (retryOverflow.success && retryOverflow.imageData) {
+                            const retryEdgeRatio = await computeEdgeInkRatio(retryOverflow.imageData)
+                            if (retryEdgeRatio + 0.02 < edgeInkRatio) {
+                                finalImageData = retryOverflow.imageData
+                                finalSelection = overflowSelection
+                                inputPatchForFinalCheck = overflowPatch
+                            }
+                        }
+                    }
+                }
 
                 if (inputPatchForFinalCheck && isExactlySameImageData(inputPatchForFinalCheck, finalImageData)) {
                     const unchangedError = locale === "zh"
@@ -1086,7 +1269,7 @@ export function EditorToolbar() {
         }
 
         return compositeMultiplePatches(
-            originalImg,
+            composeBaseImg,
             patches,
             PATCH_CONTEXT_PADDING,
             PATCH_BLEND_PADDING
@@ -1096,6 +1279,7 @@ export function EditorToolbar() {
     const processSelectionsMaskMode = async (
         imageId: string,
         originalImg: HTMLImageElement,
+        composeBaseImg: HTMLImageElement,
         sourceSelections: Selection[],
         effectivePrompt: string,
         updateToolbarProgress: boolean,
@@ -1194,6 +1378,7 @@ export function EditorToolbar() {
                 return processSelectionsPatchMode(
                     imageId,
                     originalImg,
+                    composeBaseImg,
                     sourceSelections,
                     effectivePrompt,
                     updateToolbarProgress,
@@ -1221,7 +1406,7 @@ export function EditorToolbar() {
         }
 
         return compositeSelectionsFromFullImage(
-            originalImg,
+            composeBaseImg,
             result.imageData,
             sourceSelections,
             MASK_BLEND_PADDING
@@ -1231,6 +1416,7 @@ export function EditorToolbar() {
     const processImage = async (
         imageId: string,
         imageUrl: string,
+        outputBaseUrl: string | null | undefined,
         sourceSelections: Selection[],
         existingDetectedBlocks: DetectedTextBlock[],
         basePrompt: string,
@@ -1238,6 +1424,18 @@ export function EditorToolbar() {
         showPretranslateFailureToast: boolean
     ) => {
         const originalImg = await loadImage(imageUrl)
+        let composeBaseImg = originalImg
+        if (outputBaseUrl) {
+            const baseImage = await loadImage(outputBaseUrl)
+            if (baseImage.width !== originalImg.width || baseImage.height !== originalImg.height) {
+                throw new Error(
+                    locale === "zh"
+                        ? "image-only 底图尺寸与原图不一致，请使用同分辨率图片。"
+                        : "Image-only base dimensions do not match the source image."
+                )
+            }
+            composeBaseImg = baseImage
+        }
         const englishTarget = directionMeta.targetLangCode === "en"
         const promptWithEnglishAssist = englishTarget
             ? [
@@ -1260,6 +1458,14 @@ export function EditorToolbar() {
         const hasUserSelections = sourceSelections.length > 0
         const effectiveSelections = hasUserSelections ? sourceSelections : [fullSelection]
 
+        if (outputBaseUrl && !hasUserSelections && updateToolbarProgress) {
+            toast.warning(
+                locale === "zh"
+                    ? "当前未框选选区：将执行整图重绘，结果会覆盖到底图上。"
+                    : "No selections found: full-image repaint will be composited onto the base image."
+            )
+        }
+
         const pretranslateContext = await buildPretranslateContextPrompt(
             imageId,
             originalImg,
@@ -1274,6 +1480,7 @@ export function EditorToolbar() {
             return processSelectionsMaskMode(
                 imageId,
                 originalImg,
+                composeBaseImg,
                 hasUserSelections ? sourceSelections : [],
                 pretranslateContext.prompt,
                 updateToolbarProgress,
@@ -1284,6 +1491,7 @@ export function EditorToolbar() {
         return processSelectionsPatchMode(
             imageId,
             originalImg,
+            composeBaseImg,
             effectiveSelections,
             pretranslateContext.prompt,
             updateToolbarProgress,
@@ -1420,12 +1628,15 @@ export function EditorToolbar() {
         try {
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
+                sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
+                preferredFontFamily: settings.preferredOutputFontFamily,
             })
             const resultUrl = await processImage(
                 currentImage.id,
                 currentImage.originalUrl,
+                currentImage.imageOnlyBaseUrl,
                 currentImage.selections || [],
                 currentImage.detectedTextBlocks || [],
                 basePrompt,
@@ -1450,6 +1661,67 @@ export function EditorToolbar() {
             })
             setImageStatus(currentImage.id, "failed", undefined, errorMessage)
             toast.error(t.errors.generateFailed + ": " + getShortError(errorMessage), { duration: 8000 })
+        } finally {
+            setProcessing(false)
+            setProgress(0)
+            setProgressText("")
+            setProgressDetail("")
+        }
+    }
+
+    const handleUpscaleOnly = async () => {
+        if (!currentImage) {
+            toast.error(t.errors.noImage)
+            return
+        }
+
+        if (settings.useServerApi) {
+            const COST_PER_GENERATION = 10
+            const deducted = await deductCoins(COST_PER_GENERATION)
+            if (!deducted) {
+                return
+            }
+            toast.info(`已扣除 ${COST_PER_GENERATION} Coins`)
+        } else if (!settings.apiKey) {
+            toast.error(t.errors.apiKeyRequired)
+            return
+        }
+
+        setProcessing(true)
+        setImageStatus(currentImage.id, "processing")
+
+        try {
+            const inputUrl = (showResult && currentImage.resultUrl) ? currentImage.resultUrl : currentImage.originalUrl
+            const sourceImage = await loadImage(inputUrl)
+            const sourceImageData = imageToDataUrl(sourceImage)
+            const upscalePrompt = [
+                "Upscale and enhance image quality only.",
+                "Do NOT translate, rewrite, remove, replace, or redraw any text.",
+                "Keep all text glyphs, language, layout, and bubbles exactly unchanged.",
+                "Improve sharpness, reduce noise/compression artifacts, and preserve original style.",
+                "Output image only.",
+            ].join("\n")
+
+            const result = await runGenerateRequestWithRetry(
+                sourceImageData,
+                upscalePrompt,
+                resolveRetryLimit(1)
+            )
+            if (!result.success || !result.imageData) {
+                throw new Error(result.error || (locale === "zh" ? "超分失败" : "Upscale failed"))
+            }
+
+            setImageStatus(currentImage.id, "completed", result.imageData)
+            setShowResult(true)
+            toast.success(locale === "zh" ? "仅超分增强完成" : "Upscale-only completed")
+            void logUsage("generate", {
+                source: settings.useServerApi ? "server_api" : "custom_key",
+                mode: "upscale_only",
+            })
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "未知错误"
+            setImageStatus(currentImage.id, "failed", undefined, errorMessage)
+            toast.error((locale === "zh" ? "仅超分增强失败: " : "Upscale-only failed: ") + getShortError(errorMessage), { duration: 8000 })
         } finally {
             setProcessing(false)
             setProgress(0)
@@ -1498,9 +1770,19 @@ export function EditorToolbar() {
         try {
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
+                sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
+                preferredFontFamily: settings.preferredOutputFontFamily,
             })
+            const chapterPrompt = buildChapterBulkPrompt(basePrompt, imagesToProcess)
+            if ((settings.chapterBulkTranslate ?? false) && chapterPrompt !== basePrompt) {
+                toast.info(
+                    locale === "zh"
+                        ? "已启用章节上下文一致性提示"
+                        : "Chapter-level consistency context enabled"
+                )
+            }
 
             for (let i = 0; i < imagesToProcess.length; i++) {
                 const img = imagesToProcess[i]
@@ -1518,9 +1800,10 @@ export function EditorToolbar() {
                     const resultUrl = await processImage(
                         img.id,
                         img.originalUrl,
+                        img.imageOnlyBaseUrl,
                         selections,
                         img.detectedTextBlocks || [],
-                        basePrompt,
+                        chapterPrompt,
                         false,
                         false
                     )
@@ -1627,6 +1910,7 @@ export function EditorToolbar() {
             const detectResult = await runDetectTextRequest(
                 imageToDataUrl(originalImg),
                 getTargetLanguageForDetection(),
+                currentImage.selections || [],
                 originalImg.width,
                 originalImg.height
             )
@@ -1672,13 +1956,16 @@ export function EditorToolbar() {
 
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
+                sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
+                preferredFontFamily: settings.preferredOutputFontFamily,
             })
 
             const resultUrl = await processImage(
                 currentImage.id,
                 currentImage.originalUrl,
+                currentImage.imageOnlyBaseUrl,
                 detectedSelections,
                 detectedBlocks,
                 basePrompt,
@@ -1746,8 +2033,10 @@ export function EditorToolbar() {
         try {
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
+                sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
+                preferredFontFamily: settings.preferredOutputFontFamily,
             })
             const resultUrl = await processImageWithRepairMask(
                 currentImage.id,
@@ -2002,6 +2291,19 @@ export function EditorToolbar() {
                         <Play className="h-4 w-4 mr-2" />
                     )}
                     {locale === "zh" ? "一键机翻" : "One-click MT"}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleUpscaleOnly}
+                    disabled={isProcessing || !currentImage}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Sparkles className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "仅超分增强" : "Upscale only"}
                 </Button>
 
                 {isPatchEditorEnabled && (

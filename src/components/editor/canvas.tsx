@@ -38,7 +38,12 @@ import {
 import { getMessages } from "@/lib/i18n"
 import type { Selection } from "@/types/database"
 import type { AnnotationShape } from "@/lib/stores/editor-store"
-import { detectTextBlocks } from "@/lib/ai/ai-service"
+import {
+    detectTextBlocks,
+    getDetectionTargetLanguageFromDirection,
+    getSourceLanguageLabel,
+    getTranslationDirectionMeta,
+} from "@/lib/ai/ai-service"
 import { cropSelection, loadImage } from "@/lib/utils/image-utils"
 import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import { toast } from "sonner"
@@ -578,10 +583,17 @@ export function EditorCanvas() {
 
     const getTargetLanguageForDetection = useCallback(() => {
         const direction = settings.translationDirection ?? "ja2zh"
-        if (direction === "ja2en") return "English"
-        if (direction === "en2ja") return "日本語"
-        return "简体中文"
+        return getDetectionTargetLanguageFromDirection(direction)
     }, [settings.translationDirection])
+
+    const getSourceLanguageHintForDetection = useCallback(() => {
+        const allowlist = settings.sourceLanguageAllowlist ?? []
+        if (allowlist.length) {
+            return allowlist.map((code) => getSourceLanguageLabel(code)).join(locale === "zh" ? "、" : ", ")
+        }
+        const direction = settings.translationDirection ?? "ja2zh"
+        return getTranslationDirectionMeta(direction).sourceLangLabel
+    }, [locale, settings.sourceLanguageAllowlist, settings.translationDirection])
 
     const findBestBlockIndexForSelection = useCallback((
         selection: Selection,
@@ -838,6 +850,8 @@ export function EditorCanvas() {
                 body: JSON.stringify({
                     imageData,
                     targetLanguage: getTargetLanguageForDetection(),
+                    sourceLanguageHint: getSourceLanguageHintForDetection(),
+                    sourceLanguageAllowlist: settings.sourceLanguageAllowlist ?? [],
                     imageWidth: Math.round(selection.width),
                     imageHeight: Math.round(selection.height),
                     preferComicDetector: true,
@@ -873,6 +887,8 @@ export function EditorCanvas() {
                             imageSize: settings.imageSize || "2K",
                         },
                         targetLanguage: getTargetLanguageForDetection(),
+                        sourceLanguageHint: getSourceLanguageHintForDetection(),
+                        sourceLanguageAllowlist: settings.sourceLanguageAllowlist ?? [],
                     })
                     if (!localResult.success) {
                         throw new Error(localResult.error || (locale === "zh" ? "OCR 识别失败" : "OCR failed"))
@@ -962,6 +978,7 @@ export function EditorCanvas() {
         currentImage,
         findBestBlockIndexForSelection,
         getTargetLanguageForDetection,
+        getSourceLanguageHintForDetection,
         locale,
         plainTextToRichHtml,
         selectionOcrMetaMap,
@@ -972,6 +989,7 @@ export function EditorCanvas() {
         settings.imageSize,
         settings.model,
         settings.provider,
+        settings.sourceLanguageAllowlist,
         settings.useServerApi,
     ])
 

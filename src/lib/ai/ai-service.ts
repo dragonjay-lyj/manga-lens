@@ -51,6 +51,13 @@ export interface TextSegmentBBox {
     height: number
 }
 
+export interface TextDetectionRegion {
+    x: number
+    y: number
+    width: number
+    height: number
+}
+
 export interface DetectedTextBlock {
     sourceText: string
     translatedText: string
@@ -65,6 +72,10 @@ export interface DetectTextRequest {
     imageData: string // base64 图片数据
     config: AIConfig
     targetLanguage?: string
+    sourceLanguageHint?: string
+    sourceLanguageAllowlist?: SourceLanguageCode[]
+    includeRegions?: TextDetectionRegion[]
+    excludeRegions?: TextDetectionRegion[]
 }
 
 export interface DetectTextResponse {
@@ -96,15 +107,185 @@ const TRANSLATION_KEYWORDS =
 const VERTICAL_LAYOUT_KEYWORDS = /(竖排|縦書き|vertical)/i
 const HORIZONTAL_LAYOUT_KEYWORDS = /(横排|horizontal)/i
 
-export type TranslationDirection = "ja2zh" | "en2zh" | "ja2en" | "en2ja"
+export type SourceLanguageCode = "ja" | "en" | "th" | "es" | "ar" | "id" | "hi" | "fi"
+
+export type TranslationDirection =
+    | "ja2zh"
+    | "en2zh"
+    | "th2zh"
+    | "es2zh"
+    | "ar2zh"
+    | "id2zh"
+    | "hi2zh"
+    | "fi2zh"
+    | "ja2en"
+    | "en2ja"
+    | "th2en"
+    | "es2en"
+    | "ar2en"
+    | "id2en"
+    | "hi2en"
+    | "fi2en"
+    | "ja2id"
+    | "en2id"
+    | "th2id"
+    | "es2id"
+    | "ar2id"
+    | "ja2hi"
+    | "en2hi"
+    | "en2ar"
+    | "ja2ar"
+    | "en2fi"
+    | "ja2fi"
+
+export const TRANSLATION_DIRECTIONS: TranslationDirection[] = [
+    "ja2zh",
+    "en2zh",
+    "th2zh",
+    "es2zh",
+    "ar2zh",
+    "id2zh",
+    "hi2zh",
+    "fi2zh",
+    "ja2en",
+    "en2ja",
+    "th2en",
+    "es2en",
+    "ar2en",
+    "id2en",
+    "hi2en",
+    "fi2en",
+    "ja2id",
+    "en2id",
+    "th2id",
+    "es2id",
+    "ar2id",
+    "ja2hi",
+    "en2hi",
+    "en2ar",
+    "ja2ar",
+    "en2fi",
+    "ja2fi",
+]
+
+const SOURCE_LANGUAGE_LABELS: Record<SourceLanguageCode, string> = {
+    ja: "日语",
+    en: "英语",
+    th: "泰语",
+    es: "西班牙语",
+    ar: "阿拉伯语",
+    id: "印尼语",
+    hi: "印地语",
+    fi: "芬兰语",
+}
+
+export function getSourceLanguageLabel(code: SourceLanguageCode): string {
+    return SOURCE_LANGUAGE_LABELS[code]
+}
 
 export function getTranslationDirectionMeta(direction: TranslationDirection) {
+    if (direction === "th2zh") {
+        return {
+            sourceLangLabel: "泰语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "th",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "es2zh") {
+        return {
+            sourceLangLabel: "西班牙语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "es",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "ar2zh") {
+        return {
+            sourceLangLabel: "阿拉伯语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "ar",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "id2zh") {
+        return {
+            sourceLangLabel: "印尼语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "id",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "hi2zh") {
+        return {
+            sourceLangLabel: "印地语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "hi",
+            targetLangCode: "zh",
+        }
+    }
+    if (direction === "fi2zh") {
+        return {
+            sourceLangLabel: "芬兰语",
+            targetLangLabel: "简体中文",
+            sourceLangCode: "fi",
+            targetLangCode: "zh",
+        }
+    }
     if (direction === "en2zh") {
         return {
             sourceLangLabel: "英语",
             targetLangLabel: "简体中文",
             sourceLangCode: "en",
             targetLangCode: "zh",
+        }
+    }
+    if (direction === "th2en") {
+        return {
+            sourceLangLabel: "泰语",
+            targetLangLabel: "英语",
+            sourceLangCode: "th",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "es2en") {
+        return {
+            sourceLangLabel: "西班牙语",
+            targetLangLabel: "英语",
+            sourceLangCode: "es",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "ar2en") {
+        return {
+            sourceLangLabel: "阿拉伯语",
+            targetLangLabel: "英语",
+            sourceLangCode: "ar",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "id2en") {
+        return {
+            sourceLangLabel: "印尼语",
+            targetLangLabel: "英语",
+            sourceLangCode: "id",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "hi2en") {
+        return {
+            sourceLangLabel: "印地语",
+            targetLangLabel: "英语",
+            sourceLangCode: "hi",
+            targetLangCode: "en",
+        }
+    }
+    if (direction === "fi2en") {
+        return {
+            sourceLangLabel: "芬兰语",
+            targetLangLabel: "英语",
+            sourceLangCode: "fi",
+            targetLangCode: "en",
         }
     }
     if (direction === "ja2en") {
@@ -123,6 +304,94 @@ export function getTranslationDirectionMeta(direction: TranslationDirection) {
             targetLangCode: "ja",
         }
     }
+    if (direction === "en2ar") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "阿拉伯语",
+            sourceLangCode: "en",
+            targetLangCode: "ar",
+        }
+    }
+    if (direction === "en2fi") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "芬兰语",
+            sourceLangCode: "en",
+            targetLangCode: "fi",
+        }
+    }
+    if (direction === "ja2id") {
+        return {
+            sourceLangLabel: "日语",
+            targetLangLabel: "印尼语",
+            sourceLangCode: "ja",
+            targetLangCode: "id",
+        }
+    }
+    if (direction === "en2id") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "印尼语",
+            sourceLangCode: "en",
+            targetLangCode: "id",
+        }
+    }
+    if (direction === "th2id") {
+        return {
+            sourceLangLabel: "泰语",
+            targetLangLabel: "印尼语",
+            sourceLangCode: "th",
+            targetLangCode: "id",
+        }
+    }
+    if (direction === "es2id") {
+        return {
+            sourceLangLabel: "西班牙语",
+            targetLangLabel: "印尼语",
+            sourceLangCode: "es",
+            targetLangCode: "id",
+        }
+    }
+    if (direction === "ar2id") {
+        return {
+            sourceLangLabel: "阿拉伯语",
+            targetLangLabel: "印尼语",
+            sourceLangCode: "ar",
+            targetLangCode: "id",
+        }
+    }
+    if (direction === "ja2hi") {
+        return {
+            sourceLangLabel: "日语",
+            targetLangLabel: "印地语",
+            sourceLangCode: "ja",
+            targetLangCode: "hi",
+        }
+    }
+    if (direction === "en2hi") {
+        return {
+            sourceLangLabel: "英语",
+            targetLangLabel: "印地语",
+            sourceLangCode: "en",
+            targetLangCode: "hi",
+        }
+    }
+    if (direction === "ja2ar") {
+        return {
+            sourceLangLabel: "日语",
+            targetLangLabel: "阿拉伯语",
+            sourceLangCode: "ja",
+            targetLangCode: "ar",
+        }
+    }
+    if (direction === "ja2fi") {
+        return {
+            sourceLangLabel: "日语",
+            targetLangLabel: "芬兰语",
+            sourceLangCode: "ja",
+            targetLangCode: "fi",
+        }
+    }
     return {
         sourceLangLabel: "日语",
         targetLangLabel: "简体中文",
@@ -138,15 +407,19 @@ export function buildMangaEditPrompt(
     userPrompt: string,
     options?: {
         direction?: TranslationDirection
+        sourceLanguageAllowlist?: SourceLanguageCode[]
         comicType?: "auto" | "manga" | "western"
         textStylePreset?: "match-original" | "comic-bold" | "clean-serif"
+        preferredFontFamily?: string
     }
 ): string {
     const rawPrompt = userPrompt.trim()
     const isLikelyTranslation = rawPrompt.length === 0 || TRANSLATION_KEYWORDS.test(rawPrompt)
     const direction = options?.direction ?? "ja2zh"
+    const sourceLanguageAllowlist = normalizeSourceLanguageAllowlist(options?.sourceLanguageAllowlist)
     const comicType = options?.comicType ?? "auto"
     const textStylePreset = options?.textStylePreset ?? "match-original"
+    const preferredFontFamily = options?.preferredFontFamily?.trim()
     const directionMeta = getTranslationDirectionMeta(direction)
 
     if (!isLikelyTranslation) {
@@ -163,8 +436,31 @@ export function buildMangaEditPrompt(
     const defaultTaskByDirection: Record<TranslationDirection, string> = {
         ja2zh: "请将图片中的日文文本翻译并替换为自然、通顺的简体中文。",
         en2zh: "请将图片中的英文文本翻译并替换为自然、通顺的简体中文。",
+        th2zh: "请将图片中的泰文文本翻译并替换为自然、通顺的简体中文。",
+        es2zh: "请将图片中的西班牙文文本翻译并替换为自然、通顺的简体中文。",
+        ar2zh: "请将图片中的阿拉伯文文本翻译并替换为自然、通顺的简体中文。",
+        id2zh: "请将图片中的印尼文文本翻译并替换为自然、通顺的简体中文。",
+        hi2zh: "请将图片中的印地文文本翻译并替换为自然、通顺的简体中文。",
+        fi2zh: "请将图片中的芬兰文文本翻译并替换为自然、通顺的简体中文。",
         ja2en: "Please translate Japanese text in the image to natural English and replace it in place.",
+        th2en: "Please translate Thai text in the image to natural English and replace it in place.",
+        es2en: "Please translate Spanish text in the image to natural English and replace it in place.",
+        ar2en: "Please translate Arabic text in the image to natural English and replace it in place.",
+        id2en: "Please translate Indonesian text in the image to natural English and replace it in place.",
+        hi2en: "Please translate Hindi text in the image to natural English and replace it in place.",
+        fi2en: "Please translate Finnish text in the image to natural English and replace it in place.",
         en2ja: "画像内の英語テキストを自然な日本語に翻訳し、元位置に置き換えてください。",
+        ja2id: "Tolong terjemahkan teks Jepang pada gambar ke Bahasa Indonesia alami dan gantikan di posisi aslinya.",
+        en2id: "Tolong terjemahkan teks Inggris pada gambar ke Bahasa Indonesia alami dan gantikan di posisi aslinya.",
+        th2id: "Tolong terjemahkan teks Thai pada gambar ke Bahasa Indonesia alami dan gantikan di posisi aslinya.",
+        es2id: "Tolong terjemahkan teks Spanyol pada gambar ke Bahasa Indonesia alami dan gantikan di posisi aslinya.",
+        ar2id: "Tolong terjemahkan teks Arab pada gambar ke Bahasa Indonesia alami dan gantikan di posisi aslinya.",
+        ja2hi: "कृपया चित्र में मौजूद जापानी पाठ को स्वाभाविक हिंदी में अनुवाद करके उसी स्थान पर बदलें।",
+        en2hi: "कृपया चित्र में मौजूद अंग्रेज़ी पाठ को स्वाभाविक हिंदी में अनुवाद करके उसी स्थान पर बदलें।",
+        en2ar: "يرجى ترجمة النص الإنجليزي في الصورة إلى العربية الطبيعية واستبداله في نفس الموضع.",
+        ja2ar: "يرجى ترجمة النص الياباني في الصورة إلى العربية الطبيعية واستبداله في نفس الموضع.",
+        en2fi: "Käännä kuvassa oleva englanninkielinen teksti sujuvaksi suomeksi ja korvaa se alkuperäiseen paikkaan.",
+        ja2fi: "Käännä kuvassa oleva japaninkielinen teksti sujuvaksi suomeksi ja korvaa se alkuperäiseen paikkaan.",
     }
     const effectiveTask = rawPrompt || defaultTaskByDirection[direction]
     const layoutRule = VERTICAL_LAYOUT_KEYWORDS.test(rawPrompt)
@@ -182,6 +478,12 @@ export function buildMangaEditPrompt(
         : textStylePreset === "clean-serif"
             ? "字体预设：清晰衬线体。保证可读性，适合长文本和条漫。"
             : "字体预设：尽量匹配原文（字重/轮廓/倾斜/颜色）。"
+    const sourceLangLabel = sourceLanguageAllowlist.length
+        ? sourceLanguageAllowlist.map((code) => getSourceLanguageLabel(code)).join("、")
+        : directionMeta.sourceLangLabel
+    const preferredFontRule = preferredFontFamily
+        ? `字体指定：优先使用“${preferredFontFamily}”，若不可用则使用风格最接近字体。`
+        : "字体指定：未指定额外字体时，优先匹配原文字体风格。"
 
     return [
         '你是漫画局部翻译修图引擎，只输出编辑后的图片。',
@@ -189,16 +491,17 @@ export function buildMangaEditPrompt(
         '1) 只替换原有文字，人物、线条、网点、气泡形状和背景必须保持不变。',
         '2) 输出必须与输入区域视觉一致，不要额外边框、不要裁切、不要改变构图。',
         '3) 先清除原文再排版，避免重影、乱码、错位和符号拆分（例如 “（）” 分离）。',
-        `4) 将原文从${directionMeta.sourceLangLabel}翻译为${directionMeta.targetLangLabel}。`,
+        `4) 将原文从${sourceLangLabel}翻译为${directionMeta.targetLangLabel}。`,
         `5) ${layoutRule}`,
         `6) ${comicRule}`,
         `7) ${stylePresetRule}`,
-        '8) 字体风格必须贴近原文：保持原有字重、笔画粗细、描边/阴影、间距、大小与排版密度；避免使用通用默认字体感。',
-        '9) 文本应继续落在原气泡可读区域内，行数与对齐尽量接近原文，避免明显溢出或留白异常。',
-        '10) 翻译要贴合语境、口语自然，可适度意译但不能改变剧情信息。',
-        '11) 严禁只擦除不重绘：最终图片中每个对白区域都必须有清晰可读的目标语言文本，不能留空白块。',
-        '12) 若个别词无法识别，可用最接近语境的保守译法或音译占位，但绝不能留空。',
-        '13) 仅返回图片，不要返回说明文本。',
+        `8) ${preferredFontRule}`,
+        '9) 字体风格必须贴近原文：保持原有字重、笔画粗细、描边/阴影、间距、大小与排版密度；避免使用通用默认字体感。',
+        '10) 文本应继续落在原气泡可读区域内，行数与对齐尽量接近原文，避免明显溢出或留白异常。',
+        '11) 翻译要贴合语境、口语自然，可适度意译但不能改变剧情信息。',
+        '12) 严禁只擦除不重绘：最终图片中每个对白区域都必须有清晰可读的目标语言文本，不能留空白块。',
+        '13) 若个别词无法识别，可用最接近语境的保守译法或音译占位，但绝不能留空。',
+        '14) 仅返回图片，不要返回说明文本。',
         `用户要求：${effectiveTask}`,
     ].join('\n')
 }
@@ -404,6 +707,154 @@ async function readApiError(response: Response): Promise<string> {
     } catch {
         return truncate(raw)
     }
+}
+
+function clamp01(value: number): number {
+    if (!Number.isFinite(value)) return 0
+    return Math.min(1, Math.max(0, value))
+}
+
+function normalizeSourceLanguageCode(input: string): SourceLanguageCode | undefined {
+    const raw = input.trim()
+    if (!raw) return undefined
+    const lowered = raw.toLowerCase()
+    if (/^(ja|jp|jpn)\b/.test(lowered) || /(japanese|日本|日语|日文)/i.test(raw)) return "ja"
+    if (/^(en|eng)\b/.test(lowered) || /(english|英语|英文)/i.test(raw)) return "en"
+    if (/^(th|tha)\b/.test(lowered) || /(thai|泰语|泰文)/i.test(raw)) return "th"
+    if (/^(es|spa)\b/.test(lowered) || /(spanish|español|西班牙语|西文)/i.test(raw)) return "es"
+    if (/^(ar|ara)\b/.test(lowered) || /(arabic|阿拉伯语|阿文)/i.test(raw)) return "ar"
+    if (/^(id|ind)\b/.test(lowered) || /(indonesian|bahasa indonesia|印尼语|印尼文)/i.test(raw)) return "id"
+    if (/^(hi|hin)\b/.test(lowered) || /(hindi|हिन्दी|印地语|印地文)/i.test(raw)) return "hi"
+    if (/^(fi|fin)\b/.test(lowered) || /(finnish|suomi|芬兰语|芬兰文)/i.test(raw)) return "fi"
+    return undefined
+}
+
+export function normalizeSourceLanguageAllowlist(input?: string[]): SourceLanguageCode[] {
+    if (!Array.isArray(input)) return []
+    const normalized = input
+        .flatMap((item) => {
+            if (typeof item !== "string") return []
+            const code = normalizeSourceLanguageCode(item)
+            return code ? [code] : []
+        })
+    return [...new Set(normalized)]
+}
+
+function inferSourceLanguageFromText(text: string): SourceLanguageCode | "latin" | undefined {
+    const raw = text.trim()
+    if (!raw) return undefined
+    if (/[\u0600-\u06ff]/.test(raw)) return "ar"
+    if (/[\u0e00-\u0e7f]/.test(raw)) return "th"
+    if (/[\u0900-\u097f]/.test(raw)) return "hi"
+    if (/[\u3040-\u30ff\u31f0-\u31ff]/.test(raw)) return "ja"
+    if (/[ñáéíóúü¡¿]/i.test(raw)) return "es"
+    if (/[äöå]/i.test(raw)) return "fi"
+    if (/[A-Za-z]/.test(raw)) return "latin"
+    if (/[\u4e00-\u9fff]/.test(raw)) return "ja"
+    return undefined
+}
+
+export function filterBlocksBySourceLanguageAllowlist(
+    blocks: DetectedTextBlock[],
+    allowlist?: string[]
+): DetectedTextBlock[] {
+    const allowed = normalizeSourceLanguageAllowlist(allowlist)
+    if (!allowed.length) return blocks
+
+    const allowedSet = new Set(allowed)
+    const latinFriendly = allowedSet.has("en") || allowedSet.has("es") || allowedSet.has("id") || allowedSet.has("fi")
+
+    return blocks.filter((block) => {
+        const declared = normalizeSourceLanguageCode(block.sourceLanguage || "")
+        if (declared) {
+            return allowedSet.has(declared)
+        }
+
+        const text = [block.sourceText, ...(block.lines || [])]
+            .join(" ")
+            .trim()
+        const inferred = inferSourceLanguageFromText(text)
+        if (!inferred) return false
+        if (inferred === "latin") return latinFriendly
+        return allowedSet.has(inferred)
+    })
+}
+
+function normalizeDetectionRegions(regions?: TextDetectionRegion[]): TextDetectionRegion[] {
+    if (!Array.isArray(regions)) return []
+    return regions
+        .map((region) => ({
+            x: clamp01(region.x),
+            y: clamp01(region.y),
+            width: clamp01(region.width),
+            height: clamp01(region.height),
+        }))
+        .filter((region) => region.width > 0 && region.height > 0)
+}
+
+function intersectsNormalizedRect(
+    a: TextDetectionRegion,
+    b: TextDetectionRegion
+): boolean {
+    return (
+        a.x < b.x + b.width &&
+        a.x + a.width > b.x &&
+        a.y < b.y + b.height &&
+        a.y + a.height > b.y
+    )
+}
+
+function filterBlocksByDetectionRegions(
+    blocks: DetectedTextBlock[],
+    includeRegions?: TextDetectionRegion[],
+    excludeRegions?: TextDetectionRegion[]
+): DetectedTextBlock[] {
+    const include = normalizeDetectionRegions(includeRegions)
+    const exclude = normalizeDetectionRegions(excludeRegions)
+    if (!include.length && !exclude.length) return blocks
+
+    return blocks.filter((block) => {
+        const bbox: TextDetectionRegion = {
+            x: block.bbox.x,
+            y: block.bbox.y,
+            width: block.bbox.width,
+            height: block.bbox.height,
+        }
+        if (include.length && !include.some((region) => intersectsNormalizedRect(bbox, region))) {
+            return false
+        }
+        if (exclude.length && exclude.some((region) => intersectsNormalizedRect(bbox, region))) {
+            return false
+        }
+        return true
+    })
+}
+
+export function getDetectionTargetLanguageFromDirection(direction: TranslationDirection): string {
+    const meta = getTranslationDirectionMeta(direction)
+    if (meta.targetLangCode === "en") return "English"
+    if (meta.targetLangCode === "ja") return "日本語"
+    if (meta.targetLangCode === "ar") return "العربية"
+    if (meta.targetLangCode === "id") return "Bahasa Indonesia"
+    if (meta.targetLangCode === "hi") return "हिन्दी"
+    if (meta.targetLangCode === "fi") return "Suomi"
+    return "简体中文"
+}
+
+export function filterBlocksByAngleThreshold(
+    blocks: DetectedTextBlock[],
+    thresholdDegrees: number,
+    enabled: boolean
+): DetectedTextBlock[] {
+    if (!enabled) return blocks
+    const threshold = Math.max(0, Number.isFinite(thresholdDegrees) ? thresholdDegrees : 0)
+    return blocks.filter((block) => {
+        const angle = block.style?.angle
+        if (typeof angle !== "number" || !Number.isFinite(angle)) {
+            return true
+        }
+        return Math.abs(angle) <= threshold
+    })
 }
 
 function getInlineData(part: unknown): { data?: string } | undefined {
@@ -641,9 +1092,32 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
     }
 }
 
-function buildDetectionPrompt(targetLanguage: string): string {
+function buildDetectionPrompt(
+    targetLanguage: string,
+    options?: {
+        sourceLanguageHint?: string
+        sourceLanguageAllowlist?: string[]
+        includeRegions?: TextDetectionRegion[]
+        excludeRegions?: TextDetectionRegion[]
+    }
+): string {
+    const includeRegions = normalizeDetectionRegions(options?.includeRegions)
+    const excludeRegions = normalizeDetectionRegions(options?.excludeRegions)
+    const sourceLanguageHint = options?.sourceLanguageHint?.trim()
+    const sourceLanguageAllowlist = normalizeSourceLanguageAllowlist(options?.sourceLanguageAllowlist)
+    const sourceAllowlistLabels = sourceLanguageAllowlist.map((code) => getSourceLanguageLabel(code))
     return [
         `请检测图片中的所有文本块，并翻译为${targetLanguage}。`,
+        sourceLanguageHint ? `源语言提示：优先识别${sourceLanguageHint}文本。` : "源语言提示：自动识别。",
+        sourceAllowlistLabels.length
+            ? `只识别以下源语言：${sourceAllowlistLabels.join("、")}。其他语言或噪声符号不要输出。`
+            : "若未提供源语言白名单，则按模型自动识别。",
+        includeRegions.length
+            ? `只检测以下给定区域（0-1 归一化 bbox，JSON 数组）：${JSON.stringify(includeRegions.slice(0, 80))}`
+            : "若未提供检测区域，则默认检测整张图。",
+        excludeRegions.length
+            ? `忽略以下区域中的文本（0-1 归一化 bbox，JSON 数组）：${JSON.stringify(excludeRegions.slice(0, 80))}`
+            : "若未提供忽略区域，则不额外排除。",
         '输出必须是 JSON，格式如下：',
         '{"blocks":[{"sourceText":"原文","translatedText":"译文","sourceLanguage":"ja","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15},"lines":["..."],"segments":[{"x":0.1,"y":0.2,"width":0.3,"height":0.06}],"style":{"textColor":"#000000","outlineColor":"#ffffff","strokeColor":"#ffffff","strokeWidth":1,"textOpacity":1,"fontFamily":"Noto Sans CJK SC","angle":0,"orientation":"vertical","alignment":"center","fontWeight":"bold"}}]}',
         '要求：',
@@ -652,6 +1126,11 @@ function buildDetectionPrompt(targetLanguage: string): string {
         '3) style 需估计颜色、轮廓、角度、朝向、对齐和字重（可选，但尽量提供）。',
         '4) 只输出 JSON，不要输出 markdown 或解释。',
         '5) translatedText 使用自然、口语化译文。',
+        sourceAllowlistLabels.length
+            ? `6) 只返回${sourceAllowlistLabels.join("、")}文本块；其他语言与乱码符号禁止输出。`
+            : '6) 若无法判断语言，可按上下文保守处理。',
+        includeRegions.length ? '7) 严格遵守检测区域，区域外文本不要输出。' : '7) 尽可能完整覆盖全图文本。',
+        excludeRegions.length ? '8) 严格忽略指定区域中的文本。' : '8) 无额外忽略区域时按整图规则处理。',
     ].join('\n')
 }
 
@@ -666,7 +1145,12 @@ async function detectWithGemini(request: DetectTextRequest): Promise<DetectTextR
             ? requestedModel
             : 'gemini-2.5-flash'
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
-    const prompt = buildDetectionPrompt(targetLanguage)
+    const prompt = buildDetectionPrompt(targetLanguage, {
+        sourceLanguageHint: request.sourceLanguageHint,
+        sourceLanguageAllowlist: request.sourceLanguageAllowlist,
+        includeRegions: request.includeRegions,
+        excludeRegions: request.excludeRegions,
+    })
 
     try {
         const response = await fetchWithTimeout(apiUrl, {
@@ -709,7 +1193,14 @@ async function detectWithGemini(request: DetectTextRequest): Promise<DetectTextR
         const textPart = parts.find((part: { text?: string }) => typeof part?.text === 'string')
         const rawText = textPart?.text || ''
         const parsed = parseJsonFromText(rawText)
-        const blocks = normalizeDetectedBlocks(parsed)
+        const blocks = filterBlocksBySourceLanguageAllowlist(
+            filterBlocksByDetectionRegions(
+            normalizeDetectedBlocks(parsed),
+            request.includeRegions,
+            request.excludeRegions
+            ),
+            request.sourceLanguageAllowlist
+        )
 
         return {
             success: true,
@@ -729,7 +1220,12 @@ async function detectWithOpenAI(request: DetectTextRequest): Promise<DetectTextR
     const { imageData, config } = request
     const targetLanguage = request.targetLanguage || '简体中文'
     const model = config.model || 'gpt-4o'
-    const prompt = buildDetectionPrompt(targetLanguage)
+    const prompt = buildDetectionPrompt(targetLanguage, {
+        sourceLanguageHint: request.sourceLanguageHint,
+        sourceLanguageAllowlist: request.sourceLanguageAllowlist,
+        includeRegions: request.includeRegions,
+        excludeRegions: request.excludeRegions,
+    })
     const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
 
     try {
@@ -776,7 +1272,14 @@ async function detectWithOpenAI(request: DetectTextRequest): Promise<DetectTextR
             ? rawContent.map((item: { text?: string }) => item?.text || '').join('\n')
             : String(rawContent || '')
         const parsed = parseJsonFromText(rawText)
-        const blocks = normalizeDetectedBlocks(parsed)
+        const blocks = filterBlocksBySourceLanguageAllowlist(
+            filterBlocksByDetectionRegions(
+            normalizeDetectedBlocks(parsed),
+            request.includeRegions,
+            request.excludeRegions
+            ),
+            request.sourceLanguageAllowlist
+        )
 
         return {
             success: true,
@@ -792,6 +1295,92 @@ async function detectWithOpenAI(request: DetectTextRequest): Promise<DetectTextR
     }
 }
 
+type DetectCacheEntry = {
+    expiresAt: number
+    response: DetectTextResponse
+}
+
+const DETECT_CACHE_TTL_MS = 30 * 60 * 1000
+const DETECT_CACHE_MAX_ENTRIES = 200
+const detectResponseCache = new Map<string, DetectCacheEntry>()
+
+function hashString(input: string): string {
+    let hash = 2166136261
+    for (let i = 0; i < input.length; i++) {
+        hash ^= input.charCodeAt(i)
+        hash +=
+            (hash << 1) +
+            (hash << 4) +
+            (hash << 7) +
+            (hash << 8) +
+            (hash << 24)
+    }
+    return (hash >>> 0).toString(16)
+}
+
+function buildDetectionCacheKey(request: DetectTextRequest): string {
+    const imageHash = hashString(request.imageData.replace(/^data:image\/\w+;base64,/, ""))
+    const include = normalizeDetectionRegions(request.includeRegions)
+        .map((region) => `${region.x.toFixed(4)},${region.y.toFixed(4)},${region.width.toFixed(4)},${region.height.toFixed(4)}`)
+        .join("|")
+    const exclude = normalizeDetectionRegions(request.excludeRegions)
+        .map((region) => `${region.x.toFixed(4)},${region.y.toFixed(4)},${region.width.toFixed(4)},${region.height.toFixed(4)}`)
+        .join("|")
+    const allowlist = normalizeSourceLanguageAllowlist(request.sourceLanguageAllowlist).sort().join(",")
+    return [
+        request.config.provider,
+        request.config.model || "",
+        request.targetLanguage || "简体中文",
+        request.sourceLanguageHint || "",
+        allowlist,
+        include,
+        exclude,
+        imageHash,
+    ].join("::")
+}
+
+function cloneDetectedBlocks(blocks: DetectedTextBlock[]): DetectedTextBlock[] {
+    return blocks.map((block) => ({
+        ...block,
+        bbox: { ...block.bbox },
+        lines: block.lines ? [...block.lines] : undefined,
+        segments: block.segments?.map((segment) => ({ ...segment })),
+        style: block.style ? { ...block.style } : undefined,
+    }))
+}
+
+function getCachedDetectResponse(cacheKey: string): DetectTextResponse | null {
+    const hit = detectResponseCache.get(cacheKey)
+    if (!hit) return null
+    if (hit.expiresAt < Date.now()) {
+        detectResponseCache.delete(cacheKey)
+        return null
+    }
+    return {
+        success: true,
+        blocks: cloneDetectedBlocks(hit.response.blocks),
+        raw: hit.response.raw,
+    }
+}
+
+function setCachedDetectResponse(cacheKey: string, response: DetectTextResponse): void {
+    if (!response.success) return
+    if (detectResponseCache.size >= DETECT_CACHE_MAX_ENTRIES) {
+        const firstKey = detectResponseCache.keys().next().value
+        if (firstKey) {
+            detectResponseCache.delete(firstKey)
+        }
+    }
+    detectResponseCache.set(cacheKey, {
+        expiresAt: Date.now() + DETECT_CACHE_TTL_MS,
+        response: {
+            success: true,
+            blocks: cloneDetectedBlocks(response.blocks),
+            raw: response.raw,
+        },
+    })
+}
+
 export async function detectTextBlocks(request: DetectTextRequest): Promise<DetectTextResponse> {
     const { config } = request
     if (!config.apiKey) {
@@ -802,11 +1391,21 @@ export async function detectTextBlocks(request: DetectTextRequest): Promise<Dete
         }
     }
 
-    if (config.provider === 'gemini') {
-        return detectWithGemini(request)
+    const cacheKey = buildDetectionCacheKey(request)
+    const cached = getCachedDetectResponse(cacheKey)
+    if (cached) {
+        return cached
     }
 
-    return detectWithOpenAI(request)
+    const response = config.provider === 'gemini'
+        ? await detectWithGemini(request)
+        : await detectWithOpenAI(request)
+
+    if (response.success) {
+        setCachedDetectResponse(cacheKey, response)
+    }
+
+    return response
 }
 
 // 统一的图片生成接口

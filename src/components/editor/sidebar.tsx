@@ -46,9 +46,21 @@ import {
     Trash2,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
-import { detectTextBlocks, GEMINI_MODELS, OPENAI_MODELS, type DetectTextResponse } from "@/lib/ai/ai-service"
+import {
+    detectTextBlocks,
+    filterBlocksByAngleThreshold,
+    GEMINI_MODELS,
+    getDetectionTargetLanguageFromDirection,
+    getSourceLanguageLabel,
+    getTranslationDirectionMeta,
+    OPENAI_MODELS,
+    type DetectTextResponse,
+    type SourceLanguageCode,
+    type TextDetectionRegion,
+    type TranslationDirection,
+} from "@/lib/ai/ai-service"
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
-import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
+import { EDITOR_IMAGE_ACCEPT, expandEditorUploadFiles, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import type { Selection } from "@/types/database"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -98,6 +110,21 @@ type SidecarImportPlan =
         previewDetails: SidecarPreviewDetail[]
     }
 
+const SOURCE_LANGUAGE_FILTER_OPTIONS: Array<{
+    code: SourceLanguageCode
+    shortLabel: string
+    fullLabel: string
+}> = [
+    { code: "ja", shortLabel: "日", fullLabel: "日本語 / Japanese" },
+    { code: "en", shortLabel: "英", fullLabel: "English" },
+    { code: "th", shortLabel: "泰", fullLabel: "ไทย / Thai" },
+    { code: "es", shortLabel: "西", fullLabel: "Español / Spanish" },
+    { code: "ar", shortLabel: "阿", fullLabel: "العربية / Arabic" },
+    { code: "id", shortLabel: "印尼", fullLabel: "Bahasa Indonesia" },
+    { code: "hi", shortLabel: "印地", fullLabel: "हिन्दी / Hindi" },
+    { code: "fi", shortLabel: "芬兰", fullLabel: "Suomi / Finnish" },
+]
+
 function richHtmlToPlainText(html: string): string {
     if (!html) return ""
     const parser = new DOMParser()
@@ -115,6 +142,8 @@ function richHtmlToPlainText(html: string): string {
 export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
+    const imageOnlyBaseInputRef = useRef<HTMLInputElement>(null)
+    const imageOnlyBaseBatchInputRef = useRef<HTMLInputElement>(null)
     const sidecarImportInputRef = useRef<HTMLInputElement>(null)
     const wordImportInputRef = useRef<HTMLInputElement>(null)
     const textLayerImportInputRef = useRef<HTMLInputElement>(null)
@@ -153,6 +182,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setCurrentImage,
         updateSettings,
         updateSelections,
+        setImageOnlyBase,
+        clearImageOnlyBase,
         setDetectedTextBlocks,
         clearDetectedTextBlocks,
         setPrompt,
@@ -274,9 +305,25 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const handleFileUpload = useCallback(async (files: FileList | null) => {
         if (!files) return
 
-        const normalizeResult = await normalizeEditorImageFiles(Array.from(files))
+        const expandedResult = await expandEditorUploadFiles(Array.from(files))
+        const normalizeResult = await normalizeEditorImageFiles(expandedResult.files)
         if (normalizeResult.files.length > 0) {
             addImages(normalizeResult.files)
+        }
+
+        if (expandedResult.archiveExpandedEntries > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已从 ${expandedResult.archiveSourceFiles} 个压缩包中解包 ${expandedResult.archiveExpandedEntries} 个文件`
+                    : `Extracted ${expandedResult.archiveExpandedEntries} files from ${expandedResult.archiveSourceFiles} archive(s)`
+            )
+        }
+        if (expandedResult.unsupportedArchives.length > 0) {
+            toast.warning(
+                locale === "zh"
+                    ? `暂不支持直接读取 ${expandedResult.unsupportedArchives.length} 个 RAR/7z 压缩包`
+                    : `${expandedResult.unsupportedArchives.length} RAR/7z archives are not supported yet`
+            )
         }
 
         if (normalizeResult.convertedCount > 0) {
@@ -295,18 +342,144 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             )
         }
 
-        if (normalizeResult.failed.length > 0) {
-            const preview = normalizeResult.failed
+        const allFailed = [...expandedResult.failed, ...normalizeResult.failed]
+        if (allFailed.length > 0) {
+            const preview = allFailed
                 .slice(0, 2)
                 .map((item) => `${item.fileName} (${item.reason})`)
                 .join("; ")
             toast.warning(
                 locale === "zh"
-                    ? `有 ${normalizeResult.failed.length} 个文件未导入：${preview}`
-                    : `${normalizeResult.failed.length} files were not imported: ${preview}`
+                    ? `有 ${allFailed.length} 个文件未导入：${preview}`
+                    : `${allFailed.length} files were not imported: ${preview}`
             )
         }
     }, [addImages, locale])
+
+    const getFileStem = useCallback((fileName: string) => {
+        return fileName.replace(/\.[^.]+$/, "").trim().toLowerCase()
+    }, [])
+
+    const validateAndAttachImageOnlyBase = useCallback(async (
+        imageId: string,
+        imageOnlyFile: File
+    ) => {
+        const targetImage = images.find((img) => img.id === imageId)
+        if (!targetImage) return { ok: false, reason: "TARGET_NOT_FOUND" }
+
+        const [sourceImage, imageOnlyObjectUrl] = await Promise.all([
+            loadImage(targetImage.originalUrl),
+            Promise.resolve(URL.createObjectURL(imageOnlyFile)),
+        ])
+        let attachedSuccess = false
+        try {
+            const imageOnlyImage = await loadImage(imageOnlyObjectUrl)
+            if (sourceImage.width !== imageOnlyImage.width || sourceImage.height !== imageOnlyImage.height) {
+                return { ok: false, reason: "SIZE_MISMATCH" as const }
+            }
+            setImageOnlyBase(imageId, imageOnlyObjectUrl, imageOnlyFile.name)
+            attachedSuccess = true
+            return { ok: true as const }
+        } catch {
+            return { ok: false, reason: "INVALID_IMAGE" as const }
+        } finally {
+            // URL ownership transfers to store on success.
+            if (!attachedSuccess) {
+                URL.revokeObjectURL(imageOnlyObjectUrl)
+            }
+        }
+    }, [images, setImageOnlyBase])
+
+    const handleCurrentImageOnlyBaseUpload = useCallback(async (files: FileList | null) => {
+        if (!files?.length || !currentImage) return
+
+        const normalizeResult = await normalizeEditorImageFiles(Array.from(files).slice(0, 1))
+        const file = normalizeResult.files[0]
+        if (!file) {
+            toast.error(locale === "zh" ? "未检测到可用图片文件" : "No valid image file detected")
+            return
+        }
+
+        const attached = await validateAndAttachImageOnlyBase(currentImage.id, file)
+        if (!attached.ok) {
+            if (attached.reason === "SIZE_MISMATCH") {
+                toast.error(
+                    locale === "zh"
+                        ? "底图尺寸必须与当前原图一致"
+                        : "Base image size must match current source image"
+                )
+            } else {
+                toast.error(locale === "zh" ? "底图设置失败" : "Failed to set base image")
+            }
+            return
+        }
+
+        toast.success(locale === "zh" ? "已设置 image-only 底图" : "Image-only base set")
+    }, [currentImage, locale, validateAndAttachImageOnlyBase])
+
+    const handleBatchImageOnlyBaseUpload = useCallback(async (files: FileList | null) => {
+        if (!files?.length || images.length === 0) return
+
+        const normalizeResult = await normalizeEditorImageFiles(Array.from(files))
+        if (!normalizeResult.files.length) {
+            toast.error(locale === "zh" ? "未检测到可用图片文件" : "No valid image files detected")
+            return
+        }
+
+        const bucket = new Map<string, string[]>()
+        images.forEach((img) => {
+            const stem = getFileStem(img.file.name)
+            const ids = bucket.get(stem) || []
+            ids.push(img.id)
+            bucket.set(stem, ids)
+        })
+
+        let matched = 0
+        let sizeMismatch = 0
+        const unmatched: string[] = []
+
+        for (const file of normalizeResult.files) {
+            const stem = getFileStem(file.name)
+            const targetIds = bucket.get(stem)
+            if (!targetIds?.length) {
+                unmatched.push(file.name)
+                continue
+            }
+            const targetId = targetIds.shift()
+            if (!targetId) {
+                unmatched.push(file.name)
+                continue
+            }
+            const attached = await validateAndAttachImageOnlyBase(targetId, file)
+            if (attached.ok) {
+                matched++
+            } else if (attached.reason === "SIZE_MISMATCH") {
+                sizeMismatch++
+            }
+        }
+
+        if (matched > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已匹配 ${matched} 张 image-only 底图`
+                    : `Matched ${matched} image-only base files`
+            )
+        }
+        if (sizeMismatch > 0) {
+            toast.warning(
+                locale === "zh"
+                    ? `${sizeMismatch} 张底图尺寸不一致，已跳过`
+                    : `${sizeMismatch} base images skipped due to size mismatch`
+            )
+        }
+        if (unmatched.length > 0) {
+            toast.info(
+                locale === "zh"
+                    ? `有 ${unmatched.length} 张未匹配到同名页面`
+                    : `${unmatched.length} files did not match any page name`
+            )
+        }
+    }, [getFileStem, images, locale, validateAndAttachImageOnlyBase])
 
     // 处理粘贴
     const handlePaste = useCallback(async () => {
@@ -355,12 +528,69 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         const timer = window.setTimeout(() => setClearGalleryArmed(false), 1800)
         return () => window.clearTimeout(timer)
     }, [clearGalleryArmed])
+
+    const selectionToNormalizedRegion = useCallback((
+        selection: Selection,
+        imageWidth: number,
+        imageHeight: number
+    ): TextDetectionRegion => ({
+        x: Math.max(0, Math.min(1, selection.x / Math.max(1, imageWidth))),
+        y: Math.max(0, Math.min(1, selection.y / Math.max(1, imageHeight))),
+        width: Math.max(0, Math.min(1, selection.width / Math.max(1, imageWidth))),
+        height: Math.max(0, Math.min(1, selection.height / Math.max(1, imageHeight))),
+    }), [])
+
+    const getDetectionRegionHints = useCallback((imageWidth: number, imageHeight: number) => {
+        if (!currentImage || !currentImage.selections?.length) {
+            return {}
+        }
+        const normalized = currentImage.selections.map((selection) =>
+            selectionToNormalizedRegion(selection, imageWidth, imageHeight)
+        )
+        const mode = settings.detectionRegionMode ?? "full"
+        if (mode === "selection_only") {
+            return { includeRegions: normalized }
+        }
+        if (mode === "selection_ignore") {
+            return { excludeRegions: normalized }
+        }
+        return {}
+    }, [currentImage, selectionToNormalizedRegion, settings.detectionRegionMode])
+
     const getTargetLanguageForDetection = useCallback(() => {
         const direction = settings.translationDirection ?? "ja2zh"
-        if (direction === "ja2en") return "English"
-        if (direction === "en2ja") return "日本語"
-        return "简体中文"
+        return getDetectionTargetLanguageFromDirection(direction)
     }, [settings.translationDirection])
+
+    const getSourceLanguageAllowlist = useCallback(() => {
+        return settings.sourceLanguageAllowlist ?? []
+    }, [settings.sourceLanguageAllowlist])
+
+    const getSourceLanguageHintForDetection = useCallback(() => {
+        const allowlist = getSourceLanguageAllowlist()
+        if (allowlist.length) {
+            return allowlist.map((code) => getSourceLanguageLabel(code)).join(locale === "zh" ? "、" : ", ")
+        }
+        const direction = settings.translationDirection ?? "ja2zh"
+        return getTranslationDirectionMeta(direction).sourceLangLabel
+    }, [getSourceLanguageAllowlist, locale, settings.translationDirection])
+
+    const toggleSourceLanguageAllowlist = useCallback((code: SourceLanguageCode) => {
+        const currentAllowlist = settings.sourceLanguageAllowlist ?? []
+        const hasCode = currentAllowlist.includes(code)
+        const nextAllowlist = hasCode
+            ? currentAllowlist.filter((item) => item !== code)
+            : [...currentAllowlist, code]
+        updateSettings({ sourceLanguageAllowlist: nextAllowlist })
+    }, [settings.sourceLanguageAllowlist, updateSettings])
+
+    const applyAngleThresholdFilter = useCallback((blocks: DetectTextResponse["blocks"]) => {
+        return filterBlocksByAngleThreshold(
+            blocks,
+            settings.angleThreshold ?? 1,
+            settings.enableAngleFilter ?? false
+        )
+    }, [settings.angleThreshold, settings.enableAngleFilter])
 
     const parseApiError = useCallback(async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
@@ -413,6 +643,10 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const detectionHints =
+            imageWidth && imageHeight
+                ? getDetectionRegionHints(imageWidth, imageHeight)
+                : {}
         const tryServerDetect = async () => {
             const candidates = await buildDetectPayloadCandidates(imageData)
             let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
@@ -425,9 +659,12 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                     body: JSON.stringify({
                         imageData: payload,
                         targetLanguage: getTargetLanguageForDetection(),
+                        sourceLanguageHint: getSourceLanguageHintForDetection(),
+                        sourceLanguageAllowlist: getSourceLanguageAllowlist(),
                         imageWidth,
                         imageHeight,
                         preferComicDetector: true,
+                        ...detectionHints,
                     }),
                 })
 
@@ -445,9 +682,10 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 }
 
                 const data = await res.json()
+                const filteredBlocks = applyAngleThresholdFilter(data.blocks || [])
                 return {
                     success: true,
-                    blocks: data.blocks || [],
+                    blocks: filteredBlocks,
                 } as DetectTextResponse
             }
 
@@ -478,9 +716,19 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 imageSize: settings.imageSize || "2K",
                 },
                 targetLanguage: getTargetLanguageForDetection(),
-            })
+                sourceLanguageHint: getSourceLanguageHintForDetection(),
+                sourceLanguageAllowlist: getSourceLanguageAllowlist(),
+                ...detectionHints,
+            }).then((response) => ({
+                ...response,
+                blocks: response.success ? applyAngleThresholdFilter(response.blocks || []) : (response.blocks || []),
+            }))
     }, [
+        applyAngleThresholdFilter,
         buildDetectPayloadCandidates,
+        getDetectionRegionHints,
+        getSourceLanguageAllowlist,
+        getSourceLanguageHintForDetection,
         getTargetLanguageForDetection,
         locale,
         parseApiError,
@@ -1723,6 +1971,37 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         }
     }, [currentImage, locale])
 
+    const handleExportPlainText = useCallback(() => {
+        if (!currentImage || !(currentImage.detectedTextBlocks || []).length) {
+            toast.warning(locale === "zh" ? "没有可导出的文本块" : "No text blocks to export")
+            return
+        }
+
+        const lines = (currentImage.detectedTextBlocks || []).flatMap((block, index) => {
+            const rowHeader = `#${index + 1}`
+            const sourceLine = `${locale === "zh" ? "原文" : "Source"}: ${block.sourceText || ""}`
+            const translatedLine = `${locale === "zh" ? "译文" : "Translation"}: ${block.translatedText || ""}`
+            return [rowHeader, sourceLine, translatedLine, ""]
+        })
+        const content = [
+            "MangaLens Plain Text Export",
+            `${locale === "zh" ? "图片" : "Image"}: ${currentImage.file.name}`,
+            `${locale === "zh" ? "导出时间" : "Exported at"}: ${new Date().toISOString()}`,
+            "",
+            ...lines,
+        ].join("\n")
+
+        const blob = new Blob([content], { type: "text/plain;charset=utf-8" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `${currentImage.file.name.replace(/\.[^.]+$/, "")}-plain-text.txt`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, [currentImage, locale])
+
     const handleImportWord = useCallback(async (file: File) => {
         if (!currentImage) return
         try {
@@ -1892,6 +2171,50 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             <Clipboard className="h-4 w-4 mr-2" />
                             {t.editor.sidebar.paste}
                         </Button>
+                        <div className="grid grid-cols-2 gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full"
+                                onClick={() => imageOnlyBaseInputRef.current?.click()}
+                                disabled={!currentImage}
+                            >
+                                <File className="h-4 w-4 mr-2" />
+                                {locale === "zh" ? "设为底图" : "Set base image"}
+                            </Button>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full"
+                                onClick={() => imageOnlyBaseBatchInputRef.current?.click()}
+                                disabled={images.length === 0}
+                            >
+                                <FolderOpen className="h-4 w-4 mr-2" />
+                                {locale === "zh" ? "批量匹配底图" : "Batch match bases"}
+                            </Button>
+                        </div>
+                        {currentImage?.imageOnlyBaseUrl ? (
+                            <div className="rounded-md border border-primary/30 bg-primary/5 px-2.5 py-2 text-[11px] space-y-1">
+                                <p className="text-foreground/90">
+                                    {locale === "zh" ? "当前底图：" : "Current base:"} {currentImage.imageOnlyBaseName || (locale === "zh" ? "已设置" : "Attached")}
+                                </p>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 px-2 text-[11px]"
+                                    onClick={() => clearImageOnlyBase(currentImage.id)}
+                                >
+                                    {locale === "zh" ? "清空底图" : "Clear base"}
+                                </Button>
+                            </div>
+                        ) : (
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "可选：为当前页指定无字底图，生成时会把译文直接贴到该底图。"
+                                    : "Optional: attach an image-only base. Generated text will be composited onto that base."}
+                            </p>
+                        )}
                         <Button
                             variant="outline"
                             size="sm"
@@ -1933,6 +2256,29 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             className="hidden"
                             onChange={(e) => {
                                 void handleFileUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
+                        />
+                        <input
+                            ref={imageOnlyBaseInputRef}
+                            type="file"
+                            accept={EDITOR_IMAGE_ACCEPT}
+                            aria-label={locale === "zh" ? "设置当前 image-only 底图" : "Set current image-only base"}
+                            className="hidden"
+                            onChange={(e) => {
+                                void handleCurrentImageOnlyBaseUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
+                        />
+                        <input
+                            ref={imageOnlyBaseBatchInputRef}
+                            type="file"
+                            accept={EDITOR_IMAGE_ACCEPT}
+                            multiple
+                            aria-label={locale === "zh" ? "批量匹配 image-only 底图" : "Batch match image-only bases"}
+                            className="hidden"
+                            onChange={(e) => {
+                                void handleBatchImageOnlyBaseUpload(e.target.files)
                                 e.currentTarget.value = ""
                             }}
                         />
@@ -1995,6 +2341,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         {img.status === "failed" && (
                                             <div className="absolute top-1 right-1 w-3 h-3 bg-red-500 rounded-full pointer-events-none" />
                                         )}
+                                        {img.imageOnlyBaseUrl && (
+                                            <div className="absolute bottom-1 right-1 rounded bg-primary/90 px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground pointer-events-none">
+                                                {locale === "zh" ? "底图" : "BASE"}
+                                            </div>
+                                        )}
                                         <IconButton
                                             variant="secondary"
                                             ariaLabel={`${locale === "zh" ? "删除图片" : "Remove image"}: ${img.file.name}`}
@@ -2042,7 +2393,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 </Label>
                                 <Select
                                     value={settings.translationDirection ?? "ja2zh"}
-                                    onValueChange={(value: "ja2zh" | "en2zh" | "ja2en" | "en2ja") =>
+                                    onValueChange={(value: TranslationDirection) =>
                                         updateSettings({ translationDirection: value })
                                     }
                                 >
@@ -2052,11 +2403,131 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <SelectContent>
                                         <SelectItem value="ja2zh">日 → 中</SelectItem>
                                         <SelectItem value="en2zh">英 → 中</SelectItem>
+                                        <SelectItem value="th2zh">泰 → 中</SelectItem>
+                                        <SelectItem value="es2zh">西 → 中</SelectItem>
+                                        <SelectItem value="ar2zh">阿 → 中</SelectItem>
+                                        <SelectItem value="id2zh">印尼 → 中</SelectItem>
+                                        <SelectItem value="hi2zh">印地 → 中</SelectItem>
+                                        <SelectItem value="fi2zh">芬兰 → 中</SelectItem>
                                         <SelectItem value="ja2en">日 → 英</SelectItem>
+                                        <SelectItem value="th2en">泰 → 英</SelectItem>
+                                        <SelectItem value="es2en">西 → 英</SelectItem>
+                                        <SelectItem value="ar2en">阿 → 英</SelectItem>
+                                        <SelectItem value="id2en">印尼 → 英</SelectItem>
+                                        <SelectItem value="hi2en">印地 → 英</SelectItem>
+                                        <SelectItem value="fi2en">芬兰 → 英</SelectItem>
                                         <SelectItem value="en2ja">英 → 日</SelectItem>
+                                        <SelectItem value="ja2id">日 → 印尼</SelectItem>
+                                        <SelectItem value="en2id">英 → 印尼</SelectItem>
+                                        <SelectItem value="th2id">泰 → 印尼</SelectItem>
+                                        <SelectItem value="es2id">西 → 印尼</SelectItem>
+                                        <SelectItem value="ar2id">阿 → 印尼</SelectItem>
+                                        <SelectItem value="ja2hi">日 → 印地</SelectItem>
+                                        <SelectItem value="en2hi">英 → 印地</SelectItem>
+                                        <SelectItem value="en2ar">英 → 阿</SelectItem>
+                                        <SelectItem value="ja2ar">日 → 阿</SelectItem>
+                                        <SelectItem value="en2fi">英 → 芬兰</SelectItem>
+                                        <SelectItem value="ja2fi">日 → 芬兰</SelectItem>
                                     </SelectContent>
                                 </Select>
                             </div>
+                            <div className="space-y-1.5">
+                                <Label htmlFor="detection-region-mode" className="text-xs">
+                                    {locale === "zh" ? "检测范围提示" : "Detection region hint"}
+                                </Label>
+                                <Select
+                                    value={settings.detectionRegionMode ?? "full"}
+                                    onValueChange={(value: "full" | "selection_only" | "selection_ignore") =>
+                                        updateSettings({ detectionRegionMode: value })
+                                    }
+                                >
+                                    <SelectTrigger id="detection-region-mode" className="h-9">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="full">{locale === "zh" ? "整图检测" : "Full image"}</SelectItem>
+                                        <SelectItem value="selection_only">{locale === "zh" ? "仅选区检测" : "Selected areas only"}</SelectItem>
+                                        <SelectItem value="selection_ignore">{locale === "zh" ? "忽略选区检测" : "Ignore selected areas"}</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+                        </div>
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label className="text-xs">
+                                    {locale === "zh" ? "仅翻译源语言" : "Translate from only"}
+                                </Label>
+                                <Button
+                                    type="button"
+                                    variant={(settings.sourceLanguageAllowlist ?? []).length === 0 ? "default" : "outline"}
+                                    size="sm"
+                                    className="h-7 px-2 text-[11px]"
+                                    onClick={() => updateSettings({ sourceLanguageAllowlist: [] })}
+                                >
+                                    {locale === "zh" ? "自动" : "Auto"}
+                                </Button>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {SOURCE_LANGUAGE_FILTER_OPTIONS.map((item) => {
+                                    const selected = (settings.sourceLanguageAllowlist ?? []).includes(item.code)
+                                    return (
+                                        <Button
+                                            key={item.code}
+                                            type="button"
+                                            variant={selected ? "default" : "outline"}
+                                            size="sm"
+                                            className="h-7 px-2 text-[11px]"
+                                            title={item.fullLabel}
+                                            onClick={() => toggleSourceLanguageAllowlist(item.code)}
+                                        >
+                                            {item.shortLabel}
+                                        </Button>
+                                    )
+                                })}
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "用于限制 OCR 只识别指定语种，减少误把噪声当成其他语言。"
+                                    : "Limit OCR to selected source languages to reduce noisy mis-detections."}
+                            </p>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="enable-angle-filter" className="text-xs">
+                                    {locale === "zh" ? "过滤倾斜文本" : "Filter angled text"}
+                                </Label>
+                                <Switch
+                                    id="enable-angle-filter"
+                                    checked={settings.enableAngleFilter ?? false}
+                                    onCheckedChange={(checked) => updateSettings({ enableAngleFilter: checked })}
+                                />
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Label htmlFor="angle-threshold" className="text-[11px] text-muted-foreground whitespace-nowrap">
+                                    {locale === "zh" ? "角度阈值 ±" : "Angle ±"}
+                                </Label>
+                                <Input
+                                    id="angle-threshold"
+                                    type="number"
+                                    min={0}
+                                    max={45}
+                                    step="0.1"
+                                    className="h-8"
+                                    value={String(settings.angleThreshold ?? 1)}
+                                    onChange={(event) => {
+                                        const raw = Number(event.target.value)
+                                        const nextValue = Number.isFinite(raw) ? Math.max(0, Math.min(45, raw)) : 1
+                                        updateSettings({ angleThreshold: nextValue })
+                                    }}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "启用后仅保留 angle 在阈值范围内的文本块（常用于排除拟声词）。"
+                                    : "When enabled, keeps only blocks whose angle is within threshold (useful to skip SFX)."}
+                            </p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
                             <div className="space-y-1.5">
                                 <Label htmlFor="comic-type" className="text-xs">
                                     {locale === "zh" ? "漫画类型" : "Comic type"}
@@ -2076,6 +2547,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         <SelectItem value="western">{locale === "zh" ? "美漫" : "Western"}</SelectItem>
                                     </SelectContent>
                                 </Select>
+                            </div>
+                            <div className="space-y-1.5">
+                                <Label htmlFor="chapter-bulk-translate" className="text-xs">
+                                    {locale === "zh" ? "章节批量上下文" : "Chapter bulk context"}
+                                </Label>
+                                <div className="h-9 rounded-md border border-input bg-background px-2.5 flex items-center justify-between">
+                                    <span className="text-[11px] text-muted-foreground">
+                                        {locale === "zh" ? "批量生成时统一术语" : "Keep terms consistent in batch"}
+                                    </span>
+                                    <Switch
+                                        id="chapter-bulk-translate"
+                                        checked={settings.chapterBulkTranslate ?? false}
+                                        onCheckedChange={(checked) => updateSettings({ chapterBulkTranslate: checked })}
+                                    />
+                                </div>
                             </div>
                         </div>
                         <div className="space-y-1.5">
@@ -2097,6 +2583,18 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <SelectItem value="clean-serif">{locale === "zh" ? "清晰衬线" : "Clean serif"}</SelectItem>
                                 </SelectContent>
                             </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label htmlFor="preferred-output-font" className="text-xs">
+                                {locale === "zh" ? "翻译字体（可选）" : "Preferred output font (optional)"}
+                            </Label>
+                            <Input
+                                id="preferred-output-font"
+                                value={settings.preferredOutputFontFamily ?? ""}
+                                onChange={(event) => updateSettings({ preferredOutputFontFamily: event.target.value })}
+                                placeholder={locale === "zh" ? "例如：PingFang SC / 思源黑体" : "e.g. PingFang SC / Noto Sans"}
+                                className="h-9"
+                            />
                         </div>
                         {isBubbleDetectionEnabled ? (
                             <>
@@ -2307,6 +2805,15 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         </Button>
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={handleExportPlainText}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "导出纯文本" : "Export TXT"}
+                                        </Button>
                                         <Button
                                             type="button"
                                             variant="outline"

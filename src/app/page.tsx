@@ -1,6 +1,13 @@
 import Link from "next/link"
 import { ArrowRight, FolderSync, Globe, Palette, Sparkles, Target, Zap } from "lucide-react"
+import { Space_Grotesk } from "next/font/google"
 import { Button } from "@/components/ui/button"
+
+const spaceGrotesk = Space_Grotesk({
+  subsets: ["latin"],
+  weight: ["500", "700"],
+  display: "swap",
+})
 
 const navLinks = [
   { href: "/docs", label: "文档", prefetch: false },
@@ -51,21 +58,33 @@ const useCases = [
   },
 ]
 
+const heroTags = [
+  "Arabic",
+  "Thai",
+  "Spanish",
+  "Manga OCR",
+  "Batch Workflow",
+]
+
 export default function HomePage() {
   return (
-    <div className="min-h-screen bg-background">
-      <header className="fixed left-4 right-4 top-4 z-50">
-        <nav className="mx-auto flex max-w-7xl items-center justify-between gap-3 rounded-2xl border border-border/70 bg-card/95 px-4 py-3">
+    <div className="relative min-h-screen overflow-hidden bg-background">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -left-32 top-28 h-72 w-72 rounded-full bg-primary/15 blur-3xl" />
+        <div className="absolute -right-24 top-1/3 h-72 w-72 rounded-full bg-accent/15 blur-3xl" />
+      </div>
+      <header className="fixed left-4 right-4 top-6 z-50">
+        <nav className="mx-auto flex max-w-7xl items-center justify-between gap-3 rounded-2xl border border-border/70 bg-card/95 px-4 py-3.5 shadow-sm backdrop-blur">
           <Link href="/" className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary">
               <Sparkles className="h-5 w-5 text-white" />
             </div>
-            <span className="font-display text-lg font-bold">MangaLens</span>
+            <span className={`${spaceGrotesk.className} text-lg font-bold tracking-tight`}>MangaLens</span>
           </Link>
 
-          <div className="hidden items-center gap-1 lg:flex">
+          <div className="hidden items-center gap-1 py-1 lg:flex">
             {navLinks.map((item) => (
-              <Button key={item.href} variant="ghost" size="sm" asChild>
+              <Button key={item.href} variant="ghost" size="sm" className="h-10 px-3" asChild>
                 <Link href={item.href} prefetch={item.prefetch}>
                   {item.label}
                 </Link>
@@ -89,19 +108,29 @@ export default function HomePage() {
       </header>
 
       <main id="main-content">
-        <section className="px-4 pb-16 pt-32">
+        <section className="px-4 pb-16 pt-36">
           <div className="mx-auto max-w-6xl text-center">
             <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border/70 bg-muted/40 px-4 py-2">
               <Zap className="h-4 w-4 text-primary" />
               <span className="text-sm text-muted-foreground">AI 驱动 · 选区重绘 · 多模型</span>
             </div>
 
-            <h1 className="mb-5 font-display text-4xl font-bold leading-tight md:text-6xl">
+            <h1 className={`${spaceGrotesk.className} mb-5 text-4xl font-bold leading-tight md:text-6xl`}>
               MangaLens 漫画翻译与局部重绘
             </h1>
             <p className="mx-auto mb-8 max-w-3xl text-lg text-muted-foreground">
               上传图片、框选文本区域、输入提示词，一次性完成漫画文本替换与结果导出。
             </p>
+            <div className="mb-8 flex flex-wrap items-center justify-center gap-2">
+              {heroTags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full border border-border/70 bg-card/80 px-3 py-1 text-xs font-medium text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
 
             <div className="flex items-center justify-center gap-3">
               <Button size="lg" asChild>

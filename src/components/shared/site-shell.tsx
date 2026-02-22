@@ -42,8 +42,8 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
                 <div className="absolute -right-40 bottom-20 h-80 w-80 rounded-full bg-accent/10 blur-3xl" />
             </div>
 
-            <header className="fixed left-4 right-4 top-4 z-50">
-                <nav className="mx-auto flex max-w-7xl items-center justify-between gap-2 rounded-2xl border border-border/70 bg-card/95 px-4 py-3">
+            <header className="fixed left-4 right-4 top-6 z-50">
+                <nav className="mx-auto flex max-w-7xl items-center justify-between gap-2 rounded-2xl border border-border/70 bg-card/95 px-4 py-3.5 shadow-sm backdrop-blur">
                     <Link href="/" className="flex items-center gap-2">
                         <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary">
                             <Sparkles className="h-5 w-5 text-white" />
@@ -51,7 +51,7 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
                         <span className="hidden font-display text-lg font-bold sm:block">MangaLens</span>
                     </Link>
 
-                    <div className="hidden items-center gap-1 lg:flex">
+                    <div className="hidden items-center gap-1 py-1 lg:flex">
                         {navLinks.map((item) => (
                             <Button key={item.href} variant="ghost" size="sm" className="h-9 px-3" asChild>
                                 <Link href={item.href} prefetch={item.prefetch}>
@@ -116,7 +116,7 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
                 </nav>
             </header>
 
-            <main id="main-content" className="px-4 pb-10 pt-28">
+            <main id="main-content" className="px-4 pb-10 pt-32">
                 <div className={cn("mx-auto w-full", contentClassName)}>{children}</div>
             </main>
         </div>

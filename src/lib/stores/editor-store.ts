@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { Selection, AIProvider } from '@/types/database'
 import type { Locale } from '@/lib/i18n'
+import type { SourceLanguageCode, TranslationDirection } from '@/lib/ai/ai-service'
 
 export type SelectionProcessStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
@@ -71,6 +72,8 @@ export interface ImageItem {
     id: string
     file: File
     originalUrl: string
+    imageOnlyBaseUrl: string | null
+    imageOnlyBaseName?: string
     resultUrl: string | null
     repairMaskUrl: string | null
     repairMaskUpdatedAt?: string
@@ -97,9 +100,15 @@ export interface EditorSettings {
     concurrency: number
     isSerial: boolean
     maxRetries: number
-    translationDirection: "ja2zh" | "en2zh" | "ja2en" | "en2ja"
+    translationDirection: TranslationDirection
+    sourceLanguageAllowlist: SourceLanguageCode[]
+    enableAngleFilter: boolean
+    angleThreshold: number
+    detectionRegionMode: "full" | "selection_only" | "selection_ignore"
+    chapterBulkTranslate: boolean
     comicType: "auto" | "manga" | "western"
     textStylePreset: "match-original" | "comic-bold" | "clean-serif"
+    preferredOutputFontFamily: string
     enableComicModule: boolean
     enableBubbleDetection: boolean
     enableSelectionOcr: boolean
@@ -162,6 +171,8 @@ interface EditorState {
 
     updateSelections: (imageId: string, selections: Selection[]) => void
     clearSelections: (imageId: string) => void
+    setImageOnlyBase: (imageId: string, imageOnlyBaseUrl: string | null, imageOnlyBaseName?: string) => void
+    clearImageOnlyBase: (imageId: string) => void
     mergeResultIntoOriginal: (imageId: string) => void
     setRepairMask: (imageId: string, maskUrl: string | null) => void
     clearRepairMask: (imageId: string) => void
@@ -218,8 +229,14 @@ const defaultSettings: EditorSettings = {
     isSerial: false,
     maxRetries: 2,
     translationDirection: "ja2zh",
+    sourceLanguageAllowlist: [],
+    enableAngleFilter: false,
+    angleThreshold: 1,
+    detectionRegionMode: "full",
+    chapterBulkTranslate: false,
     comicType: "auto",
     textStylePreset: "match-original",
+    preferredOutputFontFamily: "",
     enableComicModule: true,
     enableBubbleDetection: true,
     enableSelectionOcr: true,
@@ -327,6 +344,7 @@ export const useEditorStore = create<EditorState>()(
                     id: generateId(),
                     file,
                     originalUrl: URL.createObjectURL(file),
+                    imageOnlyBaseUrl: null,
                     resultUrl: null,
                     repairMaskUrl: null,
                     selections: [],
@@ -354,6 +372,7 @@ export const useEditorStore = create<EditorState>()(
                     const image = state.images.find((img) => img.id === id)
                     if (image) {
                         URL.revokeObjectURL(image.originalUrl)
+                        if (image.imageOnlyBaseUrl?.startsWith('blob:')) URL.revokeObjectURL(image.imageOnlyBaseUrl)
                         if (image.resultUrl) URL.revokeObjectURL(image.resultUrl)
                     }
 
@@ -370,6 +389,7 @@ export const useEditorStore = create<EditorState>()(
                 const { images } = get()
                 images.forEach((img) => {
                     URL.revokeObjectURL(img.originalUrl)
+                    if (img.imageOnlyBaseUrl?.startsWith('blob:')) URL.revokeObjectURL(img.imageOnlyBaseUrl)
                     if (img.resultUrl) URL.revokeObjectURL(img.resultUrl)
                 })
                 set({ images: [], currentImageId: null, history: [], historyIndex: -1 })
@@ -409,11 +429,48 @@ export const useEditorStore = create<EditorState>()(
                     ),
                 }))
             },
+            setImageOnlyBase: (imageId, imageOnlyBaseUrl, imageOnlyBaseName) => {
+                set((state) => ({
+                    images: state.images.map((img) => {
+                        if (img.id !== imageId) return img
+                        if (
+                            img.imageOnlyBaseUrl &&
+                            img.imageOnlyBaseUrl.startsWith('blob:') &&
+                            img.imageOnlyBaseUrl !== imageOnlyBaseUrl
+                        ) {
+                            URL.revokeObjectURL(img.imageOnlyBaseUrl)
+                        }
+                        return {
+                            ...img,
+                            imageOnlyBaseUrl,
+                            imageOnlyBaseName: imageOnlyBaseUrl ? imageOnlyBaseName : undefined,
+                        }
+                    }),
+                }))
+            },
+            clearImageOnlyBase: (imageId) => {
+                set((state) => ({
+                    images: state.images.map((img) => {
+                        if (img.id !== imageId) return img
+                        if (img.imageOnlyBaseUrl?.startsWith('blob:')) {
+                            URL.revokeObjectURL(img.imageOnlyBaseUrl)
+                        }
+                        return {
+                            ...img,
+                            imageOnlyBaseUrl: null,
+                            imageOnlyBaseName: undefined,
+                        }
+                    }),
+                }))
+            },
             mergeResultIntoOriginal: (imageId) => {
                 const targetImage = get().images.find((img) => img.id === imageId)
                 if (!targetImage?.resultUrl) return
                 if (targetImage.originalUrl.startsWith('blob:')) {
                     URL.revokeObjectURL(targetImage.originalUrl)
+                }
+                if (targetImage.imageOnlyBaseUrl?.startsWith('blob:')) {
+                    URL.revokeObjectURL(targetImage.imageOnlyBaseUrl)
                 }
 
                 // 保存历史，支持撤销
@@ -426,6 +483,8 @@ export const useEditorStore = create<EditorState>()(
                         return {
                             ...img,
                             originalUrl: img.resultUrl,
+                            imageOnlyBaseUrl: null,
+                            imageOnlyBaseName: undefined,
                             resultUrl: null,
                             repairMaskUrl: null,
                             repairMaskUpdatedAt: undefined,

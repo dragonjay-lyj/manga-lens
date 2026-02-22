@@ -5,6 +5,8 @@ import type { PixelData, Psd, ReadOptions } from "ag-psd"
 const TIFF_EXTENSIONS = new Set(["tif", "tiff"])
 const PSD_EXTENSIONS = new Set(["psd"])
 const PDF_EXTENSIONS = new Set(["pdf"])
+const ZIP_ARCHIVE_EXTENSIONS = new Set(["zip", "cbz"])
+const UNSUPPORTED_ARCHIVE_EXTENSIONS = new Set(["rar", "cbr", "7z"])
 const COMMON_IMAGE_EXTENSIONS = new Set([
     "png",
     "jpg",
@@ -41,13 +43,21 @@ const PDF_MIME_TYPES = new Set([
     "application/x-pdf",
 ])
 
-export const EDITOR_IMAGE_ACCEPT = "image/*,.tif,.tiff,.psd,.pdf"
+export const EDITOR_IMAGE_ACCEPT = "image/*,.tif,.tiff,.psd,.pdf,.zip,.cbz,.rar,.cbr,.7z"
 
 export interface NormalizeEditorImageFilesResult {
     files: File[]
     convertedCount: number
     pdfExpandedPages: number
     pdfSourceFiles: number
+    failed: Array<{ fileName: string; reason: string }>
+}
+
+export interface ExpandEditorUploadFilesResult {
+    files: File[]
+    archiveSourceFiles: number
+    archiveExpandedEntries: number
+    unsupportedArchives: string[]
     failed: Array<{ fileName: string; reason: string }>
 }
 
@@ -70,6 +80,20 @@ interface AgPsdModule {
         createImageDataMethod?: (width: number, height: number) => ImageData
     ) => void
     readPsd: (buffer: ArrayBuffer, options?: ReadOptions) => Psd
+}
+
+interface JsZipEntry {
+    name: string
+    dir: boolean
+    async: (type: "blob") => Promise<Blob>
+}
+
+interface JsZipArchive {
+    files: Record<string, JsZipEntry>
+}
+
+interface JsZipModule {
+    loadAsync: (data: ArrayBuffer) => Promise<JsZipArchive>
 }
 
 let psdCanvasInitialized = false
@@ -99,6 +123,16 @@ function isPsdFile(file: File): boolean {
 function isPdfFile(file: File): boolean {
     const ext = getFileExtension(file.name)
     return PDF_EXTENSIONS.has(ext) || PDF_MIME_TYPES.has(file.type.toLowerCase())
+}
+
+function isZipArchiveFile(file: File): boolean {
+    const ext = getFileExtension(file.name)
+    return ZIP_ARCHIVE_EXTENSIONS.has(ext)
+}
+
+function isUnsupportedArchiveFile(file: File): boolean {
+    const ext = getFileExtension(file.name)
+    return UNSUPPORTED_ARCHIVE_EXTENSIONS.has(ext)
 }
 
 export function isEditorSupportedUploadFile(file: File): boolean {
@@ -287,6 +321,96 @@ function getNormalizeErrorMessage(raw: unknown): string {
         return "Canvas conversion failed"
     }
     return message || "Unsupported image format"
+}
+
+function sanitizeArchiveEntryName(input: string): string {
+    return input
+        .replace(/\\/g, "/")
+        .split("/")
+        .filter(Boolean)
+        .join("_")
+}
+
+function guessMimeFromFileName(fileName: string): string {
+    const ext = getFileExtension(fileName)
+    if (ext === "png") return "image/png"
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg"
+    if (ext === "webp") return "image/webp"
+    if (ext === "gif") return "image/gif"
+    if (ext === "bmp") return "image/bmp"
+    if (ext === "avif") return "image/avif"
+    if (ext === "heic") return "image/heic"
+    if (ext === "heif") return "image/heif"
+    if (ext === "svg") return "image/svg+xml"
+    if (ext === "tif" || ext === "tiff") return "image/tiff"
+    if (ext === "psd") return "image/vnd.adobe.photoshop"
+    if (ext === "pdf") return "application/pdf"
+    return "application/octet-stream"
+}
+
+export async function expandEditorUploadFiles(files: File[]): Promise<ExpandEditorUploadFilesResult> {
+    const result: ExpandEditorUploadFilesResult = {
+        files: [],
+        archiveSourceFiles: 0,
+        archiveExpandedEntries: 0,
+        unsupportedArchives: [],
+        failed: [],
+    }
+
+    let jsZipModule: JsZipModule | null = null
+
+    for (const file of files) {
+        if (isUnsupportedArchiveFile(file)) {
+            result.unsupportedArchives.push(file.name)
+            continue
+        }
+        if (!isZipArchiveFile(file)) {
+            result.files.push(file)
+            continue
+        }
+
+        result.archiveSourceFiles += 1
+        try {
+            if (!jsZipModule) {
+                const imported = await import("jszip")
+                jsZipModule = ((imported as { default?: unknown }).default || imported) as unknown as JsZipModule
+            }
+            const zip = await jsZipModule.loadAsync(await file.arrayBuffer())
+            const archiveBase = file.name.replace(/\.[^.]+$/, "")
+            const entries = Object.values(zip.files).filter((entry) => !entry.dir)
+            let extractedCount = 0
+
+            for (const entry of entries) {
+                const entryName = sanitizeArchiveEntryName(entry.name)
+                const ext = getFileExtension(entryName)
+                if (!COMMON_IMAGE_EXTENSIONS.has(ext) && !PDF_EXTENSIONS.has(ext)) {
+                    continue
+                }
+                const blob = await entry.async("blob")
+                const outputName = `${archiveBase}-${entryName}`
+                result.files.push(new File([blob], outputName, {
+                    type: blob.type || guessMimeFromFileName(outputName),
+                    lastModified: Date.now(),
+                }))
+                extractedCount += 1
+            }
+
+            result.archiveExpandedEntries += extractedCount
+            if (extractedCount === 0) {
+                result.failed.push({
+                    fileName: file.name,
+                    reason: "Archive has no supported image entries",
+                })
+            }
+        } catch {
+            result.failed.push({
+                fileName: file.name,
+                reason: "Archive parse failed",
+            })
+        }
+    }
+
+    return result
 }
 
 export async function normalizeEditorImageFiles(files: File[]): Promise<NormalizeEditorImageFilesResult> {
