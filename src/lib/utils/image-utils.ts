@@ -636,6 +636,81 @@ export async function downloadImagesAsZip(
     saveAs(content, zipFilename)
 }
 
+export async function downloadImagesAsPdf(
+    images: Array<{ name: string; dataUrl: string }>,
+    filename: string = "manga-lens-results.pdf"
+): Promise<void> {
+    if (!images.length) return
+
+    const { jsPDF } = await import("jspdf")
+    const firstImage = await loadImage(images[0].dataUrl)
+    const firstOrientation = firstImage.width >= firstImage.height ? "landscape" : "portrait"
+
+    const pdf = new jsPDF({
+        orientation: firstOrientation,
+        unit: "pt",
+        format: [firstImage.width, firstImage.height],
+        compress: true,
+        putOnlyUsedFonts: true,
+    })
+
+    for (let index = 0; index < images.length; index++) {
+        const { dataUrl } = images[index]
+        const image = await loadImage(dataUrl)
+        const orientation = image.width >= image.height ? "landscape" : "portrait"
+        const format = dataUrl.startsWith("data:image/jpeg") ? "JPEG" : "PNG"
+
+        if (index > 0) {
+            pdf.addPage([image.width, image.height], orientation)
+        }
+        pdf.addImage(dataUrl, format, 0, 0, image.width, image.height, undefined, "FAST")
+    }
+
+    pdf.save(filename)
+}
+
+export interface SidecarZipEntry {
+    imageName: string
+    imageDataUrl: string
+    sidecarName: string
+    sidecar: unknown
+}
+
+export async function downloadImagesWithSidecarZip(
+    entries: SidecarZipEntry[],
+    zipFilename: string = "manga-lens-results-with-sidecar.zip"
+): Promise<void> {
+    if (!entries.length) return
+
+    const JSZip = (await import("jszip")).default
+    const { saveAs } = await import("file-saver")
+
+    const zip = new JSZip()
+    const root = zip.folder("results")
+    const imagesFolder = root?.folder("images")
+    const sidecarsFolder = root?.folder("sidecars")
+
+    for (const entry of entries) {
+        const imageBase64 = entry.imageDataUrl.split(",")[1]
+        imagesFolder?.file(entry.imageName, imageBase64, { base64: true })
+        sidecarsFolder?.file(entry.sidecarName, JSON.stringify(entry.sidecar, null, 2))
+    }
+
+    const manifest = {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        total: entries.length,
+        files: entries.map((entry) => ({
+            image: `images/${entry.imageName}`,
+            sidecar: `sidecars/${entry.sidecarName}`,
+        })),
+    }
+    root?.file("manifest.json", JSON.stringify(manifest, null, 2))
+
+    const content = await zip.generateAsync({ type: "blob" })
+    saveAs(content, zipFilename)
+}
+
 export interface HtmlExportEntry {
     name: string
     resultDataUrl: string

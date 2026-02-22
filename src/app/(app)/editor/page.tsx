@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { useCallback } from "react"
 import { EditorCanvas } from "@/components/editor/canvas"
 import { EditorSidebar } from "@/components/editor/sidebar"
 import { EditorToolbar } from "@/components/editor/toolbar"
@@ -12,9 +13,11 @@ import { ErrorBoundary } from "@/components/shared/error-boundary"
 import { DragDropZone } from "@/components/shared/drag-drop-zone"
 import { UserButton } from "@clerk/nextjs"
 import { useEditorStore } from "@/lib/stores/editor-store"
+import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import { useKeyboardShortcuts } from "@/lib/hooks/use-keyboard-shortcuts"
 import { IconButton } from "@/components/ui/icon-button"
 import { Button } from "@/components/ui/button"
+import { toast } from "sonner"
 import {
     Sheet,
     SheetClose,
@@ -41,15 +44,47 @@ export default function EditorPage() {
     useKeyboardShortcuts()
 
     // 处理拖拽上传
-    const handleFilesDropped = (files: File[]) => {
-        addImages(files)
-    }
+    const handleFilesDropped = useCallback(async (files: File[]) => {
+        const normalizeResult = await normalizeEditorImageFiles(files)
+        if (normalizeResult.files.length > 0) {
+            addImages(normalizeResult.files)
+        }
+
+        if (normalizeResult.convertedCount > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已将 ${normalizeResult.convertedCount} 个 TIFF/PSD 文件转换为 PNG`
+                    : `Converted ${normalizeResult.convertedCount} TIFF/PSD files to PNG`
+            )
+        }
+
+        if (normalizeResult.pdfExpandedPages > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已拆分 ${normalizeResult.pdfSourceFiles} 个 PDF，共 ${normalizeResult.pdfExpandedPages} 页`
+                    : `Expanded ${normalizeResult.pdfSourceFiles} PDF file(s) into ${normalizeResult.pdfExpandedPages} pages`
+            )
+        }
+
+        if (normalizeResult.failed.length > 0) {
+            const preview = normalizeResult.failed
+                .slice(0, 2)
+                .map((item) => `${item.fileName} (${item.reason})`)
+                .join("; ")
+            toast.warning(
+                locale === "zh"
+                    ? `有 ${normalizeResult.failed.length} 个文件未导入：${preview}`
+                    : `${normalizeResult.failed.length} files were not imported: ${preview}`
+            )
+        }
+    }, [addImages, locale])
 
     return (
         <ErrorBoundary>
             <GlobalPasteHandler>
                 <DragDropZone
                     onFilesDropped={handleFilesDropped}
+                    accept={EDITOR_IMAGE_ACCEPT}
                     className="h-screen"
                 >
                     <div className="h-full flex flex-col bg-background overflow-hidden">

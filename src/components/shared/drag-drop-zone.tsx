@@ -2,6 +2,7 @@
 
 import { useState, useCallback, ReactNode } from "react"
 import { cn } from "@/lib/utils"
+import { isEditorSupportedUploadFile } from "@/lib/utils/image-import"
 import { Upload } from "lucide-react"
 
 interface DragDropZoneProps {
@@ -64,15 +65,36 @@ export function DragDropZone({
             if (disabled) return
 
             const files = Array.from(e.dataTransfer.files)
-            const acceptedTypes = accept.split(",").map((t) => t.trim())
+            const acceptedTypes = accept
+                .split(",")
+                .map((t) => t.trim().toLowerCase())
+                .filter(Boolean)
+            const acceptedExtensions = new Set(
+                acceptedTypes
+                    .filter((type) => type.startsWith("."))
+                    .map((type) => type.slice(1))
+            )
+            const acceptedMimeTypes = new Set(
+                acceptedTypes.filter((type) => type.includes("/") && type !== "image/*")
+            )
+            const acceptsImageWildcard = acceptedTypes.includes("image/*")
 
             const filteredFiles = files.filter((file) => {
-                return acceptedTypes.some((type) => {
-                    if (type === "image/*") {
-                        return file.type.startsWith("image/")
-                    }
-                    return file.type === type
-                })
+                const fileType = file.type.toLowerCase()
+                const ext = file.name.includes(".")
+                    ? file.name.split(".").pop()?.toLowerCase() || ""
+                    : ""
+
+                if (acceptsImageWildcard && isEditorSupportedUploadFile(file)) {
+                    return true
+                }
+                if (acceptedExtensions.has(ext)) {
+                    return true
+                }
+                if (acceptedMimeTypes.has(fileType)) {
+                    return true
+                }
+                return false
             })
 
             if (filteredFiles.length > 0) {

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useState } from "react"
 import { useEditorStore, useCurrentImage } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -11,6 +11,8 @@ import {
     Package,
     Loader2,
     FileCode2,
+    FileJson2,
+    FileText,
     Layers2,
     Brush,
 } from "lucide-react"
@@ -36,6 +38,8 @@ import {
     downloadImage,
     downloadImagesAsZip,
     downloadImagesAsHtml,
+    downloadImagesAsPdf,
+    downloadImagesWithSidecarZip,
     createMaskedImage,
     createInverseMaskedImage,
     compositeSelectionsFromFullImage,
@@ -99,6 +103,7 @@ export function EditorToolbar() {
         : "patch"
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
     const FOUR_K_LONG_EDGE = 3840
+    const isPatchEditorEnabled = (settings.enableComicModule ?? true) && (settings.enablePatchEditor ?? true)
 
     const parseApiError = async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
@@ -107,6 +112,24 @@ export function EditorToolbar() {
 
     const resolveRetryLimit = (extra: number = 0) =>
         Math.max(0, Math.min(8, (settings.maxRetries ?? 2) + extra))
+
+    const applyDefaultOrientationToBlocks = useCallback((blocks: DetectedTextBlock[]) => {
+        const defaultOrientation: "vertical" | "horizontal" =
+            (settings.defaultVerticalText ?? true) ? "vertical" : "horizontal"
+        return blocks.map((block) => {
+            const orientation = block.style?.orientation
+            if (orientation === "vertical" || orientation === "horizontal" || orientation === "auto") {
+                return block
+            }
+            return {
+                ...block,
+                style: {
+                    ...(block.style || {}),
+                    orientation: defaultOrientation,
+                },
+            }
+        })
+    }, [settings.defaultVerticalText])
 
     const getTargetLanguageForDetection = () => {
         const direction = settings.translationDirection ?? "ja2zh"
@@ -365,6 +388,55 @@ export function EditorToolbar() {
         "4) 保持原有方向（竖排就竖排）、字重和描边风格。",
     ].join("\n")
 
+    const buildEnglishOverflowFallbackPrompt = (basePrompt: string, useWhiteOutline: boolean) => [
+        basePrompt,
+        "",
+        "English typesetting fallback rules:",
+        "1) Re-layout text to fully fit inside the speech bubble with at least 8% inner padding.",
+        "2) Never crop letters. If needed, reduce font size and add line breaks.",
+        "3) Keep natural comic reading order and center alignment.",
+        useWhiteOutline
+            ? "4) Use black text with visible white stroke/outline to keep readability on complex background."
+            : "4) Keep stroke/outline style readable and consistent.",
+    ].join("\n")
+
+    const clampSelectionToImageBounds = (selection: Selection, image: HTMLImageElement): Selection => {
+        const x = Math.max(0, Math.min(image.width - 1, Math.round(selection.x)))
+        const y = Math.max(0, Math.min(image.height - 1, Math.round(selection.y)))
+        const maxW = Math.max(1, image.width - x)
+        const maxH = Math.max(1, image.height - y)
+        const width = Math.max(4, Math.min(maxW, Math.round(selection.width)))
+        const height = Math.max(4, Math.min(maxH, Math.round(selection.height)))
+        return {
+            ...selection,
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    const expandSelectionForEnglishLayout = (
+        selection: Selection,
+        image: HTMLImageElement,
+        intensity: number = 1
+    ): Selection => {
+        const isLikelyVertical = selection.height > selection.width * 1.2
+        const horizontalPaddingRatio = isLikelyVertical ? 0.26 : 0.2
+        const verticalPaddingRatio = isLikelyVertical ? 0.14 : 0.18
+
+        const padX = Math.round(selection.width * horizontalPaddingRatio * intensity)
+        const padY = Math.round(selection.height * verticalPaddingRatio * intensity)
+
+        return clampSelectionToImageBounds({
+            ...selection,
+            x: selection.x - padX,
+            y: selection.y - padY,
+            width: selection.width + padX * 2,
+            height: selection.height + padY * 2,
+        }, image)
+    }
+
     const computeImageDifferenceRatio = async (beforeDataUrl: string, afterDataUrl: string): Promise<number> => {
         try {
             const before = await loadImage(beforeDataUrl)
@@ -401,6 +473,47 @@ export function EditorToolbar() {
             return changed / total
         } catch {
             return 1
+        }
+    }
+
+    const computeEdgeInkRatio = async (imageDataUrl: string): Promise<number> => {
+        try {
+            const image = await loadImage(imageDataUrl)
+            const sampleSize = 320
+            const canvas = document.createElement("canvas")
+            const ctx = canvas.getContext("2d")
+            if (!ctx) return 0
+
+            canvas.width = sampleSize
+            canvas.height = sampleSize
+            ctx.drawImage(image, 0, 0, sampleSize, sampleSize)
+            const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data
+
+            const borderThickness = Math.max(8, Math.floor(sampleSize * 0.12))
+            let edgeDark = 0
+            let edgeTotal = 0
+            for (let y = 0; y < sampleSize; y++) {
+                for (let x = 0; x < sampleSize; x++) {
+                    const isEdge =
+                        x < borderThickness ||
+                        y < borderThickness ||
+                        x >= sampleSize - borderThickness ||
+                        y >= sampleSize - borderThickness
+                    if (!isEdge) continue
+
+                    const index = (y * sampleSize + x) * 4
+                    const alpha = data[index + 3]
+                    if (alpha < 16) continue
+                    const luminance = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114
+                    if (luminance < 140) {
+                        edgeDark += 1
+                    }
+                    edgeTotal += 1
+                }
+            }
+            return edgeTotal ? edgeDark / edgeTotal : 0
+        } catch {
+            return 0
         }
     }
 
@@ -514,7 +627,7 @@ export function EditorToolbar() {
         }
 
         if (enablePretranslate) {
-            setDetectedTextBlocks(imageId, scopedBlocks)
+            setDetectedTextBlocks(imageId, applyDefaultOrientationToBlocks(scopedBlocks))
         }
 
         if (updateToolbarProgress) {
@@ -565,7 +678,17 @@ export function EditorToolbar() {
             clearSelectionProgress(imageId)
         }
 
-        const indexedSelections = selections.map((selection, index) => ({
+        const englishTarget = directionMeta.targetLangCode === "en"
+        const selectionDarkRatioMap = new Map<string, number>(
+            selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
+        )
+        const layoutSelections = selections.map((selection) =>
+            englishTarget
+                ? expandSelectionForEnglishLayout(selection, originalImg)
+                : selection
+        )
+
+        const indexedSelections = layoutSelections.map((selection, index) => ({
             selection,
             index: index + 1,
         }))
@@ -592,6 +715,8 @@ export function EditorToolbar() {
         const buildSelectionPrompt = (selection: Selection, isHard: boolean) => {
             const isLikelyVertical = selection.height > selection.width * 1.25
             const isLikelyHorizontal = selection.width > selection.height * 1.25
+            const darkRatio = selectionDarkRatioMap.get(selection.id) ?? 0
+            const useWhiteOutline = darkRatio >= 0.18
             const layoutHint = isLikelyVertical
                 ? "该选区大概率是竖排文本，请保持竖排（从上到下、从右到左列）。"
                 : isLikelyHorizontal
@@ -604,12 +729,22 @@ export function EditorToolbar() {
                     "若文本无法完全识别，给出最贴近语境的保守译法，不能留空。",
                 ]
                 : []
+            const englishLayoutHints = englishTarget
+                ? [
+                    "目标语言为英文：请按气泡空间重排断行，避免文字溢出或贴边。",
+                    "若英文句子偏长，请优先换行与缩小字号，确保整段完整显示。",
+                    useWhiteOutline
+                        ? "背景较复杂：请使用黑字 + 白描边（或白色轮廓）增强可读性。"
+                        : "保持原有描边风格并保证英文可读性。",
+                ]
+                : []
 
             return [
                 effectivePrompt,
                 "",
                 "【当前选区约束】",
                 layoutHint,
+                ...englishLayoutHints,
                 ...hardHints,
             ].join("\n")
         }
@@ -843,7 +978,9 @@ export function EditorToolbar() {
                         }
                     }
                 }
-                const finalImageData = result.imageData
+                let finalImageData = result.imageData
+                let finalSelection = selection
+                let inputPatchForFinalCheck = sourcePatch
                 if (!finalImageData) {
                     const errorMessage = locale === "zh" ? "生成结果为空" : "Generated image is empty"
                     if (trackSelectionProgress) {
@@ -876,7 +1013,43 @@ export function EditorToolbar() {
                     // ignore resolution inspect failures
                 }
 
-                if (sourcePatch && isExactlySameImageData(sourcePatch, finalImageData)) {
+                if (englishTarget && sourcePatch) {
+                    const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
+                    const likelyOverflow = edgeInkRatio > 0.42
+                    if (likelyOverflow) {
+                        if (updateToolbarProgress) {
+                            setProgressDetail(
+                                locale === "zh"
+                                    ? `选区 #${index} 英文排版疑似溢出，正在自动回退重试...`
+                                    : `Selection #${index} may overflow in English layout, retrying...`
+                            )
+                        }
+
+                        const useWhiteOutline = (selectionDarkRatioMap.get(selection.id) ?? 0) >= 0.18
+                        const overflowSelection = expandSelectionForEnglishLayout(selection, originalImg, 1.28)
+                        const overflowPrompt = buildEnglishOverflowFallbackPrompt(selectionPrompt, useWhiteOutline)
+                        const overflowPatch = cropSelection(
+                            originalImg,
+                            overflowSelection,
+                            PATCH_CONTEXT_PADDING + 8
+                        )
+                        const retryOverflow = await runGenerateRequestWithRetry(
+                            overflowPatch,
+                            overflowPrompt,
+                            1
+                        )
+                        if (retryOverflow.success && retryOverflow.imageData) {
+                            const retryEdgeRatio = await computeEdgeInkRatio(retryOverflow.imageData)
+                            if (retryEdgeRatio + 0.03 < edgeInkRatio) {
+                                finalImageData = retryOverflow.imageData
+                                finalSelection = overflowSelection
+                                inputPatchForFinalCheck = overflowPatch
+                            }
+                        }
+                    }
+                }
+
+                if (inputPatchForFinalCheck && isExactlySameImageData(inputPatchForFinalCheck, finalImageData)) {
                     const unchangedError = locale === "zh"
                         ? "模型返回原图（该选区未被修改）"
                         : "Model returned original patch (selection unchanged)"
@@ -893,7 +1066,7 @@ export function EditorToolbar() {
                 if (trackSelectionProgress) {
                     setSelectionProgress(imageId, selection.id, "completed")
                 }
-                patches.push({ base64: finalImageData, selection })
+                patches.push({ base64: finalImageData, selection: finalSelection })
                 continue
             }
 
@@ -1065,6 +1238,17 @@ export function EditorToolbar() {
         showPretranslateFailureToast: boolean
     ) => {
         const originalImg = await loadImage(imageUrl)
+        const englishTarget = directionMeta.targetLangCode === "en"
+        const promptWithEnglishAssist = englishTarget
+            ? [
+                basePrompt,
+                "",
+                "English rendering quality rules:",
+                "1) Keep text fully inside bubble bounds with balanced line breaks.",
+                "2) Avoid overflow and tiny fonts. Prioritize readability for scanlation style.",
+                "3) On non-white background, use black text with visible white outline/stroke.",
+            ].join("\n")
+            : basePrompt
         const fullSelection: Selection = {
             id: `${imageId}-full`,
             x: 0,
@@ -1080,7 +1264,7 @@ export function EditorToolbar() {
             imageId,
             originalImg,
             hasUserSelections ? sourceSelections : [],
-            basePrompt,
+            promptWithEnglishAssist,
             updateToolbarProgress,
             showPretranslateFailureToast,
             existingDetectedBlocks
@@ -1389,6 +1573,12 @@ export function EditorToolbar() {
         return `${baseName}.${ext}`
     }
 
+    const stripFileExtension = (filename: string) => {
+        const dotIndex = filename.lastIndexOf(".")
+        if (dotIndex <= 0) return filename
+        return filename.slice(0, dotIndex)
+    }
+
     const toExportDataUrl = async (dataUrl: string) => {
         if (settings.exportFormat === "png") return dataUrl
         return convertToFormat(dataUrl, settings.exportFormat, settings.exportQuality)
@@ -1458,7 +1648,7 @@ export function EditorToolbar() {
             } else {
                 clearSelectionProgress(currentImage.id)
             }
-            setDetectedTextBlocks(currentImage.id, detectedBlocks)
+            setDetectedTextBlocks(currentImage.id, applyDefaultOrientationToBlocks(detectedBlocks))
 
             if (settings.useServerApi) {
                 const COST_PER_GENERATION = 10
@@ -1527,6 +1717,10 @@ export function EditorToolbar() {
     const handleRepairBrushGenerate = async () => {
         if (!currentImage) {
             toast.error(t.errors.noImage)
+            return
+        }
+        if (!isPatchEditorEnabled) {
+            toast.warning(locale === "zh" ? "请先在侧栏启用修补编辑器" : "Enable repair editor in sidebar first")
             return
         }
         if (!currentImage.repairMaskUrl) {
@@ -1617,6 +1811,97 @@ export function EditorToolbar() {
         }
     }
 
+    const handleDownloadPdf = async () => {
+        const completedImages = images.filter((img) => img.resultUrl)
+        if (completedImages.length === 0) {
+            toast.warning(locale === "zh" ? "没有可导出的结果" : "No results to export")
+            return
+        }
+
+        try {
+            const filesToExport = await Promise.all(
+                completedImages.map(async (img, index) => ({
+                    name: img.file?.name || `result-${index + 1}`,
+                    dataUrl: await toExportDataUrl(img.resultUrl!),
+                }))
+            )
+
+            await downloadImagesAsPdf(
+                filesToExport,
+                `manga-lens-results-${Date.now()}.pdf`
+            )
+            void logUsage("export", { type: "pdf", count: completedImages.length, format: settings.exportFormat })
+            toast.success(
+                locale === "zh"
+                    ? `已导出 PDF（${completedImages.length} 页）`
+                    : `PDF exported (${completedImages.length} pages)`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `PDF 导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `PDF export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }
+
+    const handleDownloadWithSidecar = async () => {
+        const completedImages = images.filter((img) => img.resultUrl)
+        if (completedImages.length === 0) {
+            toast.warning(locale === "zh" ? "没有可导出的结果" : "No results to export")
+            return
+        }
+
+        try {
+            const entries = await Promise.all(
+                completedImages.map(async (img, index) => {
+                    const imageBaseName = stripFileExtension(img.file?.name || `result-${index + 1}`)
+                    const imageName = buildExportFilename(imageBaseName)
+                    const sidecarName = `${imageBaseName}.sidecar.json`
+                    return {
+                        imageName,
+                        imageDataUrl: await toExportDataUrl(img.resultUrl!),
+                        sidecarName,
+                        sidecar: {
+                            schemaVersion: 1,
+                            exportedAt: new Date().toISOString(),
+                            sourceFileName: img.file?.name || `result-${index + 1}`,
+                            exportImageName: imageName,
+                            prompt: prompt || "",
+                            settings: {
+                                translationDirection: settings.translationDirection,
+                                comicType: settings.comicType,
+                                textStylePreset: settings.textStylePreset,
+                                imageSize: settings.imageSize,
+                                provider: settings.provider,
+                                model: settings.model,
+                            },
+                            selections: img.selections || [],
+                            detectedTextBlocks: img.detectedTextBlocks || [],
+                        },
+                    }
+                })
+            )
+
+            await downloadImagesWithSidecarZip(
+                entries,
+                `manga-lens-ps-sidecar-${Date.now()}.zip`
+            )
+            void logUsage("export", { type: "zip_sidecar", count: completedImages.length, format: settings.exportFormat })
+            toast.success(
+                locale === "zh"
+                    ? `已导出图片+文本层 Sidecar（${completedImages.length} 项）`
+                    : `Exported images + sidecar text layers (${completedImages.length} items)`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `Sidecar 导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `Sidecar export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }
+
     const handleDownloadHtml = async () => {
         const completedImages = images.filter((img) => img.resultUrl)
         if (completedImages.length === 0) {
@@ -1653,7 +1938,7 @@ export function EditorToolbar() {
     const handleMergeLayers = () => {
         if (!currentImage?.resultUrl) return
         mergeResultIntoOriginal(currentImage.id)
-        toast.success(locale === "zh" ? "已合并图层，可继续编辑" : "Layers merged, continue editing")
+        toast.success(locale === "zh" ? "已应用为原图，可继续迭代编辑" : "Applied as original. You can keep editing.")
         void logUsage("export", { type: "merge_layers" })
     }
 
@@ -1719,18 +2004,20 @@ export function EditorToolbar() {
                     {locale === "zh" ? "一键机翻" : "One-click MT"}
                 </Button>
 
-                <Button
-                    variant="secondary"
-                    onClick={handleRepairBrushGenerate}
-                    disabled={isProcessing || !currentImage?.repairMaskUrl}
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <Brush className="h-4 w-4 mr-2" />
-                    )}
-                    {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
-                </Button>
+                {isPatchEditorEnabled && (
+                    <Button
+                        variant="secondary"
+                        onClick={handleRepairBrushGenerate}
+                        disabled={isProcessing || !currentImage?.repairMaskUrl}
+                    >
+                        {isProcessing ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                            <Brush className="h-4 w-4 mr-2" />
+                        )}
+                        {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
+                    </Button>
+                )}
 
                 <Button
                     variant="secondary"
@@ -1751,7 +2038,7 @@ export function EditorToolbar() {
                     disabled={!hasResult || isProcessing}
                 >
                     <Layers2 className="h-4 w-4 mr-2" />
-                    {locale === "zh" ? "合并图层" : "Merge"}
+                    {locale === "zh" ? "应用为原图" : "Apply as original"}
                 </Button>
 
                 <Button
@@ -1770,6 +2057,24 @@ export function EditorToolbar() {
                 >
                     <Package className="h-4 w-4 mr-2" />
                     {t.editor.toolbar.downloadAll}
+                </Button>
+
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadPdf}
+                    disabled={!hasCompletedImages}
+                >
+                    <FileText className="h-4 w-4 mr-2" />
+                    PDF
+                </Button>
+
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadWithSidecar}
+                    disabled={!hasCompletedImages}
+                >
+                    <FileJson2 className="h-4 w-4 mr-2" />
+                    {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
                 </Button>
 
                 <Button

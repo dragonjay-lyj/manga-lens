@@ -3,9 +3,13 @@
 import { useRef, useState, useEffect, useCallback, useMemo, MouseEvent, TouchEvent } from "react"
 import { useEditorStore, useCurrentImage } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
     Dialog,
     DialogContent,
+    DialogDescription,
+    DialogFooter,
     DialogHeader,
     DialogTitle,
     DialogTrigger,
@@ -25,16 +29,29 @@ import {
     Eye,
     EyeOff,
     Wand2,
+    Languages,
+    Pencil,
+    PaintBucket,
+    Loader2,
+    FileText,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import type { Selection } from "@/types/database"
 import type { AnnotationShape } from "@/lib/stores/editor-store"
-import { loadImage } from "@/lib/utils/image-utils"
+import { detectTextBlocks } from "@/lib/ai/ai-service"
+import { cropSelection, loadImage } from "@/lib/utils/image-utils"
+import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import { toast } from "sonner"
 
 interface Point {
     x: number
     y: number
+}
+
+interface SelectionOcrMeta {
+    sourceText: string
+    translatedText: string
+    blockIndex: number
 }
 
 // 选区调整手柄类型
@@ -70,6 +87,7 @@ export function EditorCanvas() {
         zoom,
         panX,
         panY,
+        settings,
         locale,
         setZoom,
         setPan,
@@ -79,6 +97,8 @@ export function EditorCanvas() {
         clearSelections,
         setRepairMask,
         clearRepairMask,
+        setShowResult,
+        setDetectedTextBlocks,
         setGuides,
         setAnnotationShapes,
     } = useEditorStore()
@@ -102,6 +122,17 @@ export function EditorCanvas() {
     const [originalOpacity, setOriginalOpacity] = useState(100)
     const [inpaintOpacity, setInpaintOpacity] = useState(100)
     const [showInpaintOverlay, setShowInpaintOverlay] = useState(false)
+    const [, setImageReadyTick] = useState(0)
+    const [selectionOcrLoadingId, setSelectionOcrLoadingId] = useState<string | null>(null)
+    const [selectionOcrTextMap, setSelectionOcrTextMap] = useState<Record<string, string>>({})
+    const [selectionOcrMetaMap, setSelectionOcrMetaMap] = useState<Record<string, SelectionOcrMeta>>({})
+    const [ocrDialogOpen, setOcrDialogOpen] = useState(false)
+    const [ocrDialogSelectionId, setOcrDialogSelectionId] = useState<string | null>(null)
+    const [ocrDialogSourceText, setOcrDialogSourceText] = useState("")
+    const [ocrDialogTranslatedText, setOcrDialogTranslatedText] = useState("")
+    const isComicModuleEnabled = settings.enableComicModule ?? true
+    const isSelectionOcrEnabled = isComicModuleEnabled && (settings.enableSelectionOcr ?? true)
+    const isPatchEditorEnabled = isComicModuleEnabled && (settings.enablePatchEditor ?? true)
 
     // 选区调整状态
     const [isResizing, setIsResizing] = useState(false)
@@ -121,6 +152,23 @@ export function EditorCanvas() {
     const [originalShapeForResize, setOriginalShapeForResize] = useState<AnnotationShape | null>(null)
     const [draggingGuideId, setDraggingGuideId] = useState<string | null>(null)
     const [draggingGuideOrientation, setDraggingGuideOrientation] = useState<"horizontal" | "vertical" | null>(null)
+
+    useEffect(() => {
+        setSelectionOcrTextMap({})
+        setSelectionOcrMetaMap({})
+        setSelectionOcrLoadingId(null)
+        setOcrDialogOpen(false)
+        setOcrDialogSelectionId(null)
+        setOcrDialogSourceText("")
+        setOcrDialogTranslatedText("")
+    }, [currentImage?.id])
+
+    useEffect(() => {
+        if (!isPatchEditorEnabled && toolMode !== "selection") {
+            setToolMode("selection")
+            setIsBrushErasePinned(false)
+        }
+    }, [isPatchEditorEnabled, toolMode])
 
     // 绘制选区
     function drawSelection(
@@ -528,6 +576,427 @@ export function EditorCanvas() {
         }
     }, [ensureMaskCanvas, locale, persistMaskToStore, updateSourceImageData, wandMaxAreaPercent, wandTolerance, wandToneMode])
 
+    const getTargetLanguageForDetection = useCallback(() => {
+        const direction = settings.translationDirection ?? "ja2zh"
+        if (direction === "ja2en") return "English"
+        if (direction === "en2ja") return "日本語"
+        return "简体中文"
+    }, [settings.translationDirection])
+
+    const findBestBlockIndexForSelection = useCallback((
+        selection: Selection,
+        imageWidth: number,
+        imageHeight: number,
+        blocks: Array<{ bbox: { x: number; y: number; width: number; height: number } }>
+    ) => {
+        if (!blocks.length) return -1
+
+        const sel = {
+            x: Math.max(0, Math.min(1, selection.x / imageWidth)),
+            y: Math.max(0, Math.min(1, selection.y / imageHeight)),
+            width: Math.max(0.0001, Math.min(1, selection.width / imageWidth)),
+            height: Math.max(0.0001, Math.min(1, selection.height / imageHeight)),
+        }
+
+        const intersection = (a: typeof sel, b: typeof sel) => {
+            const x1 = Math.max(a.x, b.x)
+            const y1 = Math.max(a.y, b.y)
+            const x2 = Math.min(a.x + a.width, b.x + b.width)
+            const y2 = Math.min(a.y + a.height, b.y + b.height)
+            const w = Math.max(0, x2 - x1)
+            const h = Math.max(0, y2 - y1)
+            return w * h
+        }
+
+        let bestIndex = -1
+        let bestIoU = 0
+        blocks.forEach((block, index) => {
+            const box = block.bbox
+            const inter = intersection(sel, box)
+            if (inter <= 0) return
+            const union = sel.width * sel.height + box.width * box.height - inter
+            const iou = union > 0 ? inter / union : 0
+            if (iou > bestIoU) {
+                bestIoU = iou
+                bestIndex = index
+            }
+        })
+
+        return bestIoU >= 0.2 ? bestIndex : -1
+    }, [])
+
+    const plainTextToRichHtml = useCallback((input: string) => {
+        return input
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\n/g, "<br/>")
+    }, [])
+
+    const closeSelectionOcrDialog = useCallback(() => {
+        setOcrDialogOpen(false)
+        setOcrDialogSelectionId(null)
+    }, [])
+
+    const openSelectionOcrDialog = useCallback((selection: Selection) => {
+        if (!currentImage) return
+        const image = imageRef.current
+        if (!image) {
+            toast.error(locale === "zh" ? "图片尚未加载完成" : "Image is still loading")
+            return
+        }
+
+        const detectedBlocks = currentImage.detectedTextBlocks || []
+        const meta = selectionOcrMetaMap[selection.id]
+        let blockIndex = meta?.blockIndex ?? -1
+        if (blockIndex < 0 || blockIndex >= detectedBlocks.length) {
+            blockIndex = findBestBlockIndexForSelection(
+                selection,
+                image.width,
+                image.height,
+                detectedBlocks
+            )
+        }
+        if (blockIndex < 0 || blockIndex >= detectedBlocks.length) {
+            toast.info(locale === "zh" ? "请先执行一次 OCR 识别" : "Run OCR first for this selection")
+            return
+        }
+
+        const targetBlock = detectedBlocks[blockIndex]
+        const sourceText = (meta?.sourceText || targetBlock.sourceText || "").trim()
+        const translatedText = (meta?.translatedText || targetBlock.translatedText || sourceText).trim()
+
+        setSelectionOcrMetaMap((prev) => ({
+            ...prev,
+            [selection.id]: {
+                sourceText,
+                translatedText,
+                blockIndex,
+            },
+        }))
+        setSelectionOcrTextMap((prev) => ({
+            ...prev,
+            [selection.id]: translatedText || sourceText,
+        }))
+        setOcrDialogSelectionId(selection.id)
+        setOcrDialogSourceText(sourceText)
+        setOcrDialogTranslatedText(translatedText)
+        setOcrDialogOpen(true)
+    }, [currentImage, findBestBlockIndexForSelection, locale, selectionOcrMetaMap])
+
+    const handleSaveSelectionOcrDialog = useCallback(() => {
+        if (!currentImage || !ocrDialogSelectionId) return
+
+        const image = imageRef.current
+        const detectedBlocks = [...(currentImage.detectedTextBlocks || [])]
+        const selection = (currentImage.selections || []).find((item) => item.id === ocrDialogSelectionId)
+        const sourceText = ocrDialogSourceText.trim()
+        const translatedText = ocrDialogTranslatedText.trim()
+        const finalSource = sourceText || translatedText
+        const finalTranslated = translatedText || sourceText
+
+        if (!finalSource && !finalTranslated) {
+            toast.error(locale === "zh" ? "请至少填写原文或译文" : "Please enter source text or translation")
+            return
+        }
+
+        let blockIndex = selectionOcrMetaMap[ocrDialogSelectionId]?.blockIndex ?? -1
+        if (blockIndex < 0 || blockIndex >= detectedBlocks.length) {
+            if (selection && image) {
+                blockIndex = findBestBlockIndexForSelection(selection, image.width, image.height, detectedBlocks)
+            } else {
+                blockIndex = -1
+            }
+        }
+
+        const existingBlock = blockIndex >= 0 ? detectedBlocks[blockIndex] : null
+        const fallbackBbox = selection && image
+            ? {
+                x: Math.max(0, Math.min(1, selection.x / image.width)),
+                y: Math.max(0, Math.min(1, selection.y / image.height)),
+                width: Math.max(0.0001, Math.min(1, selection.width / image.width)),
+                height: Math.max(0.0001, Math.min(1, selection.height / image.height)),
+            }
+            : existingBlock?.bbox || { x: 0, y: 0, width: 1, height: 1 }
+
+        const orientation = existingBlock?.style?.orientation
+        const normalizedOrientation =
+            orientation === "vertical" || orientation === "horizontal" || orientation === "auto"
+                ? orientation
+                : ((settings.defaultVerticalText ?? true) ? "vertical" : "horizontal")
+
+        const nextBlock = {
+            ...(existingBlock || {}),
+            sourceText: finalSource,
+            translatedText: finalTranslated,
+            richTextHtml: plainTextToRichHtml(finalTranslated),
+            bbox: fallbackBbox,
+            style: {
+                ...(existingBlock?.style || {}),
+                orientation: normalizedOrientation,
+            },
+        }
+
+        if (blockIndex >= 0 && blockIndex < detectedBlocks.length) {
+            detectedBlocks[blockIndex] = nextBlock
+        } else {
+            blockIndex = detectedBlocks.length
+            detectedBlocks.push(nextBlock)
+        }
+
+        setDetectedTextBlocks(currentImage.id, detectedBlocks)
+        setSelectionOcrMetaMap((prev) => ({
+            ...prev,
+            [ocrDialogSelectionId]: {
+                sourceText: finalSource,
+                translatedText: finalTranslated,
+                blockIndex,
+            },
+        }))
+        setSelectionOcrTextMap((prev) => ({
+            ...prev,
+            [ocrDialogSelectionId]: finalTranslated || finalSource,
+        }))
+
+        closeSelectionOcrDialog()
+        toast.success(locale === "zh" ? "OCR 文本已回填到文本块" : "OCR text updated in text block")
+    }, [
+        closeSelectionOcrDialog,
+        currentImage,
+        findBestBlockIndexForSelection,
+        locale,
+        ocrDialogSelectionId,
+        ocrDialogSourceText,
+        ocrDialogTranslatedText,
+        plainTextToRichHtml,
+        selectionOcrMetaMap,
+        setDetectedTextBlocks,
+        settings.defaultVerticalText,
+    ])
+
+    const focusSelectionForEditing = useCallback((selection: Selection) => {
+        const image = imageRef.current
+        const container = containerRef.current
+        if (!image || !container) return
+
+        const containerWidth = container.clientWidth
+        const containerHeight = container.clientHeight
+        if (!containerWidth || !containerHeight) return
+
+        const targetZoom = Math.max(
+            0.25,
+            Math.min(
+                5,
+                Math.min(
+                    containerWidth / Math.max(1, selection.width * 2),
+                    containerHeight / Math.max(1, selection.height * 2)
+                )
+            )
+        )
+        const selectionCenterX = selection.x + selection.width / 2
+        const selectionCenterY = selection.y + selection.height / 2
+        const scaledWidth = image.width * targetZoom
+        const scaledHeight = image.height * targetZoom
+        const nextPanX = scaledWidth / 2 - selectionCenterX * targetZoom
+        const nextPanY = scaledHeight / 2 - selectionCenterY * targetZoom
+
+        setZoom(targetZoom)
+        setPan(nextPanX, nextPanY)
+    }, [setPan, setZoom])
+
+    const fillSelectionAsMask = useCallback((selection: Selection) => {
+        const image = imageRef.current
+        if (!image || !currentImage) return
+
+        const maskCanvas = ensureMaskCanvas(image.width, image.height)
+        const maskCtx = maskCanvas.getContext("2d")
+        if (!maskCtx) return
+
+        maskCtx.save()
+        maskCtx.fillStyle = "rgba(255,255,255,1)"
+        maskCtx.fillRect(selection.x, selection.y, selection.width, selection.height)
+        maskCtx.restore()
+        persistMaskToStore()
+        setToolMode("brush")
+        setShowResult(false)
+        focusSelectionForEditing(selection)
+        toast.success(locale === "zh" ? "已填充整块，可直接修补生成" : "Selection filled as mask. Ready to repair.")
+    }, [currentImage, ensureMaskCanvas, focusSelectionForEditing, locale, persistMaskToStore, setShowResult])
+
+    const handleSelectionOcr = useCallback(async (selection: Selection) => {
+        if (!currentImage) return
+        const image = imageRef.current
+        if (!image) {
+            toast.error(locale === "zh" ? "图片尚未加载完成" : "Image is still loading")
+            return
+        }
+
+        const runServerDetect = async (imageData: string) => {
+            const res = await fetch("/api/ai/detect-text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    targetLanguage: getTargetLanguageForDetection(),
+                    imageWidth: Math.round(selection.width),
+                    imageHeight: Math.round(selection.height),
+                    preferComicDetector: true,
+                }),
+            })
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}))
+                throw new Error(data?.error || (locale === "zh" ? "OCR 识别失败" : "OCR request failed"))
+            }
+            const data = await res.json()
+            return Array.isArray(data?.blocks) ? data.blocks : []
+        }
+
+        setSelectionOcrLoadingId(selection.id)
+        try {
+            const patchData = cropSelection(image, selection, 10)
+            let blocks: Array<{ sourceText?: string; translatedText?: string }> = []
+
+            if (settings.useServerApi) {
+                blocks = await runServerDetect(patchData)
+            } else {
+                try {
+                    blocks = await runServerDetect(patchData)
+                } catch {
+                    // Fallback to user's own key if server detect is unavailable.
+                    const localResult = await detectTextBlocks({
+                        imageData: patchData,
+                        config: {
+                            provider: settings.provider,
+                            apiKey: settings.apiKey,
+                            baseUrl: settings.baseUrl,
+                            model: settings.model,
+                            imageSize: settings.imageSize || "2K",
+                        },
+                        targetLanguage: getTargetLanguageForDetection(),
+                    })
+                    if (!localResult.success) {
+                        throw new Error(localResult.error || (locale === "zh" ? "OCR 识别失败" : "OCR failed"))
+                    }
+                    blocks = localResult.blocks
+                }
+            }
+
+            const sourceText = blocks.map((block) => String(block.sourceText || "").trim()).filter(Boolean).join(" / ")
+            const translatedText = blocks.map((block) => String(block.translatedText || "").trim()).filter(Boolean).join(" / ")
+            const previewText = sourceText || translatedText
+            if (!previewText) {
+                throw new Error(locale === "zh" ? "未识别到可用文本" : "No text recognized")
+            }
+
+            const finalSourceText = sourceText || previewText
+            const finalTranslatedText = translatedText || sourceText || previewText
+
+            const existingBlocks = [...(currentImage.detectedTextBlocks || [])]
+            let targetBlockIndex = selectionOcrMetaMap[selection.id]?.blockIndex ?? -1
+            if (targetBlockIndex < 0 || targetBlockIndex >= existingBlocks.length) {
+                targetBlockIndex = findBestBlockIndexForSelection(
+                    selection,
+                    image.width,
+                    image.height,
+                    existingBlocks
+                )
+            }
+            const existingBlock = targetBlockIndex >= 0 ? existingBlocks[targetBlockIndex] : null
+            const orientation = existingBlock?.style?.orientation
+            const normalizedOrientation =
+                orientation === "vertical" || orientation === "horizontal" || orientation === "auto"
+                    ? orientation
+                    : ((settings.defaultVerticalText ?? true) ? "vertical" : "horizontal")
+
+            const normalizedBlock = {
+                ...(existingBlock || {}),
+                sourceText: finalSourceText,
+                translatedText: finalTranslatedText,
+                richTextHtml: plainTextToRichHtml(finalTranslatedText),
+                bbox: {
+                    x: Math.max(0, Math.min(1, selection.x / image.width)),
+                    y: Math.max(0, Math.min(1, selection.y / image.height)),
+                    width: Math.max(0.0001, Math.min(1, selection.width / image.width)),
+                    height: Math.max(0.0001, Math.min(1, selection.height / image.height)),
+                },
+                style: {
+                    ...(existingBlock?.style || {}),
+                    orientation: normalizedOrientation,
+                },
+            }
+
+            let nextBlocks = existingBlocks
+            if (targetBlockIndex >= 0 && targetBlockIndex < existingBlocks.length) {
+                nextBlocks = [...existingBlocks]
+                nextBlocks[targetBlockIndex] = normalizedBlock
+            } else {
+                targetBlockIndex = existingBlocks.length
+                nextBlocks = [...existingBlocks, normalizedBlock]
+            }
+
+            setDetectedTextBlocks(currentImage.id, nextBlocks)
+            setSelectionOcrTextMap((prev) => ({
+                ...prev,
+                [selection.id]: finalTranslatedText || finalSourceText,
+            }))
+            setSelectionOcrMetaMap((prev) => ({
+                ...prev,
+                [selection.id]: {
+                    sourceText: finalSourceText,
+                    translatedText: finalTranslatedText,
+                    blockIndex: targetBlockIndex,
+                },
+            }))
+            setOcrDialogSelectionId(selection.id)
+            setOcrDialogSourceText(finalSourceText)
+            setOcrDialogTranslatedText(finalTranslatedText)
+            setOcrDialogOpen(true)
+            toast.success(locale === "zh" ? "OCR 识别完成" : "OCR completed")
+        } catch (error) {
+            const message = error instanceof Error ? error.message : (locale === "zh" ? "OCR 识别失败" : "OCR failed")
+            toast.error(message)
+        } finally {
+            setSelectionOcrLoadingId((prev) => (prev === selection.id ? null : prev))
+        }
+    }, [
+        currentImage,
+        findBestBlockIndexForSelection,
+        getTargetLanguageForDetection,
+        locale,
+        plainTextToRichHtml,
+        selectionOcrMetaMap,
+        setDetectedTextBlocks,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.defaultVerticalText,
+        settings.imageSize,
+        settings.model,
+        settings.provider,
+        settings.useServerApi,
+    ])
+
+    const selectionActionOverlays = useMemo(() => {
+        if (!currentImage || showResult || !isComicModuleEnabled) return []
+        const container = containerRef.current
+        const baseImage = imageRef.current
+        if (!container || !baseImage) return []
+
+        const containerWidth = container.clientWidth
+        const containerHeight = container.clientHeight
+        if (!containerWidth || !containerHeight) return []
+
+        const scaledWidth = baseImage.width * zoom
+        const scaledHeight = baseImage.height * zoom
+        const imageOffsetX = (containerWidth - scaledWidth) / 2 + panX
+        const imageOffsetY = (containerHeight - scaledHeight) / 2 + panY
+
+        return (currentImage.selections || []).map((selection) => {
+            const left = Math.max(4, Math.min(containerWidth - 200, imageOffsetX + selection.x * zoom))
+            const top = Math.max(4, Math.min(containerHeight - 40, imageOffsetY + selection.y * zoom - 34))
+            return { selection, left, top }
+        })
+    }, [currentImage, isComicModuleEnabled, panX, panY, showResult, zoom])
+
     // 绘制 Canvas
     const drawCanvas = useCallback(() => {
         const canvas = canvasRef.current
@@ -657,6 +1126,7 @@ export function EditorCanvas() {
         img.onload = async () => {
             if (cancelled) return
             imageRef.current = img
+            setImageReadyTick((prev) => prev + 1)
             updateSourceImageData(img)
             const maskCanvas = ensureMaskCanvas(img.width, img.height)
             const maskCtx = maskCanvas.getContext("2d")
@@ -685,6 +1155,7 @@ export function EditorCanvas() {
             imageRef.current = null
             maskCanvasRef.current = null
             sourceImageDataRef.current = null
+            setImageReadyTick((prev) => prev + 1)
             drawCanvas()
         }
         img.src = originalUrl
@@ -699,6 +1170,7 @@ export function EditorCanvas() {
         const resultUrl = currentImage?.resultUrl
         if (!resultUrl) {
             resultImageRef.current = null
+            setImageReadyTick((prev) => prev + 1)
             drawCanvas()
             return
         }
@@ -708,11 +1180,13 @@ export function EditorCanvas() {
         resultImg.onload = () => {
             if (cancelled) return
             resultImageRef.current = resultImg
+            setImageReadyTick((prev) => prev + 1)
             drawCanvas()
         }
         resultImg.onerror = () => {
             if (cancelled) return
             resultImageRef.current = null
+            setImageReadyTick((prev) => prev + 1)
             drawCanvas()
         }
         resultImg.src = resultUrl
@@ -1635,13 +2109,41 @@ export function EditorCanvas() {
         }
     }, [currentImage, drawCanvas, ensureMaskCanvas, locale, persistMaskToStore, readFileAsDataUrl])
 
-    const handleFileUpload = useCallback((files: FileList | null) => {
+    const handleFileUpload = useCallback(async (files: FileList | null) => {
         if (!files) return
-        const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/"))
-        if (imageFiles.length > 0) {
-            addImages(imageFiles)
+        const normalizeResult = await normalizeEditorImageFiles(Array.from(files))
+        if (normalizeResult.files.length > 0) {
+            addImages(normalizeResult.files)
         }
-    }, [addImages])
+
+        if (normalizeResult.convertedCount > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已将 ${normalizeResult.convertedCount} 个 TIFF/PSD 文件转换为 PNG`
+                    : `Converted ${normalizeResult.convertedCount} TIFF/PSD files to PNG`
+            )
+        }
+
+        if (normalizeResult.pdfExpandedPages > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已拆分 ${normalizeResult.pdfSourceFiles} 个 PDF，共 ${normalizeResult.pdfExpandedPages} 页`
+                    : `Expanded ${normalizeResult.pdfSourceFiles} PDF file(s) into ${normalizeResult.pdfExpandedPages} pages`
+            )
+        }
+
+        if (normalizeResult.failed.length > 0) {
+            const preview = normalizeResult.failed
+                .slice(0, 2)
+                .map((item) => `${item.fileName} (${item.reason})`)
+                .join("; ")
+            toast.warning(
+                locale === "zh"
+                    ? `有 ${normalizeResult.failed.length} 个文件未导入：${preview}`
+                    : `${normalizeResult.failed.length} files were not imported: ${preview}`
+            )
+        }
+    }, [addImages, locale])
 
     // 适应屏幕
     const handleFitToScreen = () => {
@@ -1678,6 +2180,15 @@ export function EditorCanvas() {
         setMaskOverlayOpacity(75)
         setShowInpaintOverlay(false)
     }, [])
+
+    const ocrDialogSelectionLabel = useMemo(() => {
+        if (!currentImage || !ocrDialogSelectionId) return ""
+        const idx = (currentImage.selections || []).findIndex((selection) => selection.id === ocrDialogSelectionId)
+        if (idx >= 0) {
+            return `#${idx + 1}`
+        }
+        return ocrDialogSelectionId
+    }, [currentImage, ocrDialogSelectionId])
 
     const idleCursor =
         showResult || isSpacePressed
@@ -1751,27 +2262,31 @@ export function EditorCanvas() {
                 >
                     <Square className="h-4 w-4" />
                 </Button>
-                <Button
-                    variant={toolMode === "wand" ? "secondary" : "ghost"}
-                    size="icon"
-                    className="h-11 w-11"
-                    title={locale === "zh" ? "魔棒模式（连通区域）" : "Magic Wand mode (connected region)"}
-                    aria-label={locale === "zh" ? "魔棒模式（连通区域）" : "Magic Wand mode (connected region)"}
-                    onClick={() => setToolMode("wand")}
-                >
-                    <Wand2 className="h-4 w-4" />
-                </Button>
-                <Button
-                    variant={toolMode === "brush" ? "secondary" : "ghost"}
-                    size="icon"
-                    className="h-11 w-11"
-                    title={locale === "zh" ? "修复画笔模式（Beta）" : "Repair brush mode (beta)"}
-                    aria-label={locale === "zh" ? "修复画笔模式（Beta）" : "Repair brush mode (beta)"}
-                    onClick={() => setToolMode("brush")}
-                >
-                    <Brush className="h-4 w-4" />
-                </Button>
-                {toolMode === "wand" && (
+                {isPatchEditorEnabled && (
+                    <Button
+                        variant={toolMode === "wand" ? "secondary" : "ghost"}
+                        size="icon"
+                        className="h-11 w-11"
+                        title={locale === "zh" ? "魔棒模式（连通区域）" : "Magic Wand mode (connected region)"}
+                        aria-label={locale === "zh" ? "魔棒模式（连通区域）" : "Magic Wand mode (connected region)"}
+                        onClick={() => setToolMode("wand")}
+                    >
+                        <Wand2 className="h-4 w-4" />
+                    </Button>
+                )}
+                {isPatchEditorEnabled && (
+                    <Button
+                        variant={toolMode === "brush" ? "secondary" : "ghost"}
+                        size="icon"
+                        className="h-11 w-11"
+                        title={locale === "zh" ? "修复画笔模式（Beta）" : "Repair brush mode (beta)"}
+                        aria-label={locale === "zh" ? "修复画笔模式（Beta）" : "Repair brush mode (beta)"}
+                        onClick={() => setToolMode("brush")}
+                    >
+                        <Brush className="h-4 w-4" />
+                    </Button>
+                )}
+                {isPatchEditorEnabled && toolMode === "wand" && (
                     <div className="hidden lg:flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-2 py-1">
                         <div className="flex items-center gap-1 rounded bg-background/70 px-1 py-0.5">
                             <Button
@@ -1845,35 +2360,40 @@ export function EditorCanvas() {
                     title={locale === "zh" ? "橡皮擦模式开关" : "Toggle eraser mode"}
                     aria-label={locale === "zh" ? "橡皮擦模式开关" : "Toggle eraser mode"}
                     onClick={() => setIsBrushErasePinned((prev) => !prev)}
-                    disabled={toolMode !== "brush" && toolMode !== "wand"}
+                    disabled={!isPatchEditorEnabled || (toolMode !== "brush" && toolMode !== "wand")}
                 >
                     <Eraser className="h-4 w-4" />
                 </Button>
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-11 w-11"
-                    title={locale === "zh" ? "导入 mask 图层" : "Import mask layer"}
-                    aria-label={locale === "zh" ? "导入 mask 图层" : "Import mask layer"}
-                    onClick={() => maskInputRef.current?.click()}
-                    disabled={!currentImage}
-                >
-                    <Upload className="h-4 w-4" />
-                </Button>
-                <input
-                    ref={maskInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    aria-label={locale === "zh" ? "导入 mask 图层文件" : "Import mask layer file"}
-                    onChange={(e) => {
-                        const file = e.target.files?.[0]
-                        if (!file) return
-                        void handleImportMaskFile(file)
-                        e.currentTarget.value = ""
-                    }}
-                />
-                <div className="hidden lg:flex items-center gap-1 rounded-md border border-border/60 bg-muted/30 px-1.5 py-1">
+                {isPatchEditorEnabled && (
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-11 w-11"
+                        title={locale === "zh" ? "导入 mask 图层" : "Import mask layer"}
+                        aria-label={locale === "zh" ? "导入 mask 图层" : "Import mask layer"}
+                        onClick={() => maskInputRef.current?.click()}
+                        disabled={!currentImage}
+                    >
+                        <Upload className="h-4 w-4" />
+                    </Button>
+                )}
+                {isPatchEditorEnabled && (
+                    <input
+                        ref={maskInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        aria-label={locale === "zh" ? "导入 mask 图层文件" : "Import mask layer file"}
+                        onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            if (!file) return
+                            void handleImportMaskFile(file)
+                            e.currentTarget.value = ""
+                        }}
+                    />
+                )}
+                {isPatchEditorEnabled && (
+                    <div className="hidden lg:flex items-center gap-1 rounded-md border border-border/60 bg-muted/30 px-1.5 py-1">
                     <Button
                         type="button"
                         variant="ghost"
@@ -1912,8 +2432,10 @@ export function EditorCanvas() {
                     >
                         {showInpaintOverlay ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                     </Button>
-                </div>
-                <div className="hidden 2xl:flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground">
+                    </div>
+                )}
+                {isPatchEditorEnabled && (
+                    <div className="hidden 2xl:flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground">
                     <label className="inline-flex items-center gap-1">
                         <span>M</span>
                         <input
@@ -1950,10 +2472,13 @@ export function EditorCanvas() {
                             onChange={(e) => setInpaintOpacity(Number(e.target.value))}
                         />
                     </label>
-                </div>
+                    </div>
+                )}
                 <div className="flex-1" />
                 <span className="hidden lg:inline text-xs text-muted-foreground">
-                    {toolMode === "brush"
+                    {!isPatchEditorEnabled
+                        ? (locale === "zh" ? "修补编辑器已关闭，可在侧栏“漫画模块”中启用。" : "Repair editor is disabled. Enable it in Comic Module settings.")
+                        : toolMode === "brush"
                         ? (
                             locale === "zh"
                                 ? `修复画笔：${isBrushErasePinned ? "橡皮擦已锁定" : "Alt/右键擦除"}，Alt+滚轮调大小(${brushSize}px)`
@@ -1995,17 +2520,19 @@ export function EditorCanvas() {
                         </ul>
                     </DialogContent>
                 </Dialog>
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-11 w-11"
-                    onClick={handleClearRepairMask}
-                    title={locale === "zh" ? "清空修复画笔掩膜" : "Clear repair brush mask"}
-                    aria-label={locale === "zh" ? "清空修复画笔掩膜" : "Clear repair brush mask"}
-                    disabled={!currentImage?.repairMaskUrl}
-                >
-                    <Eraser className="h-4 w-4" />
-                </Button>
+                {isPatchEditorEnabled && (
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-11 w-11"
+                        onClick={handleClearRepairMask}
+                        title={locale === "zh" ? "清空修复画笔掩膜" : "Clear repair brush mask"}
+                        aria-label={locale === "zh" ? "清空修复画笔掩膜" : "Clear repair brush mask"}
+                        disabled={!currentImage?.repairMaskUrl}
+                    >
+                        <Eraser className="h-4 w-4" />
+                    </Button>
+                )}
                 <Button
                     variant="ghost"
                     size="icon"
@@ -2025,6 +2552,7 @@ export function EditorCanvas() {
                 className="flex-1 relative overflow-hidden bg-black/5 dark:bg-white/5 touch-none"
             >
                 {currentImage ? (
+                    <>
                     <canvas
                         ref={canvasRef}
                         aria-label={locale === "zh" ? "图片编辑画布" : "Image editing canvas"}
@@ -2139,6 +2667,90 @@ export function EditorCanvas() {
                             }
                         }}
                     />
+                    {!showResult && isComicModuleEnabled && selectionActionOverlays.length > 0 && (
+                        <div className="pointer-events-none absolute inset-0">
+                            {selectionActionOverlays.map(({ selection, left, top }, index) => (
+                                <div
+                                    key={`selection-actions-${selection.id}`}
+                                    className="pointer-events-auto absolute flex items-center gap-1 rounded-md border border-border/70 bg-background/90 px-1 py-1 shadow-sm backdrop-blur-sm"
+                                    style={{ left, top }}
+                                >
+                                    <span className="px-1 text-[10px] text-muted-foreground">#{index + 1}</span>
+                                    {isSelectionOcrEnabled && (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-8 w-8"
+                                            title={locale === "zh" ? "OCR 文本识别" : "OCR text recognition"}
+                                            aria-label={locale === "zh" ? "OCR 文本识别" : "OCR text recognition"}
+                                            onClick={() => void handleSelectionOcr(selection)}
+                                            disabled={selectionOcrLoadingId === selection.id}
+                                        >
+                                            {selectionOcrLoadingId === selection.id
+                                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                : <Languages className="h-3.5 w-3.5" />}
+                                        </Button>
+                                    )}
+                                    {isSelectionOcrEnabled && (
+                                        <Button
+                                            type="button"
+                                            variant={selectionOcrMetaMap[selection.id] ? "secondary" : "ghost"}
+                                            size="icon"
+                                            className="h-8 w-8"
+                                            title={locale === "zh" ? "编辑 OCR 原文/译文" : "Edit OCR source/translation"}
+                                            aria-label={locale === "zh" ? "编辑 OCR 原文/译文" : "Edit OCR source/translation"}
+                                            onClick={() => openSelectionOcrDialog(selection)}
+                                            disabled={selectionOcrLoadingId === selection.id}
+                                        >
+                                            <FileText className="h-3.5 w-3.5" />
+                                        </Button>
+                                    )}
+                                    {isPatchEditorEnabled && (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-8 w-8"
+                                            title={locale === "zh" ? "编辑此选区（修补模式）" : "Edit this selection (repair mode)"}
+                                            aria-label={locale === "zh" ? "编辑此选区（修补模式）" : "Edit this selection (repair mode)"}
+                                            onClick={() => {
+                                                setShowResult(false)
+                                                setToolMode("brush")
+                                                focusSelectionForEditing(selection)
+                                            }}
+                                        >
+                                            <Pencil className="h-3.5 w-3.5" />
+                                        </Button>
+                                    )}
+                                    {isPatchEditorEnabled && (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-8 w-8"
+                                            title={locale === "zh" ? "填充整块到修补遮罩" : "Fill whole selection to repair mask"}
+                                            aria-label={locale === "zh" ? "填充整块到修补遮罩" : "Fill whole selection to repair mask"}
+                                            onClick={() => fillSelectionAsMask(selection)}
+                                        >
+                                            <PaintBucket className="h-3.5 w-3.5" />
+                                        </Button>
+                                    )}
+                                    {selectionOcrTextMap[selection.id] && (
+                                        <button
+                                            type="button"
+                                            className="max-w-[180px] truncate px-1 text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+                                            title={selectionOcrTextMap[selection.id]}
+                                            onClick={() => openSelectionOcrDialog(selection)}
+                                        >
+                                            {selectionOcrTextMap[selection.id]}
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    </>
                 ) : (
                     <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                         <ImageIcon className="h-12 w-12 mb-4 opacity-50" />
@@ -2157,15 +2769,86 @@ export function EditorCanvas() {
                         <input
                             ref={fileInputRef}
                             type="file"
-                            accept="image/*"
+                            accept={EDITOR_IMAGE_ACCEPT}
                             multiple
                             aria-label={locale === "zh" ? "上传图片" : "Upload images"}
                             className="hidden"
-                            onChange={(e) => handleFileUpload(e.target.files)}
+                            onChange={(e) => {
+                                void handleFileUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
                         />
                     </div>
                 )}
             </div>
+
+            <Dialog
+                open={ocrDialogOpen}
+                onOpenChange={(open) => {
+                    if (open) {
+                        setOcrDialogOpen(true)
+                        return
+                    }
+                    closeSelectionOcrDialog()
+                }}
+            >
+                <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {locale === "zh"
+                                ? `编辑 OCR 结果 ${ocrDialogSelectionLabel ? `(${ocrDialogSelectionLabel})` : ""}`
+                                : `Edit OCR Result ${ocrDialogSelectionLabel ? `(${ocrDialogSelectionLabel})` : ""}`}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {locale === "zh"
+                                ? "可直接修改原文与译文，保存后会回填到对应文本块。"
+                                : "Edit source and translated text directly, then save back to the mapped text block."}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="selection-ocr-source">
+                                {locale === "zh" ? "原文" : "Source Text"}
+                            </Label>
+                            <Textarea
+                                id="selection-ocr-source"
+                                value={ocrDialogSourceText}
+                                onChange={(event) => setOcrDialogSourceText(event.target.value)}
+                                rows={4}
+                                placeholder={locale === "zh" ? "在这里编辑 OCR 原文" : "Edit OCR source text"}
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="selection-ocr-translated">
+                                {locale === "zh" ? "译文" : "Translated Text"}
+                            </Label>
+                            <Textarea
+                                id="selection-ocr-translated"
+                                value={ocrDialogTranslatedText}
+                                onChange={(event) => setOcrDialogTranslatedText(event.target.value)}
+                                rows={5}
+                                placeholder={locale === "zh" ? "在这里编辑译文，保存后用于文本回填" : "Edit translation for text block fallback"}
+                            />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={closeSelectionOcrDialog}
+                        >
+                            {locale === "zh" ? "取消" : "Cancel"}
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={handleSaveSelectionOcrDialog}
+                            disabled={!ocrDialogSourceText.trim() && !ocrDialogTranslatedText.trim()}
+                        >
+                            {locale === "zh" ? "保存并回填" : "Save and Apply"}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     )
 }

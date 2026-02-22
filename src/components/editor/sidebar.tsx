@@ -42,10 +42,13 @@ import {
     Coins,
     Languages,
     Loader2,
+    Trash2,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import { detectTextBlocks, GEMINI_MODELS, OPENAI_MODELS, type DetectTextResponse } from "@/lib/ai/ai-service"
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
+import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
+import type { Selection } from "@/types/database"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { RechargePanel } from "@/components/profile/recharge-panel"
@@ -54,6 +57,44 @@ import { RichTextEditor } from "@/components/editor/rich-text-editor"
 interface EditorSidebarProps {
     className?: string
 }
+
+interface SidecarZipRestoreRecord {
+    file: File
+    payload: Record<string, unknown>
+}
+
+interface SidecarPreviewDetail {
+    fileName: string
+    blockCount: number
+    selectionCount: number
+    hasPrompt: boolean
+    previewTexts: Array<{
+        sourceText: string
+        translatedText: string
+    }>
+}
+
+type SidecarImportPlan =
+    | {
+        kind: "json"
+        sourceFileName: string
+        payload: Record<string, unknown>
+        blockCount: number
+        selectionCount: number
+        hasPrompt: boolean
+        previewDetails: SidecarPreviewDetail[]
+    }
+    | {
+        kind: "zip"
+        sourceFileName: string
+        restoreRecords: SidecarZipRestoreRecord[]
+        skippedItems: string[]
+        imageCount: number
+        blockCount: number
+        selectionCount: number
+        promptCount: number
+        previewDetails: SidecarPreviewDetail[]
+    }
 
 function richHtmlToPlainText(html: string): string {
     if (!html) return ""
@@ -72,6 +113,7 @@ function richHtmlToPlainText(html: string): string {
 export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
+    const sidecarImportInputRef = useRef<HTMLInputElement>(null)
     const wordImportInputRef = useRef<HTMLInputElement>(null)
     const textLayerImportInputRef = useRef<HTMLInputElement>(null)
     const findInputRef = useRef<HTMLInputElement>(null)
@@ -85,6 +127,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const [selectedBlockIndexes, setSelectedBlockIndexes] = useState<number[]>([])
     const [bulkTextValue, setBulkTextValue] = useState("")
     const [copiedBlocks, setCopiedBlocks] = useState<Array<{ sourceText: string; translatedText: string; richTextHtml?: string; bbox: { x: number; y: number; width: number; height: number }; style?: Record<string, unknown> }>>([])
+    const [clearGalleryArmed, setClearGalleryArmed] = useState(false)
+    const [sidecarPreviewOpen, setSidecarPreviewOpen] = useState(false)
+    const [sidecarImportPlan, setSidecarImportPlan] = useState<SidecarImportPlan | null>(null)
+    const [isPreparingSidecarImport, setIsPreparingSidecarImport] = useState(false)
+    const [isApplyingSidecarImport, setIsApplyingSidecarImport] = useState(false)
 
     const {
         images,
@@ -97,6 +144,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         coinsLoading,
         addImages,
         removeImage,
+        clearImages,
         setCurrentImage,
         updateSettings,
         updateSelections,
@@ -123,6 +171,49 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         [images, fileNameCollator]
     )
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
+    const isComicModuleEnabled = settings.enableComicModule ?? true
+    const isBubbleDetectionEnabled = isComicModuleEnabled && (settings.enableBubbleDetection ?? true)
+    const isPatchEditorEnabled = isComicModuleEnabled && (settings.enablePatchEditor ?? true)
+    const defaultOrientation: "vertical" | "horizontal" =
+        (settings.defaultVerticalText ?? true) ? "vertical" : "horizontal"
+
+    const applyDefaultOrientationToBlocks = useCallback((
+        blocks: Array<{
+            sourceText: string
+            translatedText: string
+            richTextHtml?: string
+            bbox: { x: number; y: number; width: number; height: number }
+            sourceLanguage?: string
+            lines?: string[]
+            segments?: Array<{ x: number; y: number; width: number; height: number }>
+            style?: {
+                textColor?: string
+                outlineColor?: string
+                strokeColor?: string
+                strokeWidth?: number
+                textOpacity?: number
+                fontFamily?: string
+                angle?: number
+                orientation?: "vertical" | "horizontal" | "auto"
+                alignment?: "start" | "center" | "end" | "justify" | "auto"
+                fontWeight?: string
+            }
+        }>
+    ) => (
+        blocks.map((block) => {
+            const orientation = block.style?.orientation
+            if (orientation === "vertical" || orientation === "horizontal" || orientation === "auto") {
+                return block
+            }
+            return {
+                ...block,
+                style: {
+                    ...(block.style || {}),
+                    orientation: defaultOrientation,
+                },
+            }
+        })
+    ), [defaultOrientation])
 
     // 自动迁移已下线的 Gemini 模型
     useEffect(() => {
@@ -175,17 +266,42 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     }, [locale])
 
     // 处理文件上传
-    const handleFileUpload = useCallback((files: FileList | null) => {
+    const handleFileUpload = useCallback(async (files: FileList | null) => {
         if (!files) return
 
-        const imageFiles = Array.from(files).filter((file) =>
-            file.type.startsWith("image/")
-        )
-
-        if (imageFiles.length > 0) {
-            addImages(imageFiles)
+        const normalizeResult = await normalizeEditorImageFiles(Array.from(files))
+        if (normalizeResult.files.length > 0) {
+            addImages(normalizeResult.files)
         }
-    }, [addImages])
+
+        if (normalizeResult.convertedCount > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已将 ${normalizeResult.convertedCount} 个 TIFF/PSD 文件转换为 PNG`
+                    : `Converted ${normalizeResult.convertedCount} TIFF/PSD files to PNG`
+            )
+        }
+
+        if (normalizeResult.pdfExpandedPages > 0) {
+            toast.success(
+                locale === "zh"
+                    ? `已拆分 ${normalizeResult.pdfSourceFiles} 个 PDF，共 ${normalizeResult.pdfExpandedPages} 页`
+                    : `Expanded ${normalizeResult.pdfSourceFiles} PDF file(s) into ${normalizeResult.pdfExpandedPages} pages`
+            )
+        }
+
+        if (normalizeResult.failed.length > 0) {
+            const preview = normalizeResult.failed
+                .slice(0, 2)
+                .map((item) => `${item.fileName} (${item.reason})`)
+                .join("; ")
+            toast.warning(
+                locale === "zh"
+                    ? `有 ${normalizeResult.failed.length} 个文件未导入：${preview}`
+                    : `${normalizeResult.failed.length} files were not imported: ${preview}`
+            )
+        }
+    }, [addImages, locale])
 
     // 处理粘贴
     const handlePaste = useCallback(async () => {
@@ -228,6 +344,12 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setSelectedBlockIndexes([])
         setBulkTextValue("")
     }, [currentImage?.id])
+
+    useEffect(() => {
+        if (!clearGalleryArmed) return
+        const timer = window.setTimeout(() => setClearGalleryArmed(false), 1800)
+        return () => window.clearTimeout(timer)
+    }, [clearGalleryArmed])
     const getTargetLanguageForDetection = useCallback(() => {
         const direction = settings.translationDirection ?? "ja2zh"
         if (direction === "ja2en") return "English"
@@ -413,7 +535,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             }
 
             updateSelections(currentImage.id, detectedSelections)
-            setDetectedTextBlocks(currentImage.id, result.blocks)
+            setDetectedTextBlocks(currentImage.id, applyDefaultOrientationToBlocks(result.blocks))
             toast.success(
                 locale === "zh"
                     ? `已自动创建 ${detectedSelections.length} 个选区`
@@ -432,6 +554,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         locale,
         setDetectedTextBlocks,
         runAutoDetect,
+        applyDefaultOrientationToBlocks,
         updateSelections,
     ])
 
@@ -529,14 +652,502 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                         textOpacity: toNumber(styleRaw.textOpacity ?? styleRaw.opacity) ?? undefined,
                         fontFamily: typeof styleRaw.fontFamily === "string" ? styleRaw.fontFamily : undefined,
                         angle: toNumber(styleRaw.angle ?? styleRaw.rotation) ?? undefined,
-                        orientation: typeof styleRaw.orientation === "string" ? styleRaw.orientation as "vertical" | "horizontal" | "auto" : undefined,
+                        orientation: typeof styleRaw.orientation === "string"
+                            ? styleRaw.orientation as "vertical" | "horizontal" | "auto"
+                            : defaultOrientation,
                         alignment: typeof styleRaw.alignment === "string" ? styleRaw.alignment as "start" | "center" | "end" | "justify" | "auto" : undefined,
                         fontWeight: typeof styleRaw.fontWeight === "string" ? styleRaw.fontWeight : undefined,
                     }
-                    : undefined,
+                    : { orientation: defaultOrientation },
             }]
         })
+    }, [defaultOrientation, locale])
+
+    const blocksToSelections = useCallback((
+        blocks: Array<{ bbox: { x: number; y: number; width: number; height: number } }>,
+        imageWidth: number,
+        imageHeight: number,
+        idPrefix: string
+    ): Selection[] => {
+        return blocks
+            .map((block, index) => {
+                const x = Math.max(0, Math.round(block.bbox.x * imageWidth))
+                const y = Math.max(0, Math.round(block.bbox.y * imageHeight))
+                const width = Math.max(12, Math.round(block.bbox.width * imageWidth))
+                const height = Math.max(12, Math.round(block.bbox.height * imageHeight))
+                return {
+                    id: `${idPrefix}-${index}`,
+                    x: Math.min(x, Math.max(0, imageWidth - 1)),
+                    y: Math.min(y, Math.max(0, imageHeight - 1)),
+                    width: Math.min(width, Math.max(1, imageWidth - x)),
+                    height: Math.min(height, Math.max(1, imageHeight - y)),
+                }
+            })
+            .filter((selection) => selection.width > 4 && selection.height > 4)
+    }, [])
+
+    const normalizeSelectionsFromPayload = useCallback((
+        rawSelections: unknown[],
+        imageWidth: number,
+        imageHeight: number,
+        idPrefix: string
+    ): Selection[] => {
+        const toNumber = (value: unknown) => {
+            if (typeof value === "number" && Number.isFinite(value)) return value
+            if (typeof value === "string" && value.trim()) {
+                const parsedNumber = Number(value)
+                if (Number.isFinite(parsedNumber)) return parsedNumber
+            }
+            return null
+        }
+
+        return rawSelections.flatMap((item, index) => {
+            if (!item || typeof item !== "object") return []
+            const record = item as Record<string, unknown>
+            const rawX = toNumber(record.x ?? record.left)
+            const rawY = toNumber(record.y ?? record.top)
+            const rawW = toNumber(record.width ?? record.w)
+            const rawH = toNumber(record.height ?? record.h)
+            if (rawX === null || rawY === null || rawW === null || rawH === null) return []
+            if (rawW <= 0 || rawH <= 0) return []
+
+            const useNormalized =
+                rawX >= 0 && rawX <= 1 &&
+                rawY >= 0 && rawY <= 1 &&
+                rawW > 0 && rawW <= 1 &&
+                rawH > 0 && rawH <= 1
+
+            const absX = useNormalized ? Math.round(rawX * imageWidth) : Math.round(rawX)
+            const absY = useNormalized ? Math.round(rawY * imageHeight) : Math.round(rawY)
+            const absW = useNormalized ? Math.round(rawW * imageWidth) : Math.round(rawW)
+            const absH = useNormalized ? Math.round(rawH * imageHeight) : Math.round(rawH)
+
+            const x = Math.max(0, Math.min(imageWidth - 1, absX))
+            const y = Math.max(0, Math.min(imageHeight - 1, absY))
+            const width = Math.max(4, Math.min(imageWidth - x, absW))
+            const height = Math.max(4, Math.min(imageHeight - y, absH))
+
+            if (width <= 0 || height <= 0) return []
+            return [{
+                id: `${idPrefix}-${index}`,
+                x,
+                y,
+                width,
+                height,
+            }]
+        })
+    }, [])
+
+    const parseBlocksFromSidecarPayload = useCallback((payload: unknown) => {
+        if (!payload || typeof payload !== "object") return []
+        const obj = payload as Record<string, unknown>
+        const rawBlocks = Array.isArray(obj.detectedTextBlocks)
+            ? obj.detectedTextBlocks
+            : (Array.isArray(obj.blocks) ? obj.blocks : [])
+        if (!rawBlocks.length) return []
+        return applyDefaultOrientationToBlocks(
+            parseManualJsonBlocks(JSON.stringify({ blocks: rawBlocks }))
+        )
+    }, [applyDefaultOrientationToBlocks, parseManualJsonBlocks])
+
+    const buildSidecarPreviewTexts = useCallback((
+        blocks: Array<{
+            sourceText: string
+            translatedText: string
+            richTextHtml?: string
+        }>
+    ) => {
+        return blocks
+            .flatMap((block) => {
+                const sourceText = block.sourceText.trim()
+                const translatedFromRich = block.richTextHtml
+                    ? richHtmlToPlainText(block.richTextHtml)
+                    : ""
+                const translatedText = (block.translatedText || translatedFromRich).trim()
+                if (!sourceText && !translatedText) return []
+                return [{ sourceText, translatedText }]
+            })
+            .slice(0, 3)
+    }, [])
+
+    const parseSidecarJsonFile = useCallback(async (file: File) => {
+        const payload = JSON.parse(await file.text()) as Record<string, unknown>
+        const blocks = parseBlocksFromSidecarPayload(payload)
+        const selectionCount = Array.isArray(payload.selections) ? payload.selections.length : 0
+        if (!blocks.length && selectionCount === 0) {
+            throw new Error(locale === "zh" ? "Sidecar JSON 中没有可恢复的数据" : "No restorable content found in Sidecar JSON")
+        }
+
+        return {
+            kind: "json" as const,
+            sourceFileName: file.name,
+            payload,
+            blockCount: blocks.length,
+            selectionCount,
+            hasPrompt: typeof payload.prompt === "string" && payload.prompt.trim().length > 0,
+        }
+    }, [locale, parseBlocksFromSidecarPayload])
+
+    const buildSidecarZipRestoreRecords = useCallback(async (file: File) => {
+        const JSZip = (await import("jszip")).default
+        const zip = await JSZip.loadAsync(file)
+        const zipEntries = Object.values(zip.files).filter((entry) => !entry.dir)
+
+        const normalizePath = (input: string) =>
+            input.replace(/^\/+/, "").replace(/\\/g, "/").toLowerCase()
+        const extractFileName = (input: string) => {
+            const normalized = input.replace(/\\/g, "/")
+            const parts = normalized.split("/")
+            return parts[parts.length - 1]
+        }
+        const findZipEntry = (pathOrName?: string | null): (typeof zipEntries[number] | null) => {
+            if (!pathOrName) return null
+            const normalized = normalizePath(pathOrName)
+            const exact = zipEntries.find((entry) => normalizePath(entry.name) === normalized)
+            if (exact) return exact
+            return zipEntries.find((entry) => normalizePath(entry.name).endsWith(`/${normalized}`)) ?? null
+        }
+
+        type ManifestRecord = { image?: string; sidecar?: string }
+        const manifestEntry = zip.file(/(^|\/)manifest\.json$/i)?.[0]
+        let manifestRecords: ManifestRecord[] = []
+        if (manifestEntry) {
+            try {
+                const manifest = JSON.parse(await manifestEntry.async("string")) as { files?: ManifestRecord[] }
+                if (Array.isArray(manifest.files)) {
+                    manifestRecords = manifest.files
+                }
+            } catch {
+                // ignore invalid manifest and fallback to scanning sidecars
+            }
+        }
+
+        const sidecarCandidates: Array<{ sidecarPath: string; imagePath?: string }> = []
+        if (manifestRecords.length) {
+            for (const record of manifestRecords) {
+                if (typeof record.sidecar === "string" && record.sidecar.trim()) {
+                    sidecarCandidates.push({
+                        sidecarPath: record.sidecar,
+                        imagePath: typeof record.image === "string" ? record.image : undefined,
+                    })
+                }
+            }
+        }
+        if (!sidecarCandidates.length) {
+            zip.file(/\.sidecar\.json$/i).forEach((entry) => {
+                sidecarCandidates.push({ sidecarPath: entry.name })
+            })
+        }
+
+        if (!sidecarCandidates.length) {
+            throw new Error(locale === "zh" ? "ZIP 中未找到 sidecar 文件" : "No sidecar files found in ZIP")
+        }
+
+        const restoreRecords: SidecarZipRestoreRecord[] = []
+        const skippedItems: string[] = []
+        for (const candidate of sidecarCandidates) {
+            const sidecarEntry = findZipEntry(candidate.sidecarPath)
+            if (!sidecarEntry) {
+                skippedItems.push(candidate.sidecarPath)
+                continue
+            }
+
+            let payload: Record<string, unknown>
+            try {
+                payload = JSON.parse(await sidecarEntry.async("string")) as Record<string, unknown>
+            } catch {
+                skippedItems.push(sidecarEntry.name)
+                continue
+            }
+
+            const baseName = extractFileName(sidecarEntry.name).replace(/\.sidecar\.json$/i, "")
+            const candidates = [
+                candidate.imagePath,
+                typeof payload.exportImageName === "string" ? payload.exportImageName : undefined,
+                `${baseName}.png`,
+                `${baseName}.jpg`,
+                `${baseName}.jpeg`,
+                `${baseName}.webp`,
+            ].filter((value): value is string => Boolean(value && value.trim()))
+
+            let imageEntry = null as (typeof zipEntries[number] | null)
+            for (const imagePath of candidates) {
+                imageEntry = findZipEntry(imagePath)
+                if (imageEntry) break
+            }
+
+            if (!imageEntry) {
+                skippedItems.push(sidecarEntry.name)
+                continue
+            }
+
+            const imageBlob = await imageEntry.async("blob")
+            const imageName = extractFileName(imageEntry.name)
+            const imageType = imageBlob.type || "image/png"
+            const imageFile = new globalThis.File([imageBlob], imageName, {
+                type: imageType,
+                lastModified: Date.now(),
+            })
+            restoreRecords.push({ file: imageFile, payload })
+        }
+
+        if (!restoreRecords.length) {
+            throw new Error(locale === "zh" ? "没有可恢复的图片与 sidecar 对应关系" : "No restorable image/sidecar pairs found")
+        }
+
+        return { restoreRecords, skippedItems }
     }, [locale])
+
+    const restoreSidecarJsonPayload = useCallback(async (payload: Record<string, unknown>) => {
+        if (!currentImage) {
+            throw new Error(locale === "zh" ? "请先选择图片，再导入 Sidecar JSON" : "Select an image before importing Sidecar JSON")
+        }
+
+        const blocks = parseBlocksFromSidecarPayload(payload)
+        const image = await loadImage(currentImage.originalUrl)
+        const rawSelections = Array.isArray(payload.selections) ? payload.selections : []
+        let selections = normalizeSelectionsFromPayload(rawSelections, image.width, image.height, `sidecar-json-${Date.now()}`)
+        if (!selections.length && blocks.length) {
+            selections = blocksToSelections(blocks, image.width, image.height, `sidecar-json-block-${Date.now()}`)
+        }
+
+        if (!blocks.length && !selections.length) {
+            throw new Error(locale === "zh" ? "Sidecar JSON 中没有可恢复的数据" : "No restorable content found in Sidecar JSON")
+        }
+
+        if (blocks.length) {
+            setDetectedTextBlocks(currentImage.id, blocks)
+        }
+        if (selections.length) {
+            updateSelections(currentImage.id, selections)
+        }
+        const promptApplied = typeof payload.prompt === "string" && payload.prompt.trim().length > 0
+        if (promptApplied) {
+            setPrompt(String(payload.prompt).trim())
+        }
+
+        return {
+            blockCount: blocks.length,
+            selectionCount: selections.length,
+            promptApplied,
+        }
+    }, [
+        blocksToSelections,
+        currentImage,
+        locale,
+        normalizeSelectionsFromPayload,
+        parseBlocksFromSidecarPayload,
+        setDetectedTextBlocks,
+        setPrompt,
+        updateSelections,
+    ])
+
+    const restoreSidecarZipRecords = useCallback(async (
+        restoreRecords: SidecarZipRestoreRecord[],
+        baseSkippedItems: string[]
+    ) => {
+        addImages(restoreRecords.map((record) => record.file))
+        const stateAfterImport = useEditorStore.getState()
+        const imageByFile = new Map(
+            stateAfterImport.images.map((img) => [img.file, { id: img.id, originalUrl: img.originalUrl }])
+        )
+
+        const skippedItems = [...baseSkippedItems]
+        let restoredImageCount = 0
+        let restoredSelectionCount = 0
+        let restoredBlockCount = 0
+        let restoredPromptCount = 0
+        let firstImportedImageId: string | null = null
+
+        for (const [index, record] of restoreRecords.entries()) {
+            const target = imageByFile.get(record.file)
+            if (!target) {
+                skippedItems.push(record.file.name)
+                continue
+            }
+            if (!firstImportedImageId) {
+                firstImportedImageId = target.id
+            }
+
+            const image = await loadImage(target.originalUrl)
+            const blocks = parseBlocksFromSidecarPayload(record.payload)
+            const rawSelections = Array.isArray(record.payload.selections) ? record.payload.selections : []
+            let selections = normalizeSelectionsFromPayload(
+                rawSelections,
+                image.width,
+                image.height,
+                `sidecar-zip-${Date.now()}-${index}`
+            )
+            if (!selections.length && blocks.length) {
+                selections = blocksToSelections(
+                    blocks,
+                    image.width,
+                    image.height,
+                    `sidecar-zip-block-${Date.now()}-${index}`
+                )
+            }
+
+            if (blocks.length) {
+                setDetectedTextBlocks(target.id, blocks)
+                restoredBlockCount += blocks.length
+            }
+            if (selections.length) {
+                updateSelections(target.id, selections)
+                restoredSelectionCount += selections.length
+            }
+            if (typeof record.payload.prompt === "string" && record.payload.prompt.trim()) {
+                if (restoredPromptCount === 0) {
+                    setPrompt(record.payload.prompt.trim())
+                }
+                restoredPromptCount += 1
+            }
+            restoredImageCount += 1
+        }
+
+        if (firstImportedImageId) {
+            setCurrentImage(firstImportedImageId)
+        }
+
+        return {
+            restoredImageCount,
+            restoredSelectionCount,
+            restoredBlockCount,
+            restoredPromptCount,
+            skippedItems,
+        }
+    }, [
+        addImages,
+        blocksToSelections,
+        normalizeSelectionsFromPayload,
+        parseBlocksFromSidecarPayload,
+        setCurrentImage,
+        setDetectedTextBlocks,
+        setPrompt,
+        updateSelections,
+    ])
+
+    const prepareSidecarImportPlan = useCallback(async (file: File): Promise<SidecarImportPlan> => {
+        const name = file.name.toLowerCase()
+        if (name.endsWith(".zip")) {
+            const { restoreRecords, skippedItems } = await buildSidecarZipRestoreRecords(file)
+            let blockCount = 0
+            let selectionCount = 0
+            let promptCount = 0
+            const previewDetails: SidecarPreviewDetail[] = []
+
+            for (const record of restoreRecords) {
+                const blocks = parseBlocksFromSidecarPayload(record.payload)
+                const pageSelectionCount = Array.isArray(record.payload.selections)
+                    ? record.payload.selections.length
+                    : 0
+                const hasPrompt = typeof record.payload.prompt === "string" && record.payload.prompt.trim().length > 0
+                previewDetails.push({
+                    fileName: record.file.name,
+                    blockCount: blocks.length,
+                    selectionCount: pageSelectionCount,
+                    hasPrompt,
+                    previewTexts: buildSidecarPreviewTexts(blocks),
+                })
+                blockCount += blocks.length
+                selectionCount += pageSelectionCount
+                if (hasPrompt) promptCount += 1
+            }
+
+            return {
+                kind: "zip",
+                sourceFileName: file.name,
+                restoreRecords,
+                skippedItems,
+                imageCount: restoreRecords.length,
+                blockCount,
+                selectionCount,
+                promptCount,
+                previewDetails,
+            }
+        }
+        const parsedJson = await parseSidecarJsonFile(file)
+        const jsonBlocks = parseBlocksFromSidecarPayload(parsedJson.payload)
+        return {
+            ...parsedJson,
+            previewDetails: [{
+                fileName: currentImage?.file.name || (locale === "zh" ? "当前选中图片" : "Selected image"),
+                blockCount: parsedJson.blockCount,
+                selectionCount: parsedJson.selectionCount,
+                hasPrompt: parsedJson.hasPrompt,
+                previewTexts: buildSidecarPreviewTexts(jsonBlocks),
+            }],
+        }
+    }, [buildSidecarPreviewTexts, buildSidecarZipRestoreRecords, currentImage?.file.name, locale, parseBlocksFromSidecarPayload, parseSidecarJsonFile])
+
+    const handleConfirmSidecarImport = useCallback(async () => {
+        if (!sidecarImportPlan) return
+        setIsApplyingSidecarImport(true)
+        try {
+            if (sidecarImportPlan.kind === "json") {
+                const result = await restoreSidecarJsonPayload(sidecarImportPlan.payload)
+                toast.success(
+                    locale === "zh"
+                        ? `已恢复 ${result.blockCount} 个文本块、${result.selectionCount} 个选区`
+                        : `Restored ${result.blockCount} text blocks and ${result.selectionCount} selections`
+                )
+            } else {
+                const result = await restoreSidecarZipRecords(
+                    sidecarImportPlan.restoreRecords,
+                    sidecarImportPlan.skippedItems
+                )
+                toast.success(
+                    locale === "zh"
+                        ? `已恢复 ${result.restoredImageCount} 张图片，${result.restoredSelectionCount} 个选区，${result.restoredBlockCount} 个文本块`
+                        : `Restored ${result.restoredImageCount} images, ${result.restoredSelectionCount} selections, ${result.restoredBlockCount} text blocks`
+                )
+                if (result.skippedItems.length > 0) {
+                    const preview = result.skippedItems.slice(0, 2).join(", ")
+                    toast.warning(
+                        locale === "zh"
+                            ? `有 ${result.skippedItems.length} 项未恢复：${preview}`
+                            : `${result.skippedItems.length} items were skipped: ${preview}`
+                    )
+                }
+            }
+            setSidecarPreviewOpen(false)
+            setSidecarImportPlan(null)
+        } catch (error) {
+            toast.error(
+                error instanceof Error
+                    ? error.message
+                    : (locale === "zh" ? "Sidecar 导入失败" : "Sidecar import failed")
+            )
+        } finally {
+            setIsApplyingSidecarImport(false)
+        }
+    }, [locale, restoreSidecarJsonPayload, restoreSidecarZipRecords, sidecarImportPlan])
+
+    const handleImportSidecar = useCallback(async (file: File) => {
+        setSidecarPreviewOpen(false)
+        setSidecarImportPlan(null)
+        setIsPreparingSidecarImport(true)
+        try {
+            const plan = await prepareSidecarImportPlan(file)
+            setSidecarImportPlan(plan)
+            setSidecarPreviewOpen(true)
+        } catch (error) {
+            toast.error(
+                error instanceof Error
+                    ? error.message
+                    : (locale === "zh" ? "Sidecar 文件解析失败" : "Failed to parse Sidecar file")
+            )
+        } finally {
+            setIsPreparingSidecarImport(false)
+        }
+    }, [locale, prepareSidecarImportPlan])
+
+    const handleSidecarPreviewOpenChange = useCallback((open: boolean) => {
+        if (isApplyingSidecarImport) return
+        setSidecarPreviewOpen(open)
+        if (!open) {
+            setSidecarImportPlan(null)
+        }
+    }, [isApplyingSidecarImport])
 
     const handleCopyManualJsonPrompt = useCallback(async () => {
         const targetLanguage = getTargetLanguageForDetection()
@@ -1103,7 +1714,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     }, [currentImage, locale, parseManualJsonBlocks, setDetectedTextBlocks, updateSelections])
 
     return (
-        <div className={cn("w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden", className)}>
+        <>
+            <div className={cn("w-80 border-r border-border glass-card flex flex-col h-full overflow-hidden", className)}>
             <ScrollArea className="flex-1 h-full">
                 <div className="p-4 space-y-6 min-h-0">
                     {/* 文件上传区域 */}
@@ -1138,27 +1750,63 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             <Clipboard className="h-4 w-4 mr-2" />
                             {t.editor.sidebar.paste}
                         </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full"
+                            onClick={() => sidecarImportInputRef.current?.click()}
+                            disabled={isPreparingSidecarImport || isApplyingSidecarImport}
+                        >
+                            {isPreparingSidecarImport ? (
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            ) : (
+                                <FileJson className="h-4 w-4 mr-2" />
+                            )}
+                            {isPreparingSidecarImport
+                                ? (locale === "zh" ? "解析中..." : "Parsing...")
+                                : (locale === "zh" ? "导入 Sidecar ZIP/JSON" : "Import Sidecar ZIP/JSON")}
+                        </Button>
 
                         {/* 隐藏的文件输入 */}
                         <input
                             ref={fileInputRef}
                             type="file"
-                            accept="image/*"
+                            accept={EDITOR_IMAGE_ACCEPT}
                             multiple
                             aria-label={locale === "zh" ? "上传图片文件" : "Upload image files"}
                             className="hidden"
-                            onChange={(e) => handleFileUpload(e.target.files)}
+                            onChange={(e) => {
+                                void handleFileUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
                         />
                         <input
                             ref={folderInputRef}
                             type="file"
-                            accept="image/*"
+                            accept={EDITOR_IMAGE_ACCEPT}
                             multiple
                             aria-label={locale === "zh" ? "上传图片文件夹" : "Upload image folder"}
                             // @ts-expect-error webkitdirectory is not in types
                             webkitdirectory="true"
                             className="hidden"
-                            onChange={(e) => handleFileUpload(e.target.files)}
+                            onChange={(e) => {
+                                void handleFileUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
+                        />
+                        <input
+                            ref={sidecarImportInputRef}
+                            type="file"
+                            accept=".zip,.json,.txt"
+                            aria-label={locale === "zh" ? "导入 Sidecar 文件" : "Import sidecar file"}
+                            className="hidden"
+                            disabled={isPreparingSidecarImport || isApplyingSidecarImport}
+                            onChange={(e) => {
+                                const sidecarFile = e.target.files?.[0]
+                                if (!sidecarFile) return
+                                void handleImportSidecar(sidecarFile)
+                                e.currentTarget.value = ""
+                            }}
                         />
                     </div>
 
@@ -1308,100 +1956,110 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 </SelectContent>
                             </Select>
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                            <Button
-                                variant="secondary"
-                                size="sm"
-                                className="w-full"
-                                onClick={handleAutoDetectText}
-                                disabled={!currentImage || isAutoDetecting || !canRunAutoDetect}
-                            >
-                                {isAutoDetecting ? (
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                ) : (
-                                    <Languages className="h-4 w-4 mr-2" />
-                                )}
-                                {locale === "zh" ? "自动检测" : "Auto Detect"}
-                            </Button>
-                            <Dialog open={manualJsonOpen} onOpenChange={setManualJsonOpen}>
-                                <DialogTrigger asChild>
+                        {isBubbleDetectionEnabled ? (
+                            <>
+                                <div className="grid grid-cols-2 gap-2">
                                     <Button
-                                        variant="outline"
+                                        variant="secondary"
                                         size="sm"
                                         className="w-full"
-                                        disabled={!currentImage}
+                                        onClick={handleAutoDetectText}
+                                        disabled={!currentImage || isAutoDetecting || !canRunAutoDetect}
                                     >
-                                        <FileJson className="h-4 w-4 mr-2" />
-                                        JSON
+                                        {isAutoDetecting ? (
+                                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                        ) : (
+                                            <Languages className="h-4 w-4 mr-2" />
+                                        )}
+                                        {locale === "zh" ? "自动检测" : "Auto Detect"}
                                     </Button>
-                                </DialogTrigger>
-                                <DialogContent className="sm:max-w-2xl">
-                                    <DialogHeader>
-                                        <DialogTitle>
-                                            {locale === "zh" ? "手动 JSON 导入" : "Manual JSON Import"}
-                                        </DialogTitle>
-                                        <DialogDescription>
-                                            {locale === "zh"
-                                                ? "当不走站内检测时，可把图片发给任意 AI 网页端，拿到 JSON 后粘贴回来。"
-                                                : "If you don't use built-in detection, ask any AI web client and paste the returned JSON here."}
-                                        </DialogDescription>
-                                    </DialogHeader>
-                                    <div className="space-y-3">
-                                        <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1">
-                                            <p>
-                                                {locale === "zh"
-                                                    ? "1) 点击“复制提示词”并发给外部 AI（附上当前图片）"
-                                                    : "1) Copy prompt and send it to external AI with the image"}
-                                            </p>
-                                            <p>
-                                                {locale === "zh"
-                                                    ? "2) 让对方仅返回 JSON（含 sourceText/translatedText/bbox）"
-                                                    : "2) Ask it to return JSON only (sourceText/translatedText/bbox)"}
-                                            </p>
-                                            <p>
-                                                {locale === "zh"
-                                                    ? "3) 粘贴 JSON，导入后会自动创建选区"
-                                                    : "3) Paste JSON here; selections will be created automatically"}
-                                            </p>
-                                        </div>
-                                        <Textarea
-                                            value={manualJsonInput}
-                                            onChange={(e) => setManualJsonInput(e.target.value)}
-                                            placeholder='{"blocks":[{"sourceText":"...","translatedText":"...","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}'
-                                            className="min-h-[220px] font-mono text-xs"
-                                        />
-                                        <div className="flex items-center justify-end gap-2">
+                                    <Dialog open={manualJsonOpen} onOpenChange={setManualJsonOpen}>
+                                        <DialogTrigger asChild>
                                             <Button
-                                                type="button"
                                                 variant="outline"
-                                                onClick={handleCopyManualJsonPrompt}
+                                                size="sm"
+                                                className="w-full"
+                                                disabled={!currentImage}
                                             >
-                                                {locale === "zh" ? "复制提示词" : "Copy Prompt"}
+                                                <FileJson className="h-4 w-4 mr-2" />
+                                                JSON
                                             </Button>
-                                            <Button
-                                                type="button"
-                                                onClick={handleImportManualJson}
-                                                disabled={!manualJsonInput.trim() || !currentImage}
-                                            >
-                                                {locale === "zh" ? "导入并生成选区" : "Import to selections"}
-                                            </Button>
-                                        </div>
-                                    </div>
-                                </DialogContent>
-                            </Dialog>
-                        </div>
-                        <p className="text-xs text-muted-foreground">
-                            {locale === "zh" ? "自动检测文本并生成选区" : "Detect text and generate selections"}
-                        </p>
-                        {!canRunAutoDetect && (
-                            <p className="text-xs text-muted-foreground">
+                                        </DialogTrigger>
+                                        <DialogContent className="sm:max-w-2xl">
+                                            <DialogHeader>
+                                                <DialogTitle>
+                                                    {locale === "zh" ? "手动 JSON 导入" : "Manual JSON Import"}
+                                                </DialogTitle>
+                                                <DialogDescription>
+                                                    {locale === "zh"
+                                                        ? "当不走站内检测时，可把图片发给任意 AI 网页端，拿到 JSON 后粘贴回来。"
+                                                        : "If you don't use built-in detection, ask any AI web client and paste the returned JSON here."}
+                                                </DialogDescription>
+                                            </DialogHeader>
+                                            <div className="space-y-3">
+                                                <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1">
+                                                    <p>
+                                                        {locale === "zh"
+                                                            ? "1) 点击“复制提示词”并发给外部 AI（附上当前图片）"
+                                                            : "1) Copy prompt and send it to external AI with the image"}
+                                                    </p>
+                                                    <p>
+                                                        {locale === "zh"
+                                                            ? "2) 让对方仅返回 JSON（含 sourceText/translatedText/bbox）"
+                                                            : "2) Ask it to return JSON only (sourceText/translatedText/bbox)"}
+                                                    </p>
+                                                    <p>
+                                                        {locale === "zh"
+                                                            ? "3) 粘贴 JSON，导入后会自动创建选区"
+                                                            : "3) Paste JSON here; selections will be created automatically"}
+                                                    </p>
+                                                </div>
+                                                <Textarea
+                                                    value={manualJsonInput}
+                                                    onChange={(e) => setManualJsonInput(e.target.value)}
+                                                    placeholder='{"blocks":[{"sourceText":"...","translatedText":"...","bbox":{"x":0.1,"y":0.2,"width":0.3,"height":0.15}}]}'
+                                                    className="min-h-[220px] font-mono text-xs"
+                                                />
+                                                <div className="flex items-center justify-end gap-2">
+                                                    <Button
+                                                        type="button"
+                                                        variant="outline"
+                                                        onClick={handleCopyManualJsonPrompt}
+                                                    >
+                                                        {locale === "zh" ? "复制提示词" : "Copy Prompt"}
+                                                    </Button>
+                                                    <Button
+                                                        type="button"
+                                                        onClick={handleImportManualJson}
+                                                        disabled={!manualJsonInput.trim() || !currentImage}
+                                                    >
+                                                        {locale === "zh" ? "导入并生成选区" : "Import to selections"}
+                                                    </Button>
+                                                </div>
+                                            </div>
+                                        </DialogContent>
+                                    </Dialog>
+                                </div>
+                                <p className="text-xs text-muted-foreground">
+                                    {locale === "zh" ? "自动检测文本并生成选区" : "Detect text and generate selections"}
+                                </p>
+                                {!canRunAutoDetect && (
+                                    <p className="text-xs text-muted-foreground">
+                                        {locale === "zh"
+                                            ? "自动检测需要填写 API Key，或启用网站 API"
+                                            : "Auto-detection needs API key or server API"}
+                                    </p>
+                                )}
+                            </>
+                        ) : (
+                            <p className="text-xs text-muted-foreground rounded-md border border-border/60 bg-muted/30 p-2">
                                 {locale === "zh"
-                                    ? "自动检测需要填写 API Key，或启用网站 API"
-                                    : "Auto-detection needs API key or server API"}
+                                    ? "气泡检测模块已关闭，可在“漫画模块”中重新开启。"
+                                    : "Bubble detection is disabled. Re-enable it in Comic Module settings."}
                             </p>
                         )}
 
-                        {(detectedBlocks.length > 0 || currentImage?.detectedTextUpdatedAt) && (
+                        {isBubbleDetectionEnabled && (detectedBlocks.length > 0 || currentImage?.detectedTextUpdatedAt) && (
                             <div className="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2">
                                 <div className="flex items-center justify-between">
                                     <p className="text-xs font-medium">
@@ -1726,6 +2384,95 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 )}
                             </div>
 
+                            <div className="space-y-3 rounded-lg border border-border/60 bg-muted/40 p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="comic-module-enable" className="cursor-pointer">
+                                            {locale === "zh" ? "启用漫画模块" : "Enable Comic Module"}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "统一启用漫画汉化辅助：气泡检测 / OCR / 修补编辑。"
+                                                : "Master switch for bubble detect / OCR / repair editor features."}
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="comic-module-enable"
+                                        checked={settings.enableComicModule ?? true}
+                                        onCheckedChange={(checked) =>
+                                            updateSettings({
+                                                enableComicModule: checked,
+                                                enableBubbleDetection: checked ? (settings.enableBubbleDetection ?? true) : false,
+                                                enableSelectionOcr: checked ? (settings.enableSelectionOcr ?? true) : false,
+                                                enablePatchEditor: checked ? (settings.enablePatchEditor ?? true) : false,
+                                                enablePretranslate: checked ? settings.enablePretranslate : false,
+                                                useMaskMode: checked ? settings.useMaskMode : false,
+                                                useReverseMaskMode: checked ? settings.useReverseMaskMode : false,
+                                            })
+                                        }
+                                    />
+                                </div>
+
+                                <Separator />
+
+                                <div className="grid gap-2">
+                                    <div className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                        <Label htmlFor="comic-bubble-detection" className="text-xs cursor-pointer">
+                                            {locale === "zh" ? "启用气泡检测（侧边栏自动检测工具）" : "Enable Bubble Detection (sidebar auto detect)"}
+                                        </Label>
+                                        <Switch
+                                            id="comic-bubble-detection"
+                                            checked={settings.enableBubbleDetection ?? true}
+                                            disabled={!isComicModuleEnabled}
+                                            onCheckedChange={(checked) =>
+                                                updateSettings({
+                                                    enableBubbleDetection: checked,
+                                                    enablePretranslate: checked ? settings.enablePretranslate : false,
+                                                })
+                                            }
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                        <Label htmlFor="comic-selection-ocr" className="text-xs cursor-pointer">
+                                            {locale === "zh" ? "启用 OCR 识别（选区 OCR 按钮）" : "Enable OCR (selection OCR button)"}
+                                        </Label>
+                                        <Switch
+                                            id="comic-selection-ocr"
+                                            checked={settings.enableSelectionOcr ?? true}
+                                            disabled={!isComicModuleEnabled}
+                                            onCheckedChange={(checked) => updateSettings({ enableSelectionOcr: checked })}
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                        <Label htmlFor="comic-repair-editor" className="text-xs cursor-pointer">
+                                            {locale === "zh" ? "启用修补编辑器（画笔/魔棒/嵌字）" : "Enable Repair Editor (brush/wand/typeset)"}
+                                        </Label>
+                                        <Switch
+                                            id="comic-repair-editor"
+                                            checked={settings.enablePatchEditor ?? true}
+                                            disabled={!isComicModuleEnabled}
+                                            onCheckedChange={(checked) =>
+                                                updateSettings({
+                                                    enablePatchEditor: checked,
+                                                    useMaskMode: checked ? settings.useMaskMode : false,
+                                                    useReverseMaskMode: checked ? settings.useReverseMaskMode : false,
+                                                })
+                                            }
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                        <Label htmlFor="comic-default-vertical" className="text-xs cursor-pointer">
+                                            {locale === "zh" ? "默认竖排文字（新文本框）" : "Default vertical text (new text boxes)"}
+                                        </Label>
+                                        <Switch
+                                            id="comic-default-vertical"
+                                            checked={settings.defaultVerticalText ?? true}
+                                            onCheckedChange={(checked) => updateSettings({ defaultVerticalText: checked })}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
                             <div className="space-y-2">
                                 <Label htmlFor="editor-image-size">
                                     {locale === "zh" ? "生成分辨率（Gemini）" : "Output Resolution (Gemini)"}
@@ -1767,6 +2514,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <Switch
                                         id="editor-pretranslate"
                                         checked={settings.enablePretranslate}
+                                        disabled={!isBubbleDetectionEnabled}
                                         onCheckedChange={(checked) => updateSettings({ enablePretranslate: checked })}
                                     />
                                 </div>
@@ -1787,6 +2535,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <Switch
                                         id="editor-mask-mode"
                                         checked={settings.useMaskMode}
+                                        disabled={!isPatchEditorEnabled}
                                         onCheckedChange={(checked) =>
                                             updateSettings({
                                                 useMaskMode: checked,
@@ -2013,9 +2762,199 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             )}
                         </CollapsibleContent>
                     </Collapsible>
+
+                    {images.length > 0 && (
+                        <div className="pt-2">
+                            <Button
+                                type="button"
+                                variant={clearGalleryArmed ? "destructive" : "outline"}
+                                className="w-full h-10"
+                                onClick={() => {
+                                    if (!clearGalleryArmed) {
+                                        setClearGalleryArmed(true)
+                                        toast.warning(
+                                            locale === "zh"
+                                                ? "请再次点击以确认清空图库"
+                                                : "Click again to confirm clearing the gallery"
+                                        )
+                                        return
+                                    }
+                                    clearImages()
+                                    setClearGalleryArmed(false)
+                                    toast.success(locale === "zh" ? "图库已清空" : "Gallery cleared")
+                                }}
+                            >
+                                <Trash2 className="h-4 w-4 mr-2" />
+                                {clearGalleryArmed
+                                    ? (locale === "zh" ? "再次点击确认清空" : "Click again to clear")
+                                    : (locale === "zh" ? "清空图库（双击确认）" : "Clear gallery (double-click confirm)")}
+                            </Button>
+                        </div>
+                    )}
                 </div>
             </ScrollArea>
-        </div>
+            </div>
+
+            <Dialog open={sidecarPreviewOpen} onOpenChange={handleSidecarPreviewOpenChange}>
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {locale === "zh" ? "导入预览" : "Import Preview"}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {locale === "zh"
+                                ? "请先确认将要恢复的内容，再执行导入。"
+                                : "Review what will be restored before importing."}
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    {sidecarImportPlan ? (
+                        <div className="space-y-3 text-sm">
+                            <div className="rounded-md border border-border/60 bg-muted/30 p-3">
+                                <p className="text-xs text-muted-foreground">
+                                    {locale === "zh" ? "来源文件" : "Source file"}
+                                </p>
+                                <p className="font-medium break-all">{sidecarImportPlan.sourceFileName}</p>
+                            </div>
+
+                            {sidecarImportPlan.kind === "zip" ? (
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "恢复页数" : "Pages"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.imageCount}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "文本块" : "Text blocks"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.blockCount}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "选区" : "Selections"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.selectionCount}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "提示词" : "Prompts"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.promptCount}</p>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "目标页" : "Target page"}</p>
+                                        <p className="text-base font-semibold">{currentImage ? 1 : 0}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "文本块" : "Text blocks"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.blockCount}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "选区" : "Selections"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.selectionCount}</p>
+                                    </div>
+                                    <div className="rounded-md border border-border/60 bg-background/70 p-2">
+                                        <p className="text-xs text-muted-foreground">{locale === "zh" ? "提示词" : "Prompt"}</p>
+                                        <p className="text-base font-semibold">{sidecarImportPlan.hasPrompt ? 1 : 0}</p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {sidecarImportPlan.kind === "zip" && sidecarImportPlan.skippedItems.length > 0 && (
+                                <p className="text-xs text-amber-600">
+                                    {locale === "zh"
+                                        ? `有 ${sidecarImportPlan.skippedItems.length} 项可能无法恢复（缺失对应图片或 JSON 无效）。`
+                                        : `${sidecarImportPlan.skippedItems.length} items may be skipped (missing image or invalid JSON).`}
+                                </p>
+                            )}
+
+                            <div className="space-y-2">
+                                <p className="text-xs font-medium text-muted-foreground">
+                                    {locale === "zh" ? "预览详情（每页）" : "Preview details (per page)"}
+                                </p>
+                                <ScrollArea className="max-h-44 rounded-md border border-border/60 bg-background/60">
+                                    <div className="divide-y divide-border/40">
+                                        {sidecarImportPlan.previewDetails.map((detail, index) => (
+                                            <details key={`${detail.fileName}-${index}`} className="px-3 py-2">
+                                                <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
+                                                    <p className="min-w-0 flex-1 truncate text-xs font-medium" title={detail.fileName}>
+                                                        {detail.fileName}
+                                                    </p>
+                                                    <p className="shrink-0 text-[11px] text-muted-foreground">
+                                                        {locale === "zh"
+                                                            ? `${detail.blockCount} 块 / ${detail.selectionCount} 选区${detail.hasPrompt ? " / 提示词" : ""}`
+                                                            : `${detail.blockCount} blocks / ${detail.selectionCount} selections${detail.hasPrompt ? " / prompt" : ""}`}
+                                                    </p>
+                                                </summary>
+                                                <div className="mt-2 space-y-1 rounded-md border border-border/50 bg-muted/30 p-2">
+                                                    {detail.previewTexts.length ? (
+                                                        detail.previewTexts.map((text, textIndex) => (
+                                                            <div key={`${detail.fileName}-${index}-${textIndex}`} className="space-y-0.5">
+                                                                <p className="text-[11px] leading-snug">
+                                                                    <span className="text-muted-foreground">
+                                                                        {locale === "zh" ? "原文" : "Src"}:
+                                                                    </span>{" "}
+                                                                    {text.sourceText || "-"}
+                                                                </p>
+                                                                <p className="text-[11px] leading-snug">
+                                                                    <span className="text-muted-foreground">
+                                                                        {locale === "zh" ? "译文" : "Tr"}:
+                                                                    </span>{" "}
+                                                                    {text.translatedText || "-"}
+                                                                </p>
+                                                            </div>
+                                                        ))
+                                                    ) : (
+                                                        <p className="text-[11px] text-muted-foreground">
+                                                            {locale === "zh"
+                                                                ? "该页没有可预览的文本内容"
+                                                                : "No previewable text content on this page"}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </details>
+                                        ))}
+                                    </div>
+                                </ScrollArea>
+                            </div>
+
+                            {sidecarImportPlan.kind === "json" && !currentImage && (
+                                <p className="text-xs text-destructive">
+                                    {locale === "zh"
+                                        ? "当前未选中图片。JSON 导入需要先选择一张目标图片。"
+                                        : "No image selected. JSON import requires selecting a target image first."}
+                                </p>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="flex items-center text-sm text-muted-foreground">
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            {locale === "zh" ? "解析导入计划中..." : "Preparing import plan..."}
+                        </div>
+                    )}
+
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => handleSidecarPreviewOpenChange(false)}
+                            disabled={isApplyingSidecarImport}
+                        >
+                            {locale === "zh" ? "取消" : "Cancel"}
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={() => void handleConfirmSidecarImport()}
+                            disabled={
+                                isApplyingSidecarImport
+                                || !sidecarImportPlan
+                                || (sidecarImportPlan.kind === "json" && !currentImage)
+                            }
+                        >
+                            {isApplyingSidecarImport && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                            {locale === "zh" ? "确认导入" : "Confirm Import"}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+        </>
     )
 }
 

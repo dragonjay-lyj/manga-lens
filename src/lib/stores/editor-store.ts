@@ -100,6 +100,11 @@ export interface EditorSettings {
     translationDirection: "ja2zh" | "en2zh" | "ja2en" | "en2ja"
     comicType: "auto" | "manga" | "western"
     textStylePreset: "match-original" | "comic-bold" | "clean-serif"
+    enableComicModule: boolean
+    enableBubbleDetection: boolean
+    enableSelectionOcr: boolean
+    enablePatchEditor: boolean
+    defaultVerticalText: boolean
     useMaskMode: boolean
     useReverseMaskMode: boolean
     enablePretranslate: boolean
@@ -215,6 +220,11 @@ const defaultSettings: EditorSettings = {
     translationDirection: "ja2zh",
     comicType: "auto",
     textStylePreset: "match-original",
+    enableComicModule: true,
+    enableBubbleDetection: true,
+    enableSelectionOcr: true,
+    enablePatchEditor: true,
+    defaultVerticalText: true,
     useMaskMode: false,
     useReverseMaskMode: false,
     enablePretranslate: false,
