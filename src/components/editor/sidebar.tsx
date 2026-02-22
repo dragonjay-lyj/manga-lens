@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useCallback, useEffect, useMemo, useState } from "react"
+import { type ReactNode, useRef, useCallback, useEffect, useMemo, useState } from "react"
 import Image from "next/image"
 import { useEditorStore } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
@@ -42,6 +42,7 @@ import {
     Coins,
     Languages,
     Loader2,
+    Search,
     Trash2,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
@@ -68,6 +69,7 @@ interface SidecarPreviewDetail {
     blockCount: number
     selectionCount: number
     hasPrompt: boolean
+    searchCorpus: string
     previewTexts: Array<{
         sourceText: string
         translatedText: string
@@ -132,6 +134,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const [sidecarImportPlan, setSidecarImportPlan] = useState<SidecarImportPlan | null>(null)
     const [isPreparingSidecarImport, setIsPreparingSidecarImport] = useState(false)
     const [isApplyingSidecarImport, setIsApplyingSidecarImport] = useState(false)
+    const [sidecarPreviewKeyword, setSidecarPreviewKeyword] = useState("")
+    const [sidecarPreviewMatchCursor, setSidecarPreviewMatchCursor] = useState(0)
+    const [sidecarPreviewExpandedRows, setSidecarPreviewExpandedRows] = useState<number[]>([])
 
     const {
         images,
@@ -770,6 +775,26 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             .slice(0, 3)
     }, [])
 
+    const buildSidecarSearchCorpus = useCallback((
+        blocks: Array<{
+            sourceText: string
+            translatedText: string
+            richTextHtml?: string
+        }>
+    ) => {
+        return blocks
+            .map((block) => {
+                const sourceText = block.sourceText.trim()
+                const translatedFromRich = block.richTextHtml
+                    ? richHtmlToPlainText(block.richTextHtml)
+                    : ""
+                const translatedText = (block.translatedText || translatedFromRich).trim()
+                return `${sourceText}\n${translatedText}`.trim()
+            })
+            .filter(Boolean)
+            .join("\n")
+    }, [])
+
     const parseSidecarJsonFile = useCallback(async (file: File) => {
         const payload = JSON.parse(await file.text()) as Record<string, unknown>
         const blocks = parseBlocksFromSidecarPayload(payload)
@@ -1046,6 +1071,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                     blockCount: blocks.length,
                     selectionCount: pageSelectionCount,
                     hasPrompt,
+                    searchCorpus: buildSidecarSearchCorpus(blocks),
                     previewTexts: buildSidecarPreviewTexts(blocks),
                 })
                 blockCount += blocks.length
@@ -1074,10 +1100,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 blockCount: parsedJson.blockCount,
                 selectionCount: parsedJson.selectionCount,
                 hasPrompt: parsedJson.hasPrompt,
+                searchCorpus: buildSidecarSearchCorpus(jsonBlocks),
                 previewTexts: buildSidecarPreviewTexts(jsonBlocks),
             }],
         }
-    }, [buildSidecarPreviewTexts, buildSidecarZipRestoreRecords, currentImage?.file.name, locale, parseBlocksFromSidecarPayload, parseSidecarJsonFile])
+    }, [buildSidecarPreviewTexts, buildSidecarSearchCorpus, buildSidecarZipRestoreRecords, currentImage?.file.name, locale, parseBlocksFromSidecarPayload, parseSidecarJsonFile])
 
     const handleConfirmSidecarImport = useCallback(async () => {
         if (!sidecarImportPlan) return
@@ -1111,6 +1138,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             }
             setSidecarPreviewOpen(false)
             setSidecarImportPlan(null)
+            setSidecarPreviewKeyword("")
+            setSidecarPreviewMatchCursor(0)
+            setSidecarPreviewExpandedRows([])
         } catch (error) {
             toast.error(
                 error instanceof Error
@@ -1125,6 +1155,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const handleImportSidecar = useCallback(async (file: File) => {
         setSidecarPreviewOpen(false)
         setSidecarImportPlan(null)
+        setSidecarPreviewKeyword("")
+        setSidecarPreviewMatchCursor(0)
+        setSidecarPreviewExpandedRows([])
         setIsPreparingSidecarImport(true)
         try {
             const plan = await prepareSidecarImportPlan(file)
@@ -1146,8 +1179,117 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setSidecarPreviewOpen(open)
         if (!open) {
             setSidecarImportPlan(null)
+            setSidecarPreviewKeyword("")
+            setSidecarPreviewMatchCursor(0)
+            setSidecarPreviewExpandedRows([])
         }
     }, [isApplyingSidecarImport])
+
+    const normalizedSidecarPreviewKeyword = useMemo(
+        () => sidecarPreviewKeyword.trim().toLowerCase(),
+        [sidecarPreviewKeyword]
+    )
+
+    const sidecarPreviewMatchedIndices = useMemo(() => {
+        if (!sidecarImportPlan || !normalizedSidecarPreviewKeyword) return []
+        return sidecarImportPlan.previewDetails.reduce<number[]>((acc, detail, index) => {
+            const fileMatched = detail.fileName.toLowerCase().includes(normalizedSidecarPreviewKeyword)
+            const contentMatched = detail.searchCorpus.toLowerCase().includes(normalizedSidecarPreviewKeyword)
+            if (fileMatched || contentMatched) {
+                acc.push(index)
+            }
+            return acc
+        }, [])
+    }, [sidecarImportPlan, normalizedSidecarPreviewKeyword])
+
+    const sidecarPreviewMatchedIndexSet = useMemo(
+        () => new Set(sidecarPreviewMatchedIndices),
+        [sidecarPreviewMatchedIndices]
+    )
+
+    const currentMatchedDetailIndex = useMemo(() => {
+        if (!sidecarPreviewMatchedIndices.length) return null
+        const safeCursor = Math.min(sidecarPreviewMatchCursor, sidecarPreviewMatchedIndices.length - 1)
+        return sidecarPreviewMatchedIndices[safeCursor] ?? null
+    }, [sidecarPreviewMatchCursor, sidecarPreviewMatchedIndices])
+
+    const highlightSidecarText = useCallback((text: string, keyword: string): ReactNode => {
+        const safeText = text || "-"
+        if (!keyword) return safeText
+        const safeKeyword = keyword.trim()
+        if (!safeKeyword) return safeText
+        const lowerText = safeText.toLowerCase()
+        const lowerKeyword = safeKeyword.toLowerCase()
+        if (!lowerText.includes(lowerKeyword)) return safeText
+
+        const nodes: ReactNode[] = []
+        let cursor = 0
+        let nodeKey = 0
+        while (cursor < safeText.length) {
+            const matchAt = lowerText.indexOf(lowerKeyword, cursor)
+            if (matchAt === -1) {
+                nodes.push(safeText.slice(cursor))
+                break
+            }
+            if (matchAt > cursor) {
+                nodes.push(safeText.slice(cursor, matchAt))
+            }
+            nodes.push(
+                <mark key={`sidecar-match-${nodeKey++}`} className="rounded bg-amber-200/80 px-0.5 text-black dark:bg-amber-400/70">
+                    {safeText.slice(matchAt, matchAt + safeKeyword.length)}
+                </mark>
+            )
+            cursor = matchAt + safeKeyword.length
+        }
+        return nodes
+    }, [])
+
+    const toggleSidecarPreviewRow = useCallback((index: number) => {
+        setSidecarPreviewExpandedRows((prev) =>
+            prev.includes(index)
+                ? prev.filter((item) => item !== index)
+                : [...prev, index]
+        )
+    }, [])
+
+    const jumpSidecarPreviewMatch = useCallback((direction: "prev" | "next") => {
+        if (!sidecarPreviewMatchedIndices.length) return
+        setSidecarPreviewMatchCursor((prev) => {
+            const total = sidecarPreviewMatchedIndices.length
+            if (direction === "next") {
+                return (prev + 1) % total
+            }
+            return (prev - 1 + total) % total
+        })
+    }, [sidecarPreviewMatchedIndices.length])
+
+    useEffect(() => {
+        setSidecarPreviewMatchCursor(0)
+    }, [normalizedSidecarPreviewKeyword])
+
+    useEffect(() => {
+        if (!sidecarPreviewOpen || !normalizedSidecarPreviewKeyword) return
+        if (!sidecarPreviewMatchedIndices.length) return
+
+        const safeCursor = Math.min(sidecarPreviewMatchCursor, sidecarPreviewMatchedIndices.length - 1)
+        if (safeCursor !== sidecarPreviewMatchCursor) {
+            setSidecarPreviewMatchCursor(safeCursor)
+            return
+        }
+
+        const targetDetailIndex = sidecarPreviewMatchedIndices[safeCursor]
+        setSidecarPreviewExpandedRows((prev) => (
+            prev.includes(targetDetailIndex) ? prev : [...prev, targetDetailIndex]
+        ))
+
+        const targetElement = document.getElementById(`sidecar-preview-row-${targetDetailIndex}`)
+        targetElement?.scrollIntoView({ behavior: "smooth", block: "center" })
+    }, [
+        normalizedSidecarPreviewKeyword,
+        sidecarPreviewMatchCursor,
+        sidecarPreviewMatchedIndices,
+        sidecarPreviewOpen,
+    ])
 
     const handleCopyManualJsonPrompt = useCallback(async () => {
         const targetLanguage = getTargetLanguageForDetection()
@@ -2869,47 +3011,110 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 <p className="text-xs font-medium text-muted-foreground">
                                     {locale === "zh" ? "预览详情（每页）" : "Preview details (per page)"}
                                 </p>
+                                <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2">
+                                    <div className="flex items-center gap-2">
+                                        <div className="relative flex-1">
+                                            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                                            <Input
+                                                value={sidecarPreviewKeyword}
+                                                onChange={(e) => setSidecarPreviewKeyword(e.target.value)}
+                                                placeholder={locale === "zh" ? "搜索台词或文件名" : "Search dialogue or file name"}
+                                                className="h-8 pl-7 text-xs"
+                                                aria-label={locale === "zh" ? "搜索预览详情" : "Search preview details"}
+                                            />
+                                        </div>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            className="h-8 px-2 text-xs"
+                                            onClick={() => jumpSidecarPreviewMatch("prev")}
+                                            disabled={!sidecarPreviewMatchedIndices.length}
+                                        >
+                                            {locale === "zh" ? "上一个" : "Prev"}
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            className="h-8 px-2 text-xs"
+                                            onClick={() => jumpSidecarPreviewMatch("next")}
+                                            disabled={!sidecarPreviewMatchedIndices.length}
+                                        >
+                                            {locale === "zh" ? "下一个" : "Next"}
+                                        </Button>
+                                    </div>
+                                    {normalizedSidecarPreviewKeyword && (
+                                        <p className="text-[11px] text-muted-foreground">
+                                            {sidecarPreviewMatchedIndices.length > 0
+                                                ? (
+                                                    locale === "zh"
+                                                        ? `命中 ${sidecarPreviewMatchedIndices.length} 页，当前 ${Math.min(sidecarPreviewMatchCursor + 1, sidecarPreviewMatchedIndices.length)}/${sidecarPreviewMatchedIndices.length}`
+                                                        : `${sidecarPreviewMatchedIndices.length} page(s) matched, current ${Math.min(sidecarPreviewMatchCursor + 1, sidecarPreviewMatchedIndices.length)}/${sidecarPreviewMatchedIndices.length}`
+                                                )
+                                                : (
+                                                    locale === "zh"
+                                                        ? "未命中，尝试更换关键词。"
+                                                        : "No match. Try another keyword."
+                                                )}
+                                        </p>
+                                    )}
+                                </div>
                                 <ScrollArea className="max-h-44 rounded-md border border-border/60 bg-background/60">
                                     <div className="divide-y divide-border/40">
                                         {sidecarImportPlan.previewDetails.map((detail, index) => (
-                                            <details key={`${detail.fileName}-${index}`} className="px-3 py-2">
-                                                <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
+                                            <div
+                                                key={`${detail.fileName}-${index}`}
+                                                id={`sidecar-preview-row-${index}`}
+                                                className={cn(
+                                                    "px-3 py-2 transition-colors",
+                                                    sidecarPreviewMatchedIndexSet.has(index) && "bg-amber-100/40 dark:bg-amber-500/10",
+                                                    currentMatchedDetailIndex === index && "ring-1 ring-amber-500/60"
+                                                )}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    className="flex w-full items-start justify-between gap-3 text-left"
+                                                    onClick={() => toggleSidecarPreviewRow(index)}
+                                                >
                                                     <p className="min-w-0 flex-1 truncate text-xs font-medium" title={detail.fileName}>
-                                                        {detail.fileName}
+                                                        {highlightSidecarText(detail.fileName, sidecarPreviewKeyword)}
                                                     </p>
                                                     <p className="shrink-0 text-[11px] text-muted-foreground">
                                                         {locale === "zh"
                                                             ? `${detail.blockCount} 块 / ${detail.selectionCount} 选区${detail.hasPrompt ? " / 提示词" : ""}`
                                                             : `${detail.blockCount} blocks / ${detail.selectionCount} selections${detail.hasPrompt ? " / prompt" : ""}`}
                                                     </p>
-                                                </summary>
-                                                <div className="mt-2 space-y-1 rounded-md border border-border/50 bg-muted/30 p-2">
-                                                    {detail.previewTexts.length ? (
-                                                        detail.previewTexts.map((text, textIndex) => (
-                                                            <div key={`${detail.fileName}-${index}-${textIndex}`} className="space-y-0.5">
-                                                                <p className="text-[11px] leading-snug">
-                                                                    <span className="text-muted-foreground">
-                                                                        {locale === "zh" ? "原文" : "Src"}:
-                                                                    </span>{" "}
-                                                                    {text.sourceText || "-"}
-                                                                </p>
-                                                                <p className="text-[11px] leading-snug">
-                                                                    <span className="text-muted-foreground">
-                                                                        {locale === "zh" ? "译文" : "Tr"}:
-                                                                    </span>{" "}
-                                                                    {text.translatedText || "-"}
-                                                                </p>
-                                                            </div>
-                                                        ))
-                                                    ) : (
-                                                        <p className="text-[11px] text-muted-foreground">
-                                                            {locale === "zh"
-                                                                ? "该页没有可预览的文本内容"
-                                                                : "No previewable text content on this page"}
-                                                        </p>
-                                                    )}
-                                                </div>
-                                            </details>
+                                                </button>
+                                                {sidecarPreviewExpandedRows.includes(index) && (
+                                                    <div className="mt-2 space-y-1 rounded-md border border-border/50 bg-muted/30 p-2">
+                                                        {detail.previewTexts.length ? (
+                                                            detail.previewTexts.map((text, textIndex) => (
+                                                                <div key={`${detail.fileName}-${index}-${textIndex}`} className="space-y-0.5">
+                                                                    <p className="text-[11px] leading-snug">
+                                                                        <span className="text-muted-foreground">
+                                                                            {locale === "zh" ? "原文" : "Src"}:
+                                                                        </span>{" "}
+                                                                        {highlightSidecarText(text.sourceText || "-", sidecarPreviewKeyword)}
+                                                                    </p>
+                                                                    <p className="text-[11px] leading-snug">
+                                                                        <span className="text-muted-foreground">
+                                                                            {locale === "zh" ? "译文" : "Tr"}:
+                                                                        </span>{" "}
+                                                                        {highlightSidecarText(text.translatedText || "-", sidecarPreviewKeyword)}
+                                                                    </p>
+                                                                </div>
+                                                            ))
+                                                        ) : (
+                                                            <p className="text-[11px] text-muted-foreground">
+                                                                {locale === "zh"
+                                                                    ? "该页没有可预览的文本内容"
+                                                                    : "No previewable text content on this page"}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
                                         ))}
                                     </div>
                                 </ScrollArea>
