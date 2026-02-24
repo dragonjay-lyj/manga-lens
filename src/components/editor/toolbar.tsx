@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useEditorStore, useCurrentImage } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -95,6 +95,9 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
+    const actionButtonsScrollRef = useRef<HTMLDivElement | null>(null)
+    const [showActionFadeLeft, setShowActionFadeLeft] = useState(false)
+    const [showActionFadeRight, setShowActionFadeRight] = useState(false)
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
@@ -441,6 +444,83 @@ export function EditorToolbar() {
 
     type PretranslatePromptResult = {
         prompt: string
+        blocks: DetectedTextBlock[]
+    }
+
+    const getNormalizedRectIntersectionArea = (
+        a: { x: number; y: number; width: number; height: number },
+        b: { x: number; y: number; width: number; height: number }
+    ) => {
+        const x1 = Math.max(a.x, b.x)
+        const y1 = Math.max(a.y, b.y)
+        const x2 = Math.min(a.x + a.width, b.x + b.width)
+        const y2 = Math.min(a.y + a.height, b.y + b.height)
+        const width = Math.max(0, x2 - x1)
+        const height = Math.max(0, y2 - y1)
+        return width * height
+    }
+
+    const pickBestStyleBlockForSelection = (
+        selection: Selection,
+        styleBlocks: DetectedTextBlock[],
+        imageWidth: number,
+        imageHeight: number
+    ): DetectedTextBlock | null => {
+        if (!styleBlocks.length) return null
+        const selectionRect = selectionToNormalizedRect(selection, imageWidth, imageHeight)
+        let bestBlock: DetectedTextBlock | null = null
+        let bestOverlap = 0
+        for (const block of styleBlocks) {
+            const overlap = getNormalizedRectIntersectionArea(selectionRect, block.bbox)
+            if (overlap > bestOverlap) {
+                bestOverlap = overlap
+                bestBlock = block
+            }
+        }
+        return bestOverlap > 0 ? bestBlock : null
+    }
+
+    const parseColorToRgb = (value?: string | null): { r: number; g: number; b: number } | null => {
+        if (!value) return null
+        const raw = value.trim().toLowerCase()
+        if (!raw) return null
+
+        const hex = raw.startsWith("#") ? raw.slice(1) : raw
+        if (/^[0-9a-f]{3}$/.test(hex)) {
+            const r = parseInt(hex[0] + hex[0], 16)
+            const g = parseInt(hex[1] + hex[1], 16)
+            const b = parseInt(hex[2] + hex[2], 16)
+            return { r, g, b }
+        }
+        if (/^[0-9a-f]{6}$/.test(hex)) {
+            const r = parseInt(hex.slice(0, 2), 16)
+            const g = parseInt(hex.slice(2, 4), 16)
+            const b = parseInt(hex.slice(4, 6), 16)
+            return { r, g, b }
+        }
+        const rgbMatch = raw.match(/^rgba?\(([^)]+)\)$/)
+        if (!rgbMatch) return null
+        const parts = rgbMatch[1].split(",").map((part) => Number(part.trim()))
+        if (parts.length < 3 || parts.slice(0, 3).some((part) => !Number.isFinite(part))) {
+            return null
+        }
+        return {
+            r: Math.max(0, Math.min(255, Math.round(parts[0]))),
+            g: Math.max(0, Math.min(255, Math.round(parts[1]))),
+            b: Math.max(0, Math.min(255, Math.round(parts[2]))),
+        }
+    }
+
+    const isNearBlackColor = (value?: string | null) => {
+        const rgb = parseColorToRgb(value)
+        if (!rgb) return false
+        return rgb.r <= 38 && rgb.g <= 38 && rgb.b <= 38
+    }
+
+    const isNearWhiteColor = (value?: string | null) => {
+        const rgb = parseColorToRgb(value)
+        if (!rgb) return false
+        return rgb.r >= 220 && rgb.g >= 220 && rgb.b >= 220
     }
 
     const buildHardTextFallbackPrompt = (basePrompt: string) => [
@@ -715,11 +795,15 @@ export function EditorToolbar() {
         showFailureToast: boolean,
         existingDetectedBlocks: DetectedTextBlock[] = []
     ): Promise<PretranslatePromptResult> => {
+        const fallbackBlocks = applyAngleThresholdFilter(existingDetectedBlocks)
         if (!enablePretranslate) {
-            return { prompt: basePrompt }
+            return {
+                prompt: basePrompt,
+                blocks: fallbackBlocks,
+            }
         }
         const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
-        let allBlocks: DetectedTextBlock[] = applyAngleThresholdFilter(existingDetectedBlocks)
+        let allBlocks: DetectedTextBlock[] = fallbackBlocks
 
         if (enablePretranslate && canRunPretranslate) {
             if (updateToolbarProgress) {
@@ -743,7 +827,7 @@ export function EditorToolbar() {
                     )
                 }
                 // 预翻译失败时，若已有自动检测结果，继续使用已有结果增强提示词
-                allBlocks = existingDetectedBlocks
+                allBlocks = fallbackBlocks
             } else {
                 allBlocks = detectResult.blocks || []
             }
@@ -755,6 +839,7 @@ export function EditorToolbar() {
             }
             return {
                 prompt: basePrompt,
+                blocks: [],
             }
         }
 
@@ -776,6 +861,7 @@ export function EditorToolbar() {
             }
             return {
                 prompt: basePrompt,
+                blocks: [],
             }
         }
 
@@ -814,6 +900,7 @@ export function EditorToolbar() {
             ...lines,
             "请优先遵循以上翻译与布局信息。",
             ].join("\n"),
+            blocks: scopedBlocks,
         }
     }
 
@@ -824,7 +911,8 @@ export function EditorToolbar() {
         selections: Selection[],
         effectivePrompt: string,
         updateToolbarProgress: boolean,
-        trackSelectionProgress: boolean
+        trackSelectionProgress: boolean,
+        styleBlocks: DetectedTextBlock[] = []
     ) => {
         if (trackSelectionProgress) {
             initializeSelectionProgress(imageId, selections.map((selection) => selection.id))
@@ -846,6 +934,17 @@ export function EditorToolbar() {
             selection,
             index: index + 1,
         }))
+        const matchedStyleBlockBySelection = new Map<string, DetectedTextBlock | null>(
+            layoutSelections.map((selection) => [
+                selection.id,
+                pickBestStyleBlockForSelection(
+                    selection,
+                    styleBlocks,
+                    originalImg.width,
+                    originalImg.height
+                ),
+            ])
+        )
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
         const total = selections.length
         const hasManySelections = total >= 10
@@ -871,11 +970,32 @@ export function EditorToolbar() {
             const isLikelyHorizontal = selection.width > selection.height * 1.25
             const darkRatio = selectionDarkRatioMap.get(selection.id) ?? 0
             const useWhiteOutline = darkRatio >= 0.18
+            const matchedStyleBlock = matchedStyleBlockBySelection.get(selection.id)
+            const matchedStyle = matchedStyleBlock?.style
+            const detectedTextColor = matchedStyle?.textColor?.trim()
+            const detectedOutlineColor = (matchedStyle?.outlineColor || matchedStyle?.strokeColor)?.trim()
+            const looksLikeDefaultMonochrome =
+                isNearBlackColor(detectedTextColor) &&
+                (!detectedOutlineColor || isNearWhiteColor(detectedOutlineColor))
+            const shouldLockTextColor = Boolean(detectedTextColor) && !looksLikeDefaultMonochrome
+            const shouldLockOutlineColor = Boolean(detectedOutlineColor) && !looksLikeDefaultMonochrome
             const layoutHint = isLikelyVertical
                 ? "该选区大概率是竖排文本，请保持竖排（从上到下、从右到左列）。"
                 : isLikelyHorizontal
                     ? "该选区大概率是横排文本，请保持横排（从左到右、从上到下）。"
                     : "请保持该选区的原始排版方向。"
+            const colorHints = shouldLockTextColor || shouldLockOutlineColor
+                ? [
+                    shouldLockTextColor
+                        ? `颜色锁定：该选区译文主色优先使用 ${detectedTextColor}，不要统一改成黑字。`
+                        : "颜色锁定：该选区检测到彩色文本风格，禁止统一黑字。",
+                    shouldLockOutlineColor
+                        ? `描边锁定：描边/轮廓优先使用 ${detectedOutlineColor}。`
+                        : "描边锁定：保持原始描边风格与对比度。",
+                ]
+                : [
+                    "颜色锁定：若原文为彩色字，请保持对应彩色风格，不要统一黑字。",
+                ]
             const hardHints = isHard
                 ? [
                     "这是复杂/拟声词高难选区：必须清除并替换掉所有可见原文。",
@@ -898,6 +1018,7 @@ export function EditorToolbar() {
                 "",
                 "【当前选区约束】",
                 layoutHint,
+                ...colorHints,
                 ...englishLayoutHints,
                 ...hardHints,
             ].join("\n")
@@ -1283,7 +1404,8 @@ export function EditorToolbar() {
         sourceSelections: Selection[],
         effectivePrompt: string,
         updateToolbarProgress: boolean,
-        trackSelectionProgress: boolean
+        trackSelectionProgress: boolean,
+        styleBlocks: DetectedTextBlock[] = []
     ) => {
         if (trackSelectionProgress) {
             initializeSelectionProgress(imageId, sourceSelections.map((selection) => selection.id))
@@ -1382,7 +1504,8 @@ export function EditorToolbar() {
                     sourceSelections,
                     effectivePrompt,
                     updateToolbarProgress,
-                    trackSelectionProgress
+                    trackSelectionProgress,
+                    styleBlocks
                 )
             }
         }
@@ -1484,7 +1607,8 @@ export function EditorToolbar() {
                 hasUserSelections ? sourceSelections : [],
                 pretranslateContext.prompt,
                 updateToolbarProgress,
-                hasUserSelections
+                hasUserSelections,
+                pretranslateContext.blocks
             )
         }
 
@@ -1495,7 +1619,8 @@ export function EditorToolbar() {
             effectiveSelections,
             pretranslateContext.prompt,
             updateToolbarProgress,
-            hasUserSelections
+            hasUserSelections,
+            pretranslateContext.blocks
         )
     }
 
@@ -2233,6 +2358,57 @@ export function EditorToolbar() {
 
     const hasResult = currentImage?.resultUrl
     const hasCompletedImages = images.some((img) => img.resultUrl)
+    const updateActionScrollFades = useCallback(() => {
+        const el = actionButtonsScrollRef.current
+        if (!el) {
+            setShowActionFadeLeft(false)
+            setShowActionFadeRight(false)
+            return
+        }
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+        setShowActionFadeLeft(el.scrollLeft > 2)
+        setShowActionFadeRight(el.scrollLeft < maxScrollLeft - 2)
+    }, [])
+
+    const handleActionButtonsWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+        const el = actionButtonsScrollRef.current
+        if (!el) return
+        if (el.scrollWidth <= el.clientWidth) return
+
+        const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+            ? event.deltaX
+            : event.deltaY
+        if (Math.abs(dominantDelta) < 0.5) return
+
+        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+        const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, el.scrollLeft + dominantDelta))
+        if (nextScrollLeft === el.scrollLeft) return
+
+        event.preventDefault()
+        el.scrollLeft = nextScrollLeft
+        updateActionScrollFades()
+    }, [updateActionScrollFades])
+
+    useEffect(() => {
+        updateActionScrollFades()
+        const el = actionButtonsScrollRef.current
+        if (!el || typeof ResizeObserver === "undefined") return
+
+        const observer = new ResizeObserver(() => {
+            updateActionScrollFades()
+        })
+        observer.observe(el)
+        if (el.firstElementChild instanceof HTMLElement) {
+            observer.observe(el.firstElementChild)
+        }
+
+        const handleResize = () => updateActionScrollFades()
+        window.addEventListener("resize", handleResize)
+        return () => {
+            observer.disconnect()
+            window.removeEventListener("resize", handleResize)
+        }
+    }, [updateActionScrollFades])
 
     return (
         <div className="h-14 border-b border-border glass flex items-center gap-3 px-4 overflow-hidden">
@@ -2267,8 +2443,14 @@ export function EditorToolbar() {
             </div>
 
             {/* 右侧：操作按钮 */}
-            <div className="ml-auto min-w-0 flex-1 overflow-x-auto [scrollbar-width:thin]">
-                <div className="flex w-max items-center gap-2 pl-2 pb-1 [&>*]:shrink-0">
+            <div className="relative ml-auto min-w-0 flex-1">
+                <div
+                    ref={actionButtonsScrollRef}
+                    className="overflow-x-auto [scrollbar-width:thin]"
+                    onWheel={handleActionButtonsWheel}
+                    onScroll={updateActionScrollFades}
+                >
+                    <div className="flex w-max items-center gap-2 pl-2 pb-1 pr-1 [&>*]:shrink-0">
                 <Button
                     onClick={handleGenerate}
                     disabled={isProcessing || !currentImage}
@@ -2388,7 +2570,20 @@ export function EditorToolbar() {
                     <FileCode2 className="h-4 w-4 mr-2" />
                     HTML
                 </Button>
+                    </div>
                 </div>
+                {showActionFadeLeft && (
+                    <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-y-0 left-0 w-10 bg-gradient-to-r from-background via-background/85 to-transparent"
+                    />
+                )}
+                {showActionFadeRight && (
+                    <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-background via-background/85 to-transparent"
+                    />
+                )}
             </div>
         </div>
     )
