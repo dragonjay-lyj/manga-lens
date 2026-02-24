@@ -994,7 +994,7 @@ export function EditorCanvas() {
     ])
 
     const selectionActionOverlays = useMemo(() => {
-        if (!currentImage || !isComicModuleEnabled) return []
+        if (!currentImage || showResult || !isComicModuleEnabled) return []
         const container = containerRef.current
         const baseImage = imageRef.current
         if (!container || !baseImage) return []
@@ -1013,7 +1013,7 @@ export function EditorCanvas() {
             const top = Math.max(4, Math.min(containerHeight - 40, imageOffsetY + selection.y * zoom - 34))
             return { selection, left, top }
         })
-    }, [currentImage, isComicModuleEnabled, panX, panY, zoom])
+    }, [currentImage, isComicModuleEnabled, panX, panY, showResult, zoom])
 
     // 绘制 Canvas
     const drawCanvas = useCallback(() => {
@@ -1113,7 +1113,7 @@ export function EditorCanvas() {
         }
 
         // 绘制已有选区
-        if (currentImage) {
+        if (currentImage && !showResult) {
             const selections = currentImage.selections || []
             for (const sel of selections) {
                 const status = currentImage.selectionProgress?.[sel.id]?.status ?? "pending"
@@ -1122,7 +1122,7 @@ export function EditorCanvas() {
         }
 
         // 绘制当前正在创建的选区
-        if (currentSelection) {
+        if (currentSelection && !showResult) {
             drawSelection(ctx, currentSelection, x, y, zoom, true)
         }
     }, [zoom, panX, panY, currentImage, showResult, currentSelection, annotationShapes, guides, activeShapeId, drawAnnotationShape, drawGuideLine, drawShapeHandles, showInpaintOverlay, maskOverlayOpacity, originalOpacity, inpaintOpacity])
@@ -1241,7 +1241,7 @@ export function EditorCanvas() {
                 return
             }
 
-            if (e.key === "Escape") {
+            if (e.key === "Escape" && !showResult) {
                 if (isDrawing && toolMode === "selection") {
                     e.preventDefault()
                     setIsDrawing(false)
@@ -1447,7 +1447,7 @@ export function EditorCanvas() {
     const getHitHandle = useCallback((clientX: number, clientY: number): { selectionId: string, handle: ResizeHandle } | null => {
         const canvas = canvasRef.current
         const image = imageRef.current
-        if (!canvas || !image || !currentImage) return null
+        if (!canvas || !image || !currentImage || showResult) return null
 
         const rect = canvas.getBoundingClientRect()
         const canvasX = clientX - rect.left
@@ -1482,7 +1482,7 @@ export function EditorCanvas() {
             if (hitTest(selX, selY + selH / 2)) return { selectionId: sel.id, handle: "w" }
         }
         return null
-    }, [currentImage, zoom, panX, panY])
+    }, [currentImage, showResult, zoom, panX, panY])
 
     // 获取调整手柄对应的光标样式
     const getResizeCursor = (handle: ResizeHandle): string => {
@@ -1500,12 +1500,12 @@ export function EditorCanvas() {
         if (!currentImage) return
 
         // 中键/右键，或空格+左键，或结果模式左键拖拽平移
-        const isRepairTool = (toolMode === "brush" || toolMode === "wand")
+        const isRepairTool = (toolMode === "brush" || toolMode === "wand") && !showResult
         const isBrushEraseGesture = isRepairTool && (e.button === 2 || isBrushErasePinned)
         const shouldPan =
             e.button === 1 ||
             (e.button === 2 && !isBrushEraseGesture) ||
-            (e.button === 0 && isSpacePressed)
+            (e.button === 0 && (isSpacePressed || showResult))
 
         if (shouldPan) {
             setIsPanning(true)
@@ -1520,6 +1520,8 @@ export function EditorCanvas() {
             }
             return
         }
+
+        if (showResult) return
 
         // 检测是否点击在调整手柄上
         if (toolMode === "selection") {
@@ -1621,7 +1623,7 @@ export function EditorCanvas() {
         if (!isDrawing && !isPanning && !isResizing && !isDraggingShape && !isResizingShape && !draggingGuideId) {
             const canvas = canvasRef.current
             if (canvas) {
-                if (isSpacePressed) {
+                if (showResult || isSpacePressed) {
                     canvas.style.cursor = "grab"
                 } else {
                     if (toolMode === "brush") {
@@ -2207,7 +2209,7 @@ export function EditorCanvas() {
     }, [currentImage, ocrDialogSelectionId])
 
     const idleCursor =
-        isSpacePressed
+        showResult || isSpacePressed
             ? "grab"
             : toolMode === "brush"
                 ? (isBrushErasePinned ? "not-allowed" : "cell")
@@ -2216,7 +2218,7 @@ export function EditorCanvas() {
                     : "crosshair"
 
     const idleCursorClass =
-        isSpacePressed
+        showResult || isSpacePressed
             ? "cursor-grab"
             : toolMode === "brush"
                 ? (isBrushErasePinned ? "cursor-not-allowed" : "cursor-cell")
@@ -2583,6 +2585,16 @@ export function EditorCanvas() {
                             e.preventDefault()
                             const touch = e.touches[0]
                             if (touch) {
+                                if (showResult) {
+                                    setIsPanning(true)
+                                    panSessionRef.current = {
+                                        mouseX: touch.clientX,
+                                        mouseY: touch.clientY,
+                                        originPanX: panX,
+                                        originPanY: panY,
+                                    }
+                                    return
+                                }
                                 const coords = getImageCoordinates(touch.clientX, touch.clientY)
                                 if (coords) {
                                     if (toolMode === "wand") {
@@ -2673,7 +2685,7 @@ export function EditorCanvas() {
                             }
                         }}
                     />
-                    {isComicModuleEnabled && selectionActionOverlays.length > 0 && (
+                    {!showResult && isComicModuleEnabled && selectionActionOverlays.length > 0 && (
                         <div className="pointer-events-none absolute inset-0">
                             {selectionActionOverlays.map(({ selection, left, top }, index) => (
                                 <div

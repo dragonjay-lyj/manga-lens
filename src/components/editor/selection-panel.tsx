@@ -31,6 +31,7 @@ interface SelectionPanelProps {
 export function SelectionPanel({ className }: SelectionPanelProps = {}) {
     const {
         locale,
+        showResult,
         updateSelections,
         setGuides,
         clearGuides,
@@ -274,7 +275,15 @@ export function SelectionPanel({ className }: SelectionPanelProps = {}) {
                     </div>
                 </div>
 
-                {selections.length === 0 ? (
+                {showResult ? (
+                    <div className="flex-1 flex items-center justify-center p-4">
+                        <p className="text-sm text-muted-foreground text-center">
+                            {locale === "zh"
+                                ? "结果预览模式下无法编辑选区"
+                                : "Cannot edit selections in result preview"}
+                        </p>
+                    </div>
+                ) : selections.length === 0 ? (
                     <div className="flex-1 p-4 space-y-3">
                         <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
                             {locale === "zh" ? "在画布上绘制矩形选区" : "Draw rectangles on the canvas"}

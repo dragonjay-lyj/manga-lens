@@ -1751,8 +1751,6 @@ export function EditorToolbar() {
         setImageStatus(currentImage.id, "processing")
 
         try {
-            const sourceImageUrl = (showResult && currentImage.resultUrl) ? currentImage.resultUrl : currentImage.originalUrl
-            const outputBaseUrl = (showResult && currentImage.resultUrl) ? undefined : currentImage.imageOnlyBaseUrl
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
@@ -1762,8 +1760,8 @@ export function EditorToolbar() {
             })
             const resultUrl = await processImage(
                 currentImage.id,
-                sourceImageUrl,
-                outputBaseUrl,
+                currentImage.originalUrl,
+                currentImage.imageOnlyBaseUrl,
                 currentImage.selections || [],
                 currentImage.detectedTextBlocks || [],
                 basePrompt,
@@ -2033,9 +2031,7 @@ export function EditorToolbar() {
         setProgressDetail(locale === "zh" ? "正在自动检测文本..." : "Detecting text blocks...")
 
         try {
-            const sourceImageUrl = (showResult && currentImage.resultUrl) ? currentImage.resultUrl : currentImage.originalUrl
-            const outputBaseUrl = (showResult && currentImage.resultUrl) ? undefined : currentImage.imageOnlyBaseUrl
-            const originalImg = await loadImage(sourceImageUrl)
+            const originalImg = await loadImage(currentImage.originalUrl)
             const detectResult = await runDetectTextRequest(
                 imageToDataUrl(originalImg),
                 getTargetLanguageForDetection(),
@@ -2093,8 +2089,8 @@ export function EditorToolbar() {
 
             const resultUrl = await processImage(
                 currentImage.id,
-                sourceImageUrl,
-                outputBaseUrl,
+                currentImage.originalUrl,
+                currentImage.imageOnlyBaseUrl,
                 detectedSelections,
                 detectedBlocks,
                 basePrompt,
@@ -2160,7 +2156,6 @@ export function EditorToolbar() {
         setImageStatus(currentImage.id, "processing")
 
         try {
-            const sourceImageUrl = (showResult && currentImage.resultUrl) ? currentImage.resultUrl : currentImage.originalUrl
             const basePrompt = buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
@@ -2170,7 +2165,7 @@ export function EditorToolbar() {
             })
             const resultUrl = await processImageWithRepairMask(
                 currentImage.id,
-                sourceImageUrl,
+                currentImage.originalUrl,
                 currentImage.repairMaskUrl,
                 basePrompt,
                 true
