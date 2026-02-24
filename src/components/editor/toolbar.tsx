@@ -99,7 +99,7 @@ export function EditorToolbar() {
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
-    const MASK_BLEND_PADDING = 2
+    const MASK_BLEND_PADDING = 10
     const PATCH_DIFF_RETRY_THRESHOLD = 0.014
     const useMaskMode = settings.useMaskMode
     const useReverseMaskMode = settings.useReverseMaskMode ?? false
@@ -555,41 +555,6 @@ export function EditorToolbar() {
             y: Math.round(cy - height / 2),
             width,
             height,
-        }, image)
-    }
-
-    const buildSafeCompositeSelection = (
-        baseSelection: Selection,
-        candidateSelection: Selection,
-        image: HTMLImageElement
-    ): Selection => {
-        const base = clampSelectionToImageBounds(baseSelection, image)
-        const candidate = clampSelectionToImageBounds(candidateSelection, image)
-
-        const expandX = Math.max(8, Math.round(base.width * 0.12))
-        const expandY = Math.max(8, Math.round(base.height * 0.12))
-
-        const baseRight = base.x + base.width
-        const baseBottom = base.y + base.height
-        const candidateRight = candidate.x + candidate.width
-        const candidateBottom = candidate.y + candidate.height
-
-        const leftBound = Math.max(0, base.x - expandX)
-        const topBound = Math.max(0, base.y - expandY)
-        const rightBound = Math.min(image.width, baseRight + expandX)
-        const bottomBound = Math.min(image.height, baseBottom + expandY)
-
-        const safeLeft = Math.max(leftBound, Math.min(base.x, candidate.x))
-        const safeTop = Math.max(topBound, Math.min(base.y, candidate.y))
-        const safeRight = Math.min(rightBound, Math.max(baseRight, candidateRight))
-        const safeBottom = Math.min(bottomBound, Math.max(baseBottom, candidateBottom))
-
-        return clampSelectionToImageBounds({
-            ...base,
-            x: safeLeft,
-            y: safeTop,
-            width: Math.max(1, safeRight - safeLeft),
-            height: Math.max(1, safeBottom - safeTop),
         }, image)
     }
 
@@ -1131,7 +1096,6 @@ export function EditorToolbar() {
         const total = selections.length
         const hasManySelections = total >= 10
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
-        const sourceSelectionMap = new Map(selections.map((selection) => [selection.id, selection]))
         const useColorAnchors = trackSelectionProgress
         const sampleDominantTextColor = useColorAnchors
             ? createSelectionDominantTextColorSampler(originalImg)
@@ -1396,7 +1360,6 @@ export function EditorToolbar() {
         for (const { selection, index } of workItems) {
             let result = results.get(selection.id)
             if (result?.success && result.imageData) {
-                const sourceSelection = sourceSelectionMap.get(selection.id) || selection
                 const sourcePatch = inputPatchBySelection.get(selection.id)
                 const isHard = hardSelectionIds.has(selection.id)
                 const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
@@ -1532,7 +1495,7 @@ export function EditorToolbar() {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
                     const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const isLikelyVertical = selection.height > selection.width * 1.2
-                    const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.32 : 0.4)
+                        const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
                     if (likelyOverflow) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
@@ -1542,8 +1505,8 @@ export function EditorToolbar() {
                             )
                         }
                         const overflowSelection = isLikelyVertical
-                            ? expandSelectionFromCenter(selection, originalImg, 1.58, 1.34)
-                            : expandSelectionFromCenter(selection, originalImg, 1.4, 1.32)
+                            ? expandSelectionFromCenter(selection, originalImg, 1.42, 1.24)
+                            : expandSelectionFromCenter(selection, originalImg, 1.28, 1.2)
                         const overflowPrompt = buildCenterFillFallbackPrompt(selectionPrompt)
                         const overflowPatch = cropSelection(
                             originalImg,
@@ -1625,12 +1588,9 @@ export function EditorToolbar() {
                 if (trackSelectionProgress) {
                     setSelectionProgress(imageId, selection.id, "completed")
                 }
-                const compositeSelection = buildSafeCompositeSelection(
-                    sourceSelection,
-                    finalSelection,
-                    originalImg
-                )
-                patches.push({ base64: finalImageData, selection: compositeSelection })
+                // Use the same selection reference used by this patch generation path
+                // to avoid source/target crop mismatch that can squeeze glyphs.
+                patches.push({ base64: finalImageData, selection: finalSelection })
                 continue
             }
 
