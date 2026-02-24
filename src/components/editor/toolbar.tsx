@@ -863,7 +863,13 @@ export function EditorToolbar() {
                 selection.width / Math.max(1, selection.height),
                 selection.height / Math.max(1, selection.width)
             )
-            return area < 16_000 || minEdge < 72 || aspectRatio >= 3.2
+            // Avoid over-classifying narrow vertical bubbles as "hard":
+            // otherwise first-pass white-clearing removes original color cues.
+            return (
+                area < 9_000 ||
+                minEdge < 56 ||
+                (aspectRatio >= 4.8 && area < 22_000)
+            )
         }
 
         const buildSelectionPrompt = (selection: Selection, isHard: boolean) => {
@@ -892,28 +898,24 @@ export function EditorToolbar() {
                         : "保持原有文字颜色与描边风格并保证英文可读性。",
                 ]
                 : []
+            const universalColorHint = useWhiteOutline
+                ? "颜色要求：尽量保留该选区原文字色；若对比不足，仅增强描边/轮廓，不要把文字统一改成黑色。"
+                : "颜色要求：保持该选区原有文字颜色与描边风格，不要统一黑字。"
 
             return [
                 effectivePrompt,
                 "",
                 "【当前选区约束】",
                 layoutHint,
+                universalColorHint,
                 ...englishLayoutHints,
                 ...hardHints,
             ].join("\n")
         }
 
-        const buildSelectionInput = (selection: Selection, isHard: boolean) => {
-            if (isHard) {
-                const adaptivePadding = PATCH_CONTEXT_PADDING + (hasManySelections ? 8 : 12)
-                return cropSelectionWithClearedArea(
-                    originalImg,
-                    selection,
-                    adaptivePadding,
-                    "#ffffff",
-                    1
-                )
-            }
+        const buildSelectionInput = (selection: Selection) => {
+            // First pass always keeps original pixels so model can inherit text color/stroke.
+            // White-cleared input is reserved for fallback retries on unchanged outputs.
             return cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
         }
 
@@ -925,7 +927,7 @@ export function EditorToolbar() {
                 area: Math.max(1, selection.width * selection.height),
                 isHard,
                 prompt: buildSelectionPrompt(selection, isHard),
-                inputPatch: buildSelectionInput(selection, isHard),
+                inputPatch: buildSelectionInput(selection),
             }
         })
         const scheduledWorkItems = [...workItems].sort((a, b) => {
