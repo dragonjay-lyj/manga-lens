@@ -37,6 +37,7 @@ import {
     loadImage,
     cropSelection,
     cropSelectionWithClearedArea,
+    compositeImage,
     compositeMultiplePatches,
     convertToFormat,
     getFileExtension,
@@ -480,24 +481,6 @@ export function EditorToolbar() {
             : "3) Keep reading order and alignment natural inside the bubble.",
     ].join("\n")
 
-    const buildColorPreservationFallbackPrompt = (
-        basePrompt: string,
-        dominantColor: string
-    ) => [
-        basePrompt,
-        "",
-        locale === "zh" ? "【颜色保真回退】" : "[Color preservation fallback]",
-        locale === "zh"
-            ? `1) 该选区原文字主色约为 ${dominantColor}，译文必须保持同色系（允许轻微明暗变化）。`
-            : `1) The source text dominant color is about ${dominantColor}; the translated text must keep the same color family (minor brightness changes allowed).`,
-        locale === "zh"
-            ? "2) 禁止把文字统一改成黑色；若对比不足，只增强描边/轮廓。"
-            : "2) Do not switch all text to black; if contrast is low, improve stroke/outline only.",
-        locale === "zh"
-            ? "3) 保持现有排版方向与行数，不要新增或删减文本。"
-            : "3) Keep the current text direction and line structure without adding/removing content.",
-    ].join("\n")
-
     const clampSelectionToImageBounds = (selection: Selection, image: HTMLImageElement): Selection => {
         const x = Math.max(0, Math.min(image.width - 1, Math.round(selection.x)))
         const y = Math.max(0, Math.min(image.height - 1, Math.round(selection.y)))
@@ -724,6 +707,8 @@ export function EditorToolbar() {
         return (max - min) >= 22 && max >= 80
     }
 
+    const clampRgb = (value: number) => Math.max(0, Math.min(255, Math.round(value)))
+
     const createSelectionDominantTextColorSampler = (image: HTMLImageElement) => {
         const canvas = document.createElement("canvas")
         const ctx = canvas.getContext("2d")
@@ -807,6 +792,89 @@ export function EditorToolbar() {
                 width: patchImage.width,
                 height: patchImage.height,
             })
+        } catch {
+            return null
+        }
+    }
+
+    const tintChangedDarkTextToColor = async (
+        sourcePatchDataUrl: string,
+        generatedPatchDataUrl: string,
+        targetHexColor: string
+    ): Promise<string | null> => {
+        const targetRgb = hexToRgb(targetHexColor)
+        if (!targetRgb) return null
+
+        try {
+            const [sourceImg, generatedImg] = await Promise.all([
+                loadImage(sourcePatchDataUrl),
+                loadImage(generatedPatchDataUrl),
+            ])
+
+            const width = Math.max(1, generatedImg.width)
+            const height = Math.max(1, generatedImg.height)
+
+            const sourceCanvas = document.createElement("canvas")
+            const sourceCtx = sourceCanvas.getContext("2d")
+            const outputCanvas = document.createElement("canvas")
+            const outputCtx = outputCanvas.getContext("2d")
+            if (!sourceCtx || !outputCtx) return null
+
+            sourceCanvas.width = width
+            sourceCanvas.height = height
+            outputCanvas.width = width
+            outputCanvas.height = height
+
+            sourceCtx.drawImage(sourceImg, 0, 0, width, height)
+            outputCtx.drawImage(generatedImg, 0, 0, width, height)
+
+            const sourceData = sourceCtx.getImageData(0, 0, width, height).data
+            const outputImageData = outputCtx.getImageData(0, 0, width, height)
+            const outputData = outputImageData.data
+
+            let recoloredPixels = 0
+            const minRecoloredPixels = Math.max(14, Math.floor(width * height * 0.0015))
+
+            for (let i = 0; i < outputData.length; i += 4) {
+                const alpha = outputData[i + 3]
+                if (alpha < 130) continue
+
+                const r = outputData[i]
+                const g = outputData[i + 1]
+                const b = outputData[i + 2]
+                const max = Math.max(r, g, b)
+                const min = Math.min(r, g, b)
+                const luminance = r * 0.299 + g * 0.587 + b * 0.114
+                const chroma = max - min
+
+                const nearDarkGray = luminance < 120 && chroma < 28
+                if (!nearDarkGray) continue
+
+                const sr = sourceData[i]
+                const sg = sourceData[i + 1]
+                const sb = sourceData[i + 2]
+                const changedAmount =
+                    Math.abs(r - sr) +
+                    Math.abs(g - sg) +
+                    Math.abs(b - sb)
+
+                if (changedAmount < 42) continue
+
+                const normalizedLum = Math.max(0, Math.min(1, luminance / 120))
+                const tintFactor = 0.35 + normalizedLum * 0.65
+
+                outputData[i] = clampRgb(targetRgb.r * tintFactor)
+                outputData[i + 1] = clampRgb(targetRgb.g * tintFactor)
+                outputData[i + 2] = clampRgb(targetRgb.b * tintFactor)
+                recoloredPixels += 1
+            }
+
+            if (recoloredPixels < minRecoloredPixels) {
+                return null
+            }
+
+            outputCtx.putImageData(outputImageData, 0, 0)
+            return outputCanvas.toDataURL("image/png")
         } catch {
             return null
         }
@@ -1468,41 +1536,37 @@ export function EditorToolbar() {
                     const currentDistance = generatedDominantRgb
                         ? colorDistance(sourceDominantRgb, generatedDominantRgb)
                         : Number.POSITIVE_INFINITY
-                    const needColorRetry =
+                    const needColorCorrection =
                         !generatedDominantRgb ||
                         isRgbNearBlack(generatedDominantRgb) ||
                         currentDistance > 120
 
-                    if (needColorRetry) {
+                    if (needColorCorrection) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
                                 locale === "zh"
-                                    ? `选区 #${index} 颜色偏差较大，正在按原色重试...`
-                                    : `Selection #${index} color drift detected, retrying with source color anchor...`
+                                    ? `选区 #${index} 颜色偏差较大，正在应用本地颜色校正...`
+                                    : `Selection #${index} color drift detected, applying local color correction...`
                             )
                         }
-                        const colorPrompt = buildColorPreservationFallbackPrompt(
-                            selectionPrompt,
-                            sourceDominantColor
-                        )
-                        const colorRetryInputPatch = inputPatchForFinalCheck || cropSelection(
+                        const colorCorrectionSource = inputPatchForFinalCheck || sourcePatch || cropSelection(
                             originalImg,
                             finalSelection,
                             PATCH_CONTEXT_PADDING + 4
                         )
-                        const colorRetry = await runGenerateRequestWithRetry(
-                            colorRetryInputPatch,
-                            colorPrompt,
-                            1
+                        const correctedImageData = await tintChangedDarkTextToColor(
+                            colorCorrectionSource,
+                            finalImageData,
+                            sourceDominantColor
                         )
-                        if (colorRetry.success && colorRetry.imageData) {
-                            const retryDominantColor = await getDominantTextColorFromPatch(colorRetry.imageData)
-                            const retryDominantRgb = retryDominantColor ? hexToRgb(retryDominantColor) : null
-                            if (retryDominantRgb && !isRgbNearBlack(retryDominantRgb)) {
-                                const retryDistance = colorDistance(sourceDominantRgb, retryDominantRgb)
-                                if (!generatedDominantRgb || retryDistance + 10 < currentDistance) {
-                                    finalImageData = colorRetry.imageData
-                                    inputPatchForFinalCheck = colorRetryInputPatch
+
+                        if (correctedImageData) {
+                            const correctedDominantColor = await getDominantTextColorFromPatch(correctedImageData)
+                            const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
+                            if (correctedDominantRgb && !isRgbNearBlack(correctedDominantRgb)) {
+                                const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
+                                if (!generatedDominantRgb || correctedDistance + 6 < currentDistance) {
+                                    finalImageData = correctedImageData
                                 }
                             }
                         }
@@ -1669,6 +1733,81 @@ export function EditorToolbar() {
             }
         }
 
+        let colorAdjustedResultData = result.imageData
+        if (sourceSelections.length > 0) {
+            const sampleDominantTextColor = createSelectionDominantTextColorSampler(originalImg)
+            const selectionDominantColorMap = new Map<string, string>(
+                sourceSelections
+                    .map((selection) => [selection.id, sampleDominantTextColor(selection)] as const)
+                    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+            )
+
+            if (selectionDominantColorMap.size > 0) {
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        locale === "zh"
+                            ? "遮罩结果处理中：执行文字颜色校正..."
+                            : "Mask result post-processing: applying text color correction..."
+                    )
+                }
+
+                for (let i = 0; i < sourceSelections.length; i++) {
+                    const selection = sourceSelections[i]
+                    const sourceDominantColor = selectionDominantColorMap.get(selection.id)
+                    if (!sourceDominantColor) continue
+
+                    const sourceDominantRgb = hexToRgb(sourceDominantColor)
+                    if (!sourceDominantRgb || !isRgbChromatic(sourceDominantRgb)) continue
+
+                    const currentFullResultImage = await loadImage(colorAdjustedResultData)
+                    const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
+                    const generatedPatch = cropSelection(currentFullResultImage, selection, PATCH_CONTEXT_PADDING)
+
+                    const generatedDominantColor = await getDominantTextColorFromPatch(generatedPatch)
+                    const generatedDominantRgb = generatedDominantColor ? hexToRgb(generatedDominantColor) : null
+                    const currentDistance = generatedDominantRgb
+                        ? colorDistance(sourceDominantRgb, generatedDominantRgb)
+                        : Number.POSITIVE_INFINITY
+                    const needColorCorrection =
+                        !generatedDominantRgb ||
+                        isRgbNearBlack(generatedDominantRgb) ||
+                        currentDistance > 120
+
+                    if (!needColorCorrection) continue
+
+                    const correctedPatch = await tintChangedDarkTextToColor(
+                        sourcePatch,
+                        generatedPatch,
+                        sourceDominantColor
+                    )
+                    if (!correctedPatch) continue
+
+                    const correctedDominantColor = await getDominantTextColorFromPatch(correctedPatch)
+                    const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
+                    if (!correctedDominantRgb || isRgbNearBlack(correctedDominantRgb)) continue
+
+                    const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
+                    if (generatedDominantRgb && correctedDistance + 6 >= currentDistance) continue
+
+                    colorAdjustedResultData = await compositeImage(
+                        currentFullResultImage,
+                        correctedPatch,
+                        selection,
+                        PATCH_CONTEXT_PADDING,
+                        PATCH_BLEND_PADDING
+                    )
+
+                    if (updateToolbarProgress) {
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `遮罩结果颜色校正 ${i + 1}/${sourceSelections.length}`
+                                : `Mask color correction ${i + 1}/${sourceSelections.length}`
+                        )
+                    }
+                }
+            }
+        }
+
         if (trackSelectionProgress) {
             sourceSelections.forEach((selection) => setSelectionProgress(imageId, selection.id, "completed"))
         }
@@ -1684,12 +1823,12 @@ export function EditorToolbar() {
         }
 
         if (!sourceSelections.length) {
-            return result.imageData
+            return colorAdjustedResultData
         }
 
         return compositeSelectionsFromFullImage(
             composeBaseImg,
-            result.imageData,
+            colorAdjustedResultData,
             sourceSelections,
             MASK_BLEND_PADDING
         )
