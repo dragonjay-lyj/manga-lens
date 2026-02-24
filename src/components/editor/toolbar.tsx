@@ -517,6 +517,27 @@ export function EditorToolbar() {
         }, image)
     }
 
+    const expandSelectionForTranslatedLayout = (
+        selection: Selection,
+        image: HTMLImageElement,
+        intensity: number = 1
+    ): Selection => {
+        const isLikelyVertical = selection.height > selection.width * 1.2
+        const horizontalPaddingRatio = isLikelyVertical ? 0.32 : 0.18
+        const verticalPaddingRatio = isLikelyVertical ? 0.16 : 0.2
+
+        const padX = Math.round(selection.width * horizontalPaddingRatio * intensity)
+        const padY = Math.round(selection.height * verticalPaddingRatio * intensity)
+
+        return clampSelectionToImageBounds({
+            ...selection,
+            x: selection.x - padX,
+            y: selection.y - padY,
+            width: selection.width + padX * 2,
+            height: selection.height + padY * 2,
+        }, image)
+    }
+
     const expandSelectionFromCenter = (
         selection: Selection,
         image: HTMLImageElement,
@@ -833,13 +854,16 @@ export function EditorToolbar() {
         }
 
         const englishTarget = directionMeta.targetLangCode === "en"
+        const total = selections.length
+        const hasManySelections = total >= 10
+        const layoutExpandIntensity = hasManySelections ? 0.82 : 1
         const selectionDarkRatioMap = new Map<string, number>(
             selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
         )
         const layoutSelections = selections.map((selection) =>
             englishTarget
-                ? expandSelectionForEnglishLayout(selection, originalImg)
-                : selection
+                ? expandSelectionForEnglishLayout(selection, originalImg, layoutExpandIntensity)
+                : expandSelectionForTranslatedLayout(selection, originalImg, layoutExpandIntensity)
         )
 
         const indexedSelections = layoutSelections.map((selection, index) => ({
@@ -847,8 +871,6 @@ export function EditorToolbar() {
             index: index + 1,
         }))
         const selectionIndexMap = new Map(indexedSelections.map((item) => [item.selection.id, item.index]))
-        const total = selections.length
-        const hasManySelections = total >= 10
         const requestedConcurrency = settings.isSerial
             ? 1
             : Math.max(1, Math.min(4, settings.concurrency || 1))
@@ -1206,7 +1228,8 @@ export function EditorToolbar() {
                 }
                 if (!englishTarget && directionMeta.targetLangCode === "zh" && sourcePatch) {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
-                    const likelyOverflow = edgeInkRatio > 0.46
+                    const isLikelyVertical = selection.height > selection.width * 1.2
+                    const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.32 : 0.4)
                     if (likelyOverflow) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
@@ -1215,7 +1238,9 @@ export function EditorToolbar() {
                                     : `Selection #${index} likely clipped for Chinese, retrying with center-based expansion...`
                             )
                         }
-                        const overflowSelection = expandSelectionFromCenter(selection, originalImg, 1.34, 1.28)
+                        const overflowSelection = isLikelyVertical
+                            ? expandSelectionFromCenter(selection, originalImg, 1.58, 1.34)
+                            : expandSelectionFromCenter(selection, originalImg, 1.4, 1.32)
                         const overflowPrompt = buildCenterFillFallbackPrompt(selectionPrompt)
                         const overflowPatch = cropSelection(
                             originalImg,
