@@ -575,6 +575,41 @@ export function EditorToolbar() {
         }, image)
     }
 
+    const buildSafeCompositeSelection = (
+        baseSelection: Selection,
+        candidateSelection: Selection,
+        image: HTMLImageElement
+    ): Selection => {
+        const base = clampSelectionToImageBounds(baseSelection, image)
+        const candidate = clampSelectionToImageBounds(candidateSelection, image)
+
+        const expandX = Math.max(8, Math.round(base.width * 0.12))
+        const expandY = Math.max(8, Math.round(base.height * 0.12))
+
+        const baseRight = base.x + base.width
+        const baseBottom = base.y + base.height
+        const candidateRight = candidate.x + candidate.width
+        const candidateBottom = candidate.y + candidate.height
+
+        const leftBound = Math.max(0, base.x - expandX)
+        const topBound = Math.max(0, base.y - expandY)
+        const rightBound = Math.min(image.width, baseRight + expandX)
+        const bottomBound = Math.min(image.height, baseBottom + expandY)
+
+        const safeLeft = Math.max(leftBound, Math.min(base.x, candidate.x))
+        const safeTop = Math.max(topBound, Math.min(base.y, candidate.y))
+        const safeRight = Math.min(rightBound, Math.max(baseRight, candidateRight))
+        const safeBottom = Math.min(bottomBound, Math.max(baseBottom, candidateBottom))
+
+        return clampSelectionToImageBounds({
+            ...base,
+            x: safeLeft,
+            y: safeTop,
+            width: Math.max(1, safeRight - safeLeft),
+            height: Math.max(1, safeBottom - safeTop),
+        }, image)
+    }
+
     const computeImageDifferenceRatio = async (beforeDataUrl: string, afterDataUrl: string): Promise<number> => {
         try {
             const before = await loadImage(beforeDataUrl)
@@ -997,6 +1032,7 @@ export function EditorToolbar() {
         const total = selections.length
         const hasManySelections = total >= 10
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
+        const sourceSelectionMap = new Map(selections.map((selection) => [selection.id, selection]))
         const useColorAnchors = trackSelectionProgress
         const sampleDominantTextColor = useColorAnchors
             ? createSelectionDominantTextColorSampler(originalImg)
@@ -1062,6 +1098,9 @@ export function EditorToolbar() {
                     "若文本无法完全识别，给出最贴近语境的保守译法，不能留空。",
                 ]
                 : []
+            const styleConsistencyHint = locale === "zh"
+                ? "同一页面多个对白框风格一致时，当前选区需保持相同字体家族与字重，不要突然切换字体风格。"
+                : "When nearby bubbles share a style on the same page, keep the same font family and weight for this selection."
             const englishLayoutHints = englishTarget
                 ? [
                     "目标语言为英文：请按气泡空间重排断行，避免文字溢出或贴边。",
@@ -1089,6 +1128,7 @@ export function EditorToolbar() {
                 "【当前选区约束】",
                 layoutHint,
                 universalColorHint,
+                styleConsistencyHint,
                 ...(explicitColorAnchorHint ? [explicitColorAnchorHint] : []),
                 ...englishLayoutHints,
                 ...hardHints,
@@ -1257,6 +1297,7 @@ export function EditorToolbar() {
         for (const { selection, index } of workItems) {
             let result = results.get(selection.id)
             if (result?.success && result.imageData) {
+                const sourceSelection = sourceSelectionMap.get(selection.id) || selection
                 const sourcePatch = inputPatchBySelection.get(selection.id)
                 const isHard = hardSelectionIds.has(selection.id)
                 const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
@@ -1485,7 +1526,12 @@ export function EditorToolbar() {
                 if (trackSelectionProgress) {
                     setSelectionProgress(imageId, selection.id, "completed")
                 }
-                patches.push({ base64: finalImageData, selection: finalSelection })
+                const compositeSelection = buildSafeCompositeSelection(
+                    sourceSelection,
+                    finalSelection,
+                    originalImg
+                )
+                patches.push({ base64: finalImageData, selection: compositeSelection })
                 continue
             }
 
