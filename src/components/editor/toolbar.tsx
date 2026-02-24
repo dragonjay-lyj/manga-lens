@@ -461,8 +461,8 @@ export function EditorToolbar() {
         "2) Never crop letters. If needed, reduce font size and add line breaks.",
         "3) Keep natural comic reading order and center alignment.",
         useWhiteOutline
-            ? "4) Use black text with visible white stroke/outline to keep readability on complex background."
-            : "4) Keep stroke/outline style readable and consistent.",
+            ? "4) Keep original text color whenever possible; if contrast is insufficient, strengthen outline/stroke while preserving original color family."
+            : "4) Keep original text color and stroke/outline style readable and consistent.",
     ].join("\n")
 
     const buildCenterFillFallbackPrompt = (basePrompt: string) => [
@@ -888,8 +888,8 @@ export function EditorToolbar() {
                     "目标语言为英文：请按气泡空间重排断行，避免文字溢出或贴边。",
                     "若英文句子偏长，请优先换行与缩小字号，确保整段完整显示。",
                     useWhiteOutline
-                        ? "背景较复杂：请使用黑字 + 白描边（或白色轮廓）增强可读性。"
-                        : "保持原有描边风格并保证英文可读性。",
+                        ? "背景较复杂：优先保留原文字色，并通过增强描边/轮廓提升可读性；不要统一改成黑字。"
+                        : "保持原有文字颜色与描边风格并保证英文可读性。",
                 ]
                 : []
 
@@ -1444,7 +1444,7 @@ export function EditorToolbar() {
                 "English rendering quality rules:",
                 "1) Keep text fully inside bubble bounds with balanced line breaks.",
                 "2) Avoid overflow and tiny fonts. Prioritize readability for scanlation style.",
-                "3) On non-white background, use black text with visible white outline/stroke.",
+                "3) Preserve original text color first; only increase outline/stroke contrast when needed.",
             ].join("\n")
             : basePrompt
         const fullSelection: Selection = {
@@ -2235,9 +2235,9 @@ export function EditorToolbar() {
     const hasCompletedImages = images.some((img) => img.resultUrl)
 
     return (
-        <div className="h-14 border-b border-border glass flex items-center justify-between px-4">
+        <div className="h-14 border-b border-border glass flex items-center gap-3 px-4 overflow-hidden">
             {/* 左侧：视图切换 */}
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-4 shrink-0 min-w-0">
                 <Tabs
                     value={showResult ? "result" : "original"}
                     onValueChange={(value) => setShowResult(value === "result")}
@@ -2267,7 +2267,8 @@ export function EditorToolbar() {
             </div>
 
             {/* 右侧：操作按钮 */}
-            <div className="flex items-center gap-2">
+            <div className="ml-auto min-w-0 flex-1 overflow-x-auto [scrollbar-width:thin]">
+                <div className="flex w-max items-center gap-2 pl-2 pb-1 [&>*]:shrink-0">
                 <Button
                     onClick={handleGenerate}
                     disabled={isProcessing || !currentImage}
@@ -2387,6 +2388,7 @@ export function EditorToolbar() {
                     <FileCode2 className="h-4 w-4 mr-2" />
                     HTML
                 </Button>
+                </div>
             </div>
         </div>
     )
