@@ -636,6 +636,13 @@ export async function downloadImagesAsZip(
     saveAs(content, zipFilename)
 }
 
+export async function downloadImagesAsCbz(
+    images: Array<{ name: string; dataUrl: string }>,
+    cbzFilename: string = "manga-lens-results.cbz"
+): Promise<void> {
+    await downloadImagesAsZip(images, cbzFilename)
+}
+
 export async function downloadImagesAsPdf(
     images: Array<{ name: string; dataUrl: string }>,
     filename: string = "manga-lens-results.pdf"

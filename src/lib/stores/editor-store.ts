@@ -100,6 +100,7 @@ export interface EditorSettings {
     concurrency: number
     isSerial: boolean
     maxRetries: number
+    ocrEngine: "auto" | "comic_text_detector" | "manga_ocr" | "paddle_ocr" | "baidu_ocr" | "ai_vision"
     translationDirection: TranslationDirection
     sourceLanguageAllowlist: SourceLanguageCode[]
     enableAngleFilter: boolean
@@ -113,10 +114,18 @@ export interface EditorSettings {
     enableBubbleDetection: boolean
     enableSelectionOcr: boolean
     enablePatchEditor: boolean
+    repairEngine: "ai" | "lama"
     defaultVerticalText: boolean
     useMaskMode: boolean
     useReverseMaskMode: boolean
     enablePretranslate: boolean
+    highQualityMode: boolean
+    highQualityBatchSize: number
+    highQualitySessionResetBatches: number
+    highQualityRpmLimit: number
+    highQualityLowReasoning: boolean
+    highQualityForceJson: boolean
+    highQualityContextPrompt: string
     exportFormat: ExportFormat
     exportQuality: number // 0-100，仅用于 jpg/webp
     useServerApi: boolean // 使用网站提供的 API
@@ -228,6 +237,7 @@ const defaultSettings: EditorSettings = {
     concurrency: 3,
     isSerial: false,
     maxRetries: 2,
+    ocrEngine: "auto",
     translationDirection: "ja2zh",
     sourceLanguageAllowlist: [],
     enableAngleFilter: false,
@@ -241,10 +251,18 @@ const defaultSettings: EditorSettings = {
     enableBubbleDetection: true,
     enableSelectionOcr: true,
     enablePatchEditor: true,
+    repairEngine: "ai",
     defaultVerticalText: true,
     useMaskMode: false,
     useReverseMaskMode: false,
     enablePretranslate: false,
+    highQualityMode: false,
+    highQualityBatchSize: 4,
+    highQualitySessionResetBatches: 3,
+    highQualityRpmLimit: 0,
+    highQualityLowReasoning: false,
+    highQualityForceJson: true,
+    highQualityContextPrompt: "",
     exportFormat: 'png',
     exportQuality: 90,
     useServerApi: false,

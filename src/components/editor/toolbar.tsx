@@ -10,6 +10,7 @@ import {
     Download,
     Package,
     Loader2,
+    FileArchive,
     FileCode2,
     FileJson2,
     FileText,
@@ -43,6 +44,7 @@ import {
     getFileExtension,
     downloadImage,
     downloadImagesAsZip,
+    downloadImagesAsCbz,
     downloadImagesAsHtml,
     downloadImagesAsPdf,
     downloadImagesWithSidecarZip,
@@ -104,6 +106,8 @@ export function EditorToolbar() {
     const useMaskMode = settings.useMaskMode
     const useReverseMaskMode = settings.useReverseMaskMode ?? false
     const enablePretranslate = settings.enablePretranslate
+    const ocrEngine = settings.ocrEngine ?? "auto"
+    const repairEngine = settings.repairEngine ?? "ai"
     const activeMaskMode = useMaskMode
         ? (useReverseMaskMode ? "inverse-mask" : "mask")
         : "patch"
@@ -323,6 +327,43 @@ export function EditorToolbar() {
         return lastResult
     }
 
+    const runLamaInpaintRequest = async (
+        imageData: string,
+        maskData: string
+    ): Promise<GenerateImageResponse> => {
+        try {
+            const res = await fetch("/api/ai/inpaint", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    maskData,
+                }),
+            })
+            if (!res.ok) {
+                return {
+                    success: false,
+                    error: await parseApiError(
+                        res,
+                        locale === "zh" ? "LAMA 修复请求失败" : "LAMA inpaint request failed"
+                    ),
+                }
+            }
+            const data = await res.json()
+            return {
+                success: true,
+                imageData: data.imageData,
+            }
+        } catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error
+                    ? error.message
+                    : (locale === "zh" ? "LAMA 修复请求失败" : "LAMA inpaint request failed"),
+            }
+        }
+    }
+
     const runDetectTextRequest = async (
         imageData: string,
         targetLanguage: string,
@@ -330,11 +371,14 @@ export function EditorToolbar() {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const useServerDetectionPipeline = ocrEngine !== "ai_vision"
+        const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
+        const preferComicDetector = ocrEngine === "auto" || ocrEngine === "comic_text_detector"
         const detectionRegionHints =
             imageWidth && imageHeight
                 ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
                 : {}
-        const detectCandidates = settings.useServerApi
+        const detectCandidates = settings.useServerApi || useServerDetectionPipeline
             ? await buildDetectPayloadCandidates(imageData, [
                 { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
                 { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
@@ -345,7 +389,7 @@ export function EditorToolbar() {
             ])
             : [imageData]
 
-        if (!settings.useServerApi) {
+        if (!settings.useServerApi && !useServerDetectionPipeline) {
             return detectTextBlocks({
                 imageData: detectCandidates[0],
                 config: {
@@ -378,7 +422,8 @@ export function EditorToolbar() {
                         sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
                         imageWidth,
                         imageHeight,
-                        preferComicDetector: true,
+                        preferComicDetector,
+                        ocrEngine,
                         ...detectionRegionHints,
                     }),
                 })
@@ -393,11 +438,14 @@ export function EditorToolbar() {
                     if (canRetryWithSmallerPayload) {
                         continue
                     }
-                    return {
-                        success: false,
-                        blocks: [],
-                        error: parsedError,
+                    if (strictServerDetectionEngine || settings.useServerApi) {
+                        return {
+                            success: false,
+                            blocks: [],
+                            error: parsedError,
+                        }
                     }
+                    break
                 }
 
                 const data = await res.json()
@@ -409,17 +457,36 @@ export function EditorToolbar() {
                 lastError = error instanceof Error
                     ? error.message
                     : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed")
-                if (i >= detectCandidates.length - 1) {
+                if (strictServerDetectionEngine || settings.useServerApi || i >= detectCandidates.length - 1) {
                     break
                 }
             }
         }
 
-        return {
-            success: false,
-            blocks: [],
-            error: lastError,
+        if (strictServerDetectionEngine || settings.useServerApi) {
+            return {
+                success: false,
+                blocks: [],
+                error: lastError,
+            }
         }
+
+        return detectTextBlocks({
+            imageData: imageData,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
+            targetLanguage,
+            sourceLanguageHint: getSourceLanguageHintForDetection(),
+            sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
+            ...detectionRegionHints,
+        }).then((response) => ({
+            ...response,
+            blocks: response.success ? applyAngleThresholdFilter(response.blocks || []) : (response.blocks || []),
+        }))
     }
 
     const getShortError = (errorText: string) =>
@@ -919,7 +986,8 @@ export function EditorToolbar() {
             detectedTextBlocks?: DetectedTextBlock[]
         }>
     ) => {
-        if (!(settings.chapterBulkTranslate ?? false)) {
+        const chapterContextEnabled = (settings.chapterBulkTranslate ?? false) || (settings.highQualityMode ?? false)
+        if (!chapterContextEnabled) {
             return basePrompt
         }
 
@@ -964,7 +1032,39 @@ export function EditorToolbar() {
                     ...glossaryLines,
                 ]),
         ].join("\n")
-    }, [locale, settings.chapterBulkTranslate])
+    }, [locale, settings.chapterBulkTranslate, settings.highQualityMode])
+
+    const buildHighQualityPrompt = useCallback((basePrompt: string) => {
+        if (!(settings.highQualityMode ?? false)) {
+            return basePrompt
+        }
+
+        const lines: string[] = [
+            basePrompt,
+            "",
+            locale === "zh" ? "【高质量翻译模式（Beta）】" : "[High-quality translation mode (Beta)]",
+            locale === "zh"
+                ? "请在多页上下文中保持角色称呼、术语和语气一致；同名词请尽量统一译法。"
+                : "Keep character voice, terms, and naming consistent across multiple pages.",
+        ]
+
+        if (settings.highQualityLowReasoning ?? false) {
+            lines.push(
+                locale === "zh"
+                    ? "低推理模式：优先稳定输出，减少冗长创作性改写。"
+                    : "Low-reasoning mode: prioritize stable output over creative paraphrasing."
+            )
+        }
+
+        const customContext = (settings.highQualityContextPrompt || "").trim()
+        if (customContext) {
+            lines.push(
+                locale === "zh" ? `附加上下文：${customContext}` : `Additional context: ${customContext}`
+            )
+        }
+
+        return lines.join("\n")
+    }, [locale, settings.highQualityContextPrompt, settings.highQualityLowReasoning, settings.highQualityMode])
 
     const buildPretranslateContextPrompt = async (
         imageId: string,
@@ -1051,7 +1151,29 @@ export function EditorToolbar() {
             )
         }
 
+        const forceJsonContext = settings.highQualityMode && (settings.highQualityForceJson ?? true)
         const lines = scopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
+            if (forceJsonContext) {
+                return JSON.stringify({
+                    index: index + 1,
+                    sourceText: block.sourceText || "",
+                    translatedText: block.translatedText || "",
+                    bbox: {
+                        x: Number(block.bbox.x.toFixed(4)),
+                        y: Number(block.bbox.y.toFixed(4)),
+                        width: Number(block.bbox.width.toFixed(4)),
+                        height: Number(block.bbox.height.toFixed(4)),
+                    },
+                    style: {
+                        textColor: block.style?.textColor || null,
+                        outlineColor: block.style?.outlineColor || null,
+                        angle: block.style?.angle ?? null,
+                        orientation: block.style?.orientation || "auto",
+                        alignment: block.style?.alignment || "auto",
+                        fontWeight: block.style?.fontWeight || "auto",
+                    },
+                })
+            }
             const styleHint = block.style
                 ? `style: color=${block.style.textColor || "?"}, outline=${block.style.outlineColor || "?"}, angle=${block.style.angle ?? "?"}, orientation=${block.style.orientation || "auto"}, align=${block.style.alignment || "auto"}, weight=${block.style.fontWeight || "auto"}`
                 : "style: (none)"
@@ -1070,9 +1192,13 @@ export function EditorToolbar() {
             prompt: [
             basePrompt,
             "",
-            "以下是视觉模型预翻译结果（可用于保持台词内容与位置）：",
+            forceJsonContext
+                ? "以下是视觉模型预翻译 JSON（用于保持台词内容与位置）："
+                : "以下是视觉模型预翻译结果（可用于保持台词内容与位置）：",
             ...lines,
-            "请优先遵循以上翻译与布局信息。",
+            forceJsonContext
+                ? "请严格依据以上 JSON 的译文与 bbox 排版信息执行。"
+                : "请优先遵循以上翻译与布局信息。",
             ].join("\n"),
         }
     }
@@ -1957,36 +2083,50 @@ export function EditorToolbar() {
         updateToolbarProgress: boolean
     ) => {
         const originalImg = await loadImage(imageUrl)
+        const useLamaRepair = repairEngine === "lama"
         if (updateToolbarProgress) {
             setProgress(10)
             setProgressText("1/2")
             setProgressDetail(
-                locale === "zh"
-                    ? "按画笔掩膜准备修复输入..."
-                    : "Preparing repair image from brush mask..."
+                useLamaRepair
+                    ? (locale === "zh" ? "请求 LAMA 修复服务..." : "Requesting LAMA inpaint service...")
+                    : (locale === "zh" ? "按画笔掩膜准备修复输入..." : "Preparing repair image from brush mask...")
             )
         }
 
-        const maskedInput = await createImageWithBrushMaskFilled(originalImg, repairMaskUrl, "#ffffff")
-        const repairPrompt = [
-            basePrompt,
-            "",
-            locale === "zh"
-                ? "【修复画笔模式】仅重绘白色掩膜区域，保持其他区域像素不变。"
-                : "[Repair brush mode] Repaint only white masked regions. Keep all other pixels unchanged.",
-            locale === "zh"
-                ? "必须保持原图分辨率、角色结构与背景透视，不要扩大修改范围。"
-                : "Keep original resolution, character structure and perspective. Do not expand edit area.",
-        ].join("\n")
-
-        const result = await runGenerateRequestWithRetry(
-            maskedInput,
-            repairPrompt,
-            resolveRetryLimit()
-        )
+        const result = useLamaRepair
+            ? await runLamaInpaintRequest(
+                await imageToDataUrl(originalImg),
+                repairMaskUrl
+            )
+            : await (async () => {
+                const maskedInput = await createImageWithBrushMaskFilled(originalImg, repairMaskUrl, "#ffffff")
+                const repairPrompt = [
+                    basePrompt,
+                    "",
+                    locale === "zh"
+                        ? "【修复画笔模式】仅重绘白色掩膜区域，保持其他区域像素不变。"
+                        : "[Repair brush mode] Repaint only white masked regions. Keep all other pixels unchanged.",
+                    locale === "zh"
+                        ? "必须保持原图分辨率、角色结构与背景透视，不要扩大修改范围。"
+                        : "Keep original resolution, character structure and perspective. Do not expand edit area.",
+                ].join("\n")
+                return runGenerateRequestWithRetry(
+                    maskedInput,
+                    repairPrompt,
+                    resolveRetryLimit()
+                )
+            })()
 
         if (!result.success || !result.imageData) {
-            throw new Error(result.error || (locale === "zh" ? "修复画笔生成失败" : "Repair brush generation failed"))
+            throw new Error(
+                result.error ||
+                (
+                    useLamaRepair
+                        ? (locale === "zh" ? "LAMA 修复失败" : "LAMA inpaint failed")
+                        : (locale === "zh" ? "修复画笔生成失败" : "Repair brush generation failed")
+                )
+            )
         }
 
         if (updateToolbarProgress) {
@@ -2076,13 +2216,13 @@ export function EditorToolbar() {
         setImageStatus(currentImage.id, "processing")
 
         try {
-            const basePrompt = buildMangaEditPrompt(prompt, {
+            const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
                 preferredFontFamily: settings.preferredOutputFontFamily,
-            })
+            }))
             const resultUrl = await processImage(
                 currentImage.id,
                 currentImage.originalUrl,
@@ -2125,6 +2265,8 @@ export function EditorToolbar() {
             return
         }
 
+        const requiresUserApiKey = repairEngine !== "lama"
+
         if (settings.useServerApi) {
             const COST_PER_GENERATION = 10
             const deducted = await deductCoins(COST_PER_GENERATION)
@@ -2132,7 +2274,7 @@ export function EditorToolbar() {
                 return
             }
             toast.info(`已扣除 ${COST_PER_GENERATION} Coins`)
-        } else if (!settings.apiKey) {
+        } else if (requiresUserApiKey && !settings.apiKey) {
             toast.error(t.errors.apiKeyRequired)
             return
         }
@@ -2218,15 +2360,22 @@ export function EditorToolbar() {
         let failedCount = 0
 
         try {
-            const basePrompt = buildMangaEditPrompt(prompt, {
+            const highQualityMode = settings.highQualityMode ?? false
+            const highQualityBatchSize = Math.max(1, Math.min(20, settings.highQualityBatchSize ?? 4))
+            const highQualitySessionResetBatches = Math.max(1, Math.min(50, settings.highQualitySessionResetBatches ?? 3))
+            const highQualityRpmLimit = Math.max(0, Math.min(300, settings.highQualityRpmLimit ?? 0))
+            let nextRequestAt = 0
+            const contextHistory: Array<{ detectedTextBlocks?: DetectedTextBlock[] }> = []
+
+            const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
                 preferredFontFamily: settings.preferredOutputFontFamily,
-            })
-            const chapterPrompt = buildChapterBulkPrompt(basePrompt, imagesToProcess)
-            if ((settings.chapterBulkTranslate ?? false) && chapterPrompt !== basePrompt) {
+            }))
+            const chapterContextEnabled = (settings.chapterBulkTranslate ?? false) || highQualityMode
+            if (chapterContextEnabled) {
                 toast.info(
                     locale === "zh"
                         ? "已启用章节上下文一致性提示"
@@ -2236,6 +2385,18 @@ export function EditorToolbar() {
 
             for (let i = 0; i < imagesToProcess.length; i++) {
                 const img = imagesToProcess[i]
+                if (highQualityMode) {
+                    const resetWindow = highQualityBatchSize * highQualitySessionResetBatches
+                    if (resetWindow > 0 && i > 0 && i % resetWindow === 0) {
+                        contextHistory.splice(0, contextHistory.length)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `已重置章节上下文记忆（第 ${Math.floor(i / highQualityBatchSize)} 批）`
+                                : `Context memory reset at batch ${Math.floor(i / highQualityBatchSize)}`
+                        )
+                    }
+                }
+
                 setImageStatus(img.id, "processing")
                 setProgress((i / imagesToProcess.length) * 100)
                 setProgressText(`${i}/${imagesToProcess.length}`)
@@ -2246,7 +2407,24 @@ export function EditorToolbar() {
                 )
 
                 try {
+                    if (highQualityMode && highQualityRpmLimit > 0) {
+                        const minInterval = Math.ceil(60000 / highQualityRpmLimit)
+                        const waitMs = Math.max(0, nextRequestAt - Date.now())
+                        if (waitMs > 0) {
+                            await new Promise((resolve) => setTimeout(resolve, waitMs))
+                        }
+                        nextRequestAt = Date.now() + minInterval
+                    }
+
                     const selections = applyToAll ? templateSelections : (img.selections || [])
+                    const chapterPrompt = chapterContextEnabled
+                        ? buildChapterBulkPrompt(
+                            basePrompt,
+                            highQualityMode
+                                ? contextHistory.slice(-highQualityBatchSize)
+                                : imagesToProcess
+                        )
+                        : basePrompt
                     const resultUrl = await processImage(
                         img.id,
                         img.originalUrl,
@@ -2263,6 +2441,15 @@ export function EditorToolbar() {
                         mode: activeMaskMode,
                         selectionCount: selections.length,
                     })
+
+                    if (highQualityMode) {
+                        const latestImage = useEditorStore
+                            .getState()
+                            .images.find((item) => item.id === img.id)
+                        contextHistory.push({
+                            detectedTextBlocks: latestImage?.detectedTextBlocks || img.detectedTextBlocks || [],
+                        })
+                    }
                 } catch (error) {
                     const errorMessage = error instanceof Error ? error.message : "未知错误"
                     failedCount++
@@ -2404,13 +2591,13 @@ export function EditorToolbar() {
                     : `Detected ${detectedSelections.length} selections, generating...`
             )
 
-            const basePrompt = buildMangaEditPrompt(prompt, {
+            const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
                 preferredFontFamily: settings.preferredOutputFontFamily,
-            })
+            }))
 
             const resultUrl = await processImage(
                 currentImage.id,
@@ -2481,13 +2668,13 @@ export function EditorToolbar() {
         setImageStatus(currentImage.id, "processing")
 
         try {
-            const basePrompt = buildMangaEditPrompt(prompt, {
+            const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
                 direction: settings.translationDirection,
                 sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
                 comicType: settings.comicType,
                 textStylePreset: settings.textStylePreset,
                 preferredFontFamily: settings.preferredOutputFontFamily,
-            })
+            }))
             const resultUrl = await processImageWithRepairMask(
                 currentImage.id,
                 currentImage.originalUrl,
@@ -2502,6 +2689,7 @@ export function EditorToolbar() {
             void logUsage("generate", {
                 source: settings.useServerApi ? "server_api" : "custom_key",
                 mode: "repair_brush",
+                repairEngine,
             })
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "未知错误"
@@ -2580,6 +2768,36 @@ export function EditorToolbar() {
                 locale === "zh"
                     ? `PDF 导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `PDF export failed: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }
+
+    const handleDownloadCbz = async () => {
+        const completedImages = images.filter((img) => img.resultUrl)
+        if (completedImages.length === 0) {
+            toast.warning(locale === "zh" ? "没有可导出的结果" : "No results to export")
+            return
+        }
+
+        try {
+            const filesToExport = await Promise.all(
+                completedImages.map(async (img, index) => ({
+                    name: buildExportFilename(`page-${String(index + 1).padStart(3, "0")}`),
+                    dataUrl: await toExportDataUrl(img.resultUrl!),
+                }))
+            )
+            await downloadImagesAsCbz(filesToExport, `manga-lens-results-${Date.now()}.cbz`)
+            void logUsage("export", { type: "cbz", count: completedImages.length, format: settings.exportFormat })
+            toast.success(
+                locale === "zh"
+                    ? `已导出 CBZ（${completedImages.length} 页）`
+                    : `CBZ exported (${completedImages.length} pages)`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `CBZ 导出失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `CBZ export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
         }
     }
@@ -2819,6 +3037,15 @@ export function EditorToolbar() {
                 >
                     <FileText className="h-4 w-4 mr-2" />
                     PDF
+                </Button>
+
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadCbz}
+                    disabled={!hasCompletedImages}
+                >
+                    <FileArchive className="h-4 w-4 mr-2" />
+                    CBZ
                 </Button>
 
                 <Button

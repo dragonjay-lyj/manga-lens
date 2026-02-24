@@ -53,7 +53,7 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
     {
         key: "server_api_provider",
         value: "gemini",
-        description: "网站统一 AI Provider（gemini/openai）",
+        description: "网站统一 AI Provider（gemini/openai-compatible）",
         is_encrypted: false,
     },
     {
@@ -96,6 +96,84 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
         key: "comic_text_detector_api_key",
         value: "",
         description: "comic-text-detector 服务 API Key（可选）",
+        is_encrypted: true,
+    },
+    {
+        key: "manga_ocr_enabled",
+        value: "false",
+        description: "是否启用 MangaOCR 服务",
+        is_encrypted: false,
+    },
+    {
+        key: "manga_ocr_base_url",
+        value: "",
+        description: "MangaOCR 服务地址（例如 http://127.0.0.1:8001）",
+        is_encrypted: false,
+    },
+    {
+        key: "manga_ocr_api_key",
+        value: "",
+        description: "MangaOCR 服务 API Key（可选）",
+        is_encrypted: true,
+    },
+    {
+        key: "paddle_ocr_enabled",
+        value: "false",
+        description: "是否启用 PaddleOCR 服务",
+        is_encrypted: false,
+    },
+    {
+        key: "paddle_ocr_base_url",
+        value: "",
+        description: "PaddleOCR 服务地址（例如 http://127.0.0.1:8002）",
+        is_encrypted: false,
+    },
+    {
+        key: "paddle_ocr_api_key",
+        value: "",
+        description: "PaddleOCR 服务 API Key（可选）",
+        is_encrypted: true,
+    },
+    {
+        key: "baidu_ocr_enabled",
+        value: "false",
+        description: "是否启用百度 OCR",
+        is_encrypted: false,
+    },
+    {
+        key: "baidu_ocr_api_key",
+        value: "",
+        description: "百度 OCR API Key",
+        is_encrypted: true,
+    },
+    {
+        key: "baidu_ocr_secret_key",
+        value: "",
+        description: "百度 OCR Secret Key",
+        is_encrypted: true,
+    },
+    {
+        key: "baidu_ocr_base_url",
+        value: "https://aip.baidubce.com/rest/2.0/ocr/v1/general",
+        description: "百度 OCR 接口地址（可覆盖）",
+        is_encrypted: false,
+    },
+    {
+        key: "lama_inpaint_enabled",
+        value: "false",
+        description: "是否启用 LAMA 修复服务",
+        is_encrypted: false,
+    },
+    {
+        key: "lama_inpaint_base_url",
+        value: "",
+        description: "LAMA 修复服务地址（例如 http://127.0.0.1:8080）",
+        is_encrypted: false,
+    },
+    {
+        key: "lama_inpaint_api_key",
+        value: "",
+        description: "LAMA 修复服务 API Key（可选）",
         is_encrypted: true,
     },
 ]

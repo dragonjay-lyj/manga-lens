@@ -9,6 +9,7 @@ import {
     normalizeSourceLanguageAllowlist,
 } from "@/lib/ai/ai-service"
 import { detectTextWithComicTextDetector } from "@/lib/ai/comic-text-detector"
+import { detectTextWithExternalOcr, type ExternalOcrEngine } from "@/lib/ai/ocr-adapters"
 import { getServerAiRuntimeConfig, getSystemSettings } from "@/lib/settings"
 
 type DetectBody = {
@@ -21,6 +22,7 @@ type DetectBody = {
     includeRegions?: unknown
     excludeRegions?: unknown
     preferComicDetector?: boolean
+    ocrEngine?: "auto" | "comic_text_detector" | "manga_ocr" | "paddle_ocr" | "baidu_ocr" | "ai_vision"
 }
 
 type DetectResponseSummary = {
@@ -41,9 +43,82 @@ type DetectCacheEntry = {
     payload: DetectResponsePayload
 }
 
+type DetectOcrEngine = "auto" | "comic_text_detector" | "manga_ocr" | "paddle_ocr" | "baidu_ocr" | "ai_vision"
+
 const DETECT_CACHE_TTL_MS = 30 * 60 * 1000
 const DETECT_CACHE_MAX_ENTRIES = 200
 const detectResponseCache = new Map<string, DetectCacheEntry>()
+const EXTERNAL_OCR_ENGINES: ExternalOcrEngine[] = ["manga_ocr", "paddle_ocr", "baidu_ocr"]
+
+type ExternalOcrRuntimeConfig = {
+    manga: {
+        enabled: boolean
+        baseUrl: string
+        apiKey: string
+    }
+    paddle: {
+        enabled: boolean
+        baseUrl: string
+        apiKey: string
+    }
+    baidu: {
+        enabled: boolean
+        apiKey: string
+        secretKey: string
+        baseUrl: string
+    }
+}
+
+function toOcrEngine(value: unknown): DetectOcrEngine {
+    const normalized = String(value || "").trim()
+    if (
+        normalized === "comic_text_detector" ||
+        normalized === "manga_ocr" ||
+        normalized === "paddle_ocr" ||
+        normalized === "baidu_ocr" ||
+        normalized === "ai_vision"
+    ) {
+        return normalized
+    }
+    return "auto"
+}
+
+function isStrictExternalOcrEngine(engine: DetectOcrEngine): engine is ExternalOcrEngine {
+    return engine === "manga_ocr" || engine === "paddle_ocr" || engine === "baidu_ocr"
+}
+
+function buildExternalOcrRuntimeConfig(settings: Record<string, string>): ExternalOcrRuntimeConfig {
+    return {
+        manga: {
+            enabled: settings.manga_ocr_enabled === "true" || Boolean(process.env.MANGA_OCR_BASE_URL),
+            baseUrl: settings.manga_ocr_base_url || process.env.MANGA_OCR_BASE_URL || "",
+            apiKey: settings.manga_ocr_api_key || process.env.MANGA_OCR_API_KEY || "",
+        },
+        paddle: {
+            enabled: settings.paddle_ocr_enabled === "true" || Boolean(process.env.PADDLE_OCR_BASE_URL),
+            baseUrl: settings.paddle_ocr_base_url || process.env.PADDLE_OCR_BASE_URL || "",
+            apiKey: settings.paddle_ocr_api_key || process.env.PADDLE_OCR_API_KEY || "",
+        },
+        baidu: {
+            enabled:
+                settings.baidu_ocr_enabled === "true" ||
+                (Boolean(process.env.BAIDU_OCR_API_KEY) && Boolean(process.env.BAIDU_OCR_SECRET_KEY)),
+            apiKey: settings.baidu_ocr_api_key || process.env.BAIDU_OCR_API_KEY || "",
+            secretKey: settings.baidu_ocr_secret_key || process.env.BAIDU_OCR_SECRET_KEY || "",
+            baseUrl: settings.baidu_ocr_base_url || process.env.BAIDU_OCR_BASE_URL || "",
+        },
+    }
+}
+
+function isExternalOcrConfigured(config: ExternalOcrRuntimeConfig, engine: ExternalOcrEngine): boolean {
+    if (engine === "manga_ocr") {
+        return config.manga.enabled && Boolean(config.manga.baseUrl)
+    }
+    if (engine === "paddle_ocr") {
+        return config.paddle.enabled && Boolean(config.paddle.baseUrl)
+    }
+    return config.baidu.enabled && Boolean(config.baidu.apiKey) && Boolean(config.baidu.secretKey)
+}
 
 function clamp01(value: number) {
     if (!Number.isFinite(value)) return 0
@@ -139,6 +214,7 @@ function buildDetectCacheKey(input: {
     includeRegions: TextDetectionRegion[]
     excludeRegions: TextDetectionRegion[]
     preferComicDetector: boolean
+    ocrEngine: DetectOcrEngine
 }): string {
     const imageHash = createHash("sha1")
         .update(input.imageData.replace(/^data:image\/\w+;base64,/, ""))
@@ -153,6 +229,7 @@ function buildDetectCacheKey(input: {
         stableRegionsKey(input.includeRegions),
         stableRegionsKey(input.excludeRegions),
         input.preferComicDetector ? "1" : "0",
+        input.ocrEngine,
     ].join("::")
 }
 
@@ -213,7 +290,13 @@ export async function POST(request: Request) {
         const excludeRegions = normalizeRegions(body.excludeRegions)
         const sourceLanguageAllowlist = normalizeSourceLanguageAllowlistInput(body.sourceLanguageAllowlist)
         const sourceLanguageHint = body.sourceLanguageHint?.trim() || undefined
-        const preferComicDetector = body.preferComicDetector !== false
+        const requestedOcrEngine = toOcrEngine(body.ocrEngine)
+        const strictComicDetector = requestedOcrEngine === "comic_text_detector"
+        const strictExternalOcr = isStrictExternalOcrEngine(requestedOcrEngine)
+        const preferComicDetector =
+            (requestedOcrEngine === "auto" || requestedOcrEngine === "comic_text_detector") &&
+            body.preferComicDetector !== false
+        const allowExternalOcr = requestedOcrEngine === "auto" || strictExternalOcr
         if (!imageData) {
             return NextResponse.json({ error: "缺少 imageData" }, { status: 400 })
         }
@@ -228,6 +311,7 @@ export async function POST(request: Request) {
             includeRegions,
             excludeRegions,
             preferComicDetector,
+            ocrEngine: requestedOcrEngine,
         })
         const cachedPayload = getCachedDetectPayload(cacheKey)
         if (cachedPayload) {
@@ -245,6 +329,16 @@ export async function POST(request: Request) {
             "comic_text_detector_enabled",
             "comic_text_detector_base_url",
             "comic_text_detector_api_key",
+            "manga_ocr_enabled",
+            "manga_ocr_base_url",
+            "manga_ocr_api_key",
+            "paddle_ocr_enabled",
+            "paddle_ocr_base_url",
+            "paddle_ocr_api_key",
+            "baidu_ocr_enabled",
+            "baidu_ocr_api_key",
+            "baidu_ocr_secret_key",
+            "baidu_ocr_base_url",
         ])
         const comicDetectorEnabled = detectorSettings.comic_text_detector_enabled === "true"
         const comicDetectorBaseUrl =
@@ -255,6 +349,14 @@ export async function POST(request: Request) {
             detectorSettings.comic_text_detector_api_key ||
             process.env.COMIC_TEXT_DETECTOR_API_KEY ||
             ""
+        const externalOcrConfig = buildExternalOcrRuntimeConfig(detectorSettings)
+
+        if (strictComicDetector && (!comicDetectorEnabled || !comicDetectorBaseUrl)) {
+            return NextResponse.json(
+                { error: "comic-text-detector 未启用或未配置服务地址" },
+                { status: 503 }
+            )
+        }
 
         if (preferComicDetector && comicDetectorEnabled && comicDetectorBaseUrl) {
             const detectorResult = await detectTextWithComicTextDetector(
@@ -293,6 +395,102 @@ export async function POST(request: Request) {
                     provider: payload.provider,
                     model: payload.model,
                 })
+            }
+
+            if (strictComicDetector) {
+                return NextResponse.json(
+                    { error: detectorResult.error || "comic-text-detector 识别失败", blocks: [] },
+                    { status: 502 }
+                )
+            }
+        } else if (strictComicDetector) {
+            return NextResponse.json(
+                { error: "comic-text-detector 当前不可用", blocks: [] },
+                { status: 503 }
+            )
+        }
+
+        if (allowExternalOcr) {
+            const enginesToTry: ExternalOcrEngine[] = strictExternalOcr
+                ? [requestedOcrEngine]
+                : EXTERNAL_OCR_ENGINES
+            const imageWidth = Number.isFinite(body.imageWidth) ? body.imageWidth : undefined
+            const imageHeight = Number.isFinite(body.imageHeight) ? body.imageHeight : undefined
+            let firstExternalError = ""
+
+            for (const engine of enginesToTry) {
+                if (!isExternalOcrConfigured(externalOcrConfig, engine)) {
+                    continue
+                }
+
+                const result = await detectTextWithExternalOcr(
+                    engine,
+                    engine === "manga_ocr"
+                        ? {
+                            baseUrl: externalOcrConfig.manga.baseUrl,
+                            apiKey: externalOcrConfig.manga.apiKey,
+                        }
+                        : engine === "paddle_ocr"
+                            ? {
+                                baseUrl: externalOcrConfig.paddle.baseUrl,
+                                apiKey: externalOcrConfig.paddle.apiKey,
+                            }
+                            : {
+                                apiKey: externalOcrConfig.baidu.apiKey,
+                                secretKey: externalOcrConfig.baidu.secretKey,
+                                endpoint: externalOcrConfig.baidu.baseUrl,
+                            },
+                    {
+                        imageData,
+                        targetLanguage,
+                        imageWidth,
+                        imageHeight,
+                    }
+                )
+
+                if (result.success) {
+                    const filteredBlocks = filterBlocksBySourceLanguageAllowlist(
+                        filterBlocksByRegions(result.blocks, includeRegions, excludeRegions),
+                        sourceLanguageAllowlist
+                    )
+                    const payload: DetectResponsePayload = {
+                        blocks: filteredBlocks,
+                        summary: summarizeBlocks(filteredBlocks),
+                        provider: result.provider,
+                        model: result.model,
+                    }
+                    setCachedDetectPayload(cacheKey, payload)
+                    return NextResponse.json({
+                        success: true,
+                        blocks: payload.blocks,
+                        summary: payload.summary,
+                        provider: payload.provider,
+                        model: payload.model,
+                    })
+                }
+
+                if (!firstExternalError && result.error) {
+                    firstExternalError = result.error
+                }
+
+                if (strictExternalOcr) {
+                    return NextResponse.json(
+                        { error: result.error || `${engine} 识别失败`, blocks: [] },
+                        { status: 502 }
+                    )
+                }
+            }
+
+            if (strictExternalOcr) {
+                return NextResponse.json(
+                    {
+                        error:
+                            firstExternalError ||
+                            `${requestedOcrEngine} 未启用或未配置，请在 /admin/settings/ai 完成设置`,
+                        blocks: [],
+                    },
+                    { status: 503 }
+                )
             }
         }
 

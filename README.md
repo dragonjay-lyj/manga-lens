@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MangaLens
 
-## Getting Started
+MangaLens 是一个面向漫画翻译与局部修图的 Next.js 16 应用，支持：
 
-First, run the development server:
+- 多 OCR 通道：`comic-text-detector`、`MangaOCR`、`PaddleOCR`、`百度 OCR`、AI 视觉 OCR
+- 多模型生成：Gemini / OpenAI 兼容接口
+- 修补编辑器：画笔 mask + AI 重绘 / LAMA inpaint
+- 批量导入导出：图片、ZIP/CBZ、PDF、Sidecar
+
+## 本地开发
+
+1. 安装依赖
+
+```bash
+npm ci
+```
+
+2. 配置环境变量
+
+```bash
+cp .env.local.example .env.local
+```
+
+3. 启动开发环境
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+访问：`http://localhost:3000`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## OCR/LAMA 后端配置
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+优先在后台 ` /admin/settings/ai ` 配置，环境变量作为兜底：
 
-## Learn More
+- `COMIC_TEXT_DETECTOR_BASE_URL`
+- `MANGA_OCR_BASE_URL`
+- `PADDLE_OCR_BASE_URL`
+- `BAIDU_OCR_API_KEY` + `BAIDU_OCR_SECRET_KEY`
+- `LAMA_INPAINT_BASE_URL`
 
-To learn more about Next.js, take a look at the following resources:
+对应可选 API Key：
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `COMIC_TEXT_DETECTOR_API_KEY`
+- `MANGA_OCR_API_KEY`
+- `PADDLE_OCR_API_KEY`
+- `LAMA_INPAINT_API_KEY`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Docker 运行
 
-## Deploy on Vercel
+### 方式 1：docker compose（推荐）
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+docker compose up -d --build
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+停止：
+
+```bash
+docker compose down
+```
+
+### 方式 2：纯 Docker
+
+```bash
+docker build -t manga-lens:latest .
+docker run --rm -p 3000:3000 --env-file .env.local manga-lens:latest
+```
+
+## 常用检查
+
+```bash
+npm run lint
+npm run build
+```

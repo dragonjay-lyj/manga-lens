@@ -17,6 +17,11 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select"
+import {
+    OPENAI_COMPATIBLE_PROVIDER_PRESETS,
+    getOpenAICompatibleProviderPreset,
+    guessOpenAICompatibleProviderPresetId,
+} from "@/lib/ai/provider-presets"
 
 interface Setting {
     id: string
@@ -38,6 +43,19 @@ const AI_SETTING_KEYS = [
     "comic_text_detector_enabled",
     "comic_text_detector_base_url",
     "comic_text_detector_api_key",
+    "manga_ocr_enabled",
+    "manga_ocr_base_url",
+    "manga_ocr_api_key",
+    "paddle_ocr_enabled",
+    "paddle_ocr_base_url",
+    "paddle_ocr_api_key",
+    "baidu_ocr_enabled",
+    "baidu_ocr_api_key",
+    "baidu_ocr_secret_key",
+    "baidu_ocr_base_url",
+    "lama_inpaint_enabled",
+    "lama_inpaint_base_url",
+    "lama_inpaint_api_key",
 ]
 
 export default function AdminAiSettingsPage() {
@@ -133,10 +151,27 @@ export default function AdminAiSettingsPage() {
         if (raw === "1K" || raw === "4K") return raw
         return "2K"
     })()
+    const openaiPresetId = useMemo(
+        () => (provider === "openai" ? guessOpenAICompatibleProviderPresetId(getValue("server_api_base_url")) : "openai"),
+        [getValue, provider]
+    )
     const keySetting = getSetting("server_api_key")
     const comicDetectorEnabled = getValue("comic_text_detector_enabled") === "true"
     const comicDetectorBaseUrl = getValue("comic_text_detector_base_url")
     const comicDetectorKeySetting = getSetting("comic_text_detector_api_key")
+    const mangaOcrEnabled = getValue("manga_ocr_enabled") === "true"
+    const mangaOcrBaseUrl = getValue("manga_ocr_base_url")
+    const mangaOcrKeySetting = getSetting("manga_ocr_api_key")
+    const paddleOcrEnabled = getValue("paddle_ocr_enabled") === "true"
+    const paddleOcrBaseUrl = getValue("paddle_ocr_base_url")
+    const paddleOcrKeySetting = getSetting("paddle_ocr_api_key")
+    const baiduOcrEnabled = getValue("baidu_ocr_enabled") === "true"
+    const baiduOcrApiKeySetting = getSetting("baidu_ocr_api_key")
+    const baiduOcrSecretSetting = getSetting("baidu_ocr_secret_key")
+    const baiduOcrBaseUrl = getValue("baidu_ocr_base_url")
+    const lamaInpaintEnabled = getValue("lama_inpaint_enabled") === "true"
+    const lamaInpaintBaseUrl = getValue("lama_inpaint_base_url")
+    const lamaInpaintKeySetting = getSetting("lama_inpaint_api_key")
 
     const status = useMemo(() => {
         const hasKey = Boolean(keySetting?.hasValue || (keySetting?.value && keySetting.value !== "******"))
@@ -264,15 +299,48 @@ export default function AdminAiSettingsPage() {
                     </div>
 
                     {provider === "openai" && (
-                        <div className="space-y-2">
-                            <Label htmlFor="server-api-base-url">Base URL</Label>
-                            <Input
-                                id="server-api-base-url"
-                                value={getValue("server_api_base_url")}
-                                onChange={(e) => updateSetting("server_api_base_url", e.target.value)}
-                                placeholder="https://api.openai.com/v1"
-                            />
-                        </div>
+                        <>
+                            <div className="space-y-2">
+                                <Label htmlFor="server-api-provider-preset">兼容服务商预设</Label>
+                                <Select
+                                    value={openaiPresetId}
+                                    onValueChange={(value) => {
+                                        if (value === "custom") return
+                                        const preset = getOpenAICompatibleProviderPreset(value)
+                                        if (!preset) return
+                                        updateSetting("server_api_base_url", preset.baseUrl)
+                                        if (!modelValue.trim()) {
+                                            updateSetting("server_api_model", preset.modelHint)
+                                        }
+                                        toast.success(`已切换到 ${preset.label} 预设`)
+                                    }}
+                                >
+                                    <SelectTrigger id="server-api-provider-preset">
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        {OPENAI_COMPATIBLE_PROVIDER_PRESETS.map((preset) => (
+                                            <SelectItem key={preset.id} value={preset.id}>
+                                                {preset.label}
+                                            </SelectItem>
+                                        ))}
+                                        <SelectItem value="custom">自定义</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                                <p className="text-xs text-muted-foreground">
+                                    预设包含 OpenAI / SiliconFlow / DeepSeek / 火山引擎 / Ollama / Sakura。
+                                </p>
+                            </div>
+                            <div className="space-y-2">
+                                <Label htmlFor="server-api-base-url">Base URL</Label>
+                                <Input
+                                    id="server-api-base-url"
+                                    value={getValue("server_api_base_url")}
+                                    onChange={(e) => updateSetting("server_api_base_url", e.target.value)}
+                                    placeholder="https://api.openai.com/v1"
+                                />
+                            </div>
+                        </>
                     )}
 
                     <div className="space-y-2">
@@ -389,6 +457,232 @@ export default function AdminAiSettingsPage() {
                                 当前密钥：{comicDetectorKeySetting.maskedPreview}
                             </p>
                         )}
+                    </div>
+                </CardContent>
+            </Card>
+
+            <Card>
+                <CardHeader>
+                    <CardTitle>OCR 适配层（MangaOCR / PaddleOCR / 百度 OCR）</CardTitle>
+                    <CardDescription>
+                        用于接入真实 OCR 后端。编辑器中可在 OCR 引擎下拉框切换对应通道。
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                    <div className="space-y-3 rounded-lg border border-border/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <Label htmlFor="manga-ocr-enabled">启用 MangaOCR</Label>
+                            <Switch
+                                id="manga-ocr-enabled"
+                                checked={mangaOcrEnabled}
+                                onCheckedChange={(checked) =>
+                                    updateSetting("manga_ocr_enabled", checked ? "true" : "false")
+                                }
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="manga-ocr-base-url">MangaOCR 服务地址</Label>
+                            <Input
+                                id="manga-ocr-base-url"
+                                value={mangaOcrBaseUrl}
+                                onChange={(e) => updateSetting("manga_ocr_base_url", e.target.value)}
+                                placeholder="http://127.0.0.1:8001"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="manga-ocr-api-key">MangaOCR API Key（可选）</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="manga-ocr-api-key"
+                                    type={showSecret ? "text" : "password"}
+                                    value={mangaOcrKeySetting?.value ?? ""}
+                                    onChange={(e) => updateSetting("manga_ocr_api_key", e.target.value)}
+                                    placeholder={mangaOcrKeySetting?.hasValue ? "留空则保持原值" : "无鉴权可留空"}
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-11 w-11"
+                                    aria-label={showSecret ? "隐藏 API Key" : "显示 API Key"}
+                                    onClick={() => setShowSecret((prev) => !prev)}
+                                >
+                                    {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="space-y-3 rounded-lg border border-border/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <Label htmlFor="paddle-ocr-enabled">启用 PaddleOCR</Label>
+                            <Switch
+                                id="paddle-ocr-enabled"
+                                checked={paddleOcrEnabled}
+                                onCheckedChange={(checked) =>
+                                    updateSetting("paddle_ocr_enabled", checked ? "true" : "false")
+                                }
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="paddle-ocr-base-url">PaddleOCR 服务地址</Label>
+                            <Input
+                                id="paddle-ocr-base-url"
+                                value={paddleOcrBaseUrl}
+                                onChange={(e) => updateSetting("paddle_ocr_base_url", e.target.value)}
+                                placeholder="http://127.0.0.1:8002"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="paddle-ocr-api-key">PaddleOCR API Key（可选）</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="paddle-ocr-api-key"
+                                    type={showSecret ? "text" : "password"}
+                                    value={paddleOcrKeySetting?.value ?? ""}
+                                    onChange={(e) => updateSetting("paddle_ocr_api_key", e.target.value)}
+                                    placeholder={paddleOcrKeySetting?.hasValue ? "留空则保持原值" : "无鉴权可留空"}
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-11 w-11"
+                                    aria-label={showSecret ? "隐藏 API Key" : "显示 API Key"}
+                                    onClick={() => setShowSecret((prev) => !prev)}
+                                >
+                                    {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="space-y-3 rounded-lg border border-border/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <Label htmlFor="baidu-ocr-enabled">启用百度 OCR</Label>
+                            <Switch
+                                id="baidu-ocr-enabled"
+                                checked={baiduOcrEnabled}
+                                onCheckedChange={(checked) =>
+                                    updateSetting("baidu_ocr_enabled", checked ? "true" : "false")
+                                }
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="baidu-ocr-base-url">百度 OCR 接口地址</Label>
+                            <Input
+                                id="baidu-ocr-base-url"
+                                value={baiduOcrBaseUrl}
+                                onChange={(e) => updateSetting("baidu_ocr_base_url", e.target.value)}
+                                placeholder="https://aip.baidubce.com/rest/2.0/ocr/v1/general"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="baidu-ocr-api-key">百度 OCR API Key</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="baidu-ocr-api-key"
+                                    type={showSecret ? "text" : "password"}
+                                    value={baiduOcrApiKeySetting?.value ?? ""}
+                                    onChange={(e) => updateSetting("baidu_ocr_api_key", e.target.value)}
+                                    placeholder={baiduOcrApiKeySetting?.hasValue ? "留空则保持原值" : "填写 API Key"}
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-11 w-11"
+                                    aria-label={showSecret ? "隐藏 API Key" : "显示 API Key"}
+                                    onClick={() => setShowSecret((prev) => !prev)}
+                                >
+                                    {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </Button>
+                            </div>
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="baidu-ocr-secret-key">百度 OCR Secret Key</Label>
+                            <div className="flex gap-2">
+                                <Input
+                                    id="baidu-ocr-secret-key"
+                                    type={showSecret ? "text" : "password"}
+                                    value={baiduOcrSecretSetting?.value ?? ""}
+                                    onChange={(e) => updateSetting("baidu_ocr_secret_key", e.target.value)}
+                                    placeholder={baiduOcrSecretSetting?.hasValue ? "留空则保持原值" : "填写 Secret Key"}
+                                />
+                                <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-11 w-11"
+                                    aria-label={showSecret ? "隐藏 Secret Key" : "显示 Secret Key"}
+                                    onClick={() => setShowSecret((prev) => !prev)}
+                                >
+                                    {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </Button>
+                            </div>
+                        </div>
+                    </div>
+                </CardContent>
+            </Card>
+
+            <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                    <div>
+                        <CardTitle>LAMA 修复服务</CardTitle>
+                        <CardDescription>
+                            修补编辑器可切换到 LAMA 模式，按画笔 mask 做真实 inpaint。
+                        </CardDescription>
+                    </div>
+                    <Badge variant={lamaInpaintEnabled ? "default" : "secondary"}>
+                        {lamaInpaintEnabled ? "已启用" : "未启用"}
+                    </Badge>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50">
+                        <div className="space-y-0.5">
+                            <Label htmlFor="lama-inpaint-enabled">启用 LAMA 修复服务</Label>
+                            <p className="text-sm text-muted-foreground">
+                                启用后，编辑器“修补引擎”可选 LAMA。
+                            </p>
+                        </div>
+                        <Switch
+                            id="lama-inpaint-enabled"
+                            checked={lamaInpaintEnabled}
+                            onCheckedChange={(checked) =>
+                                updateSetting("lama_inpaint_enabled", checked ? "true" : "false")
+                            }
+                        />
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="lama-inpaint-base-url">LAMA 服务地址</Label>
+                        <Input
+                            id="lama-inpaint-base-url"
+                            value={lamaInpaintBaseUrl}
+                            onChange={(e) => updateSetting("lama_inpaint_base_url", e.target.value)}
+                            placeholder="http://127.0.0.1:8080"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                            支持 /inpaint、/api/inpaint、/predict 等端点。
+                        </p>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="lama-inpaint-api-key">LAMA API Key（可选）</Label>
+                        <div className="flex gap-2">
+                            <Input
+                                id="lama-inpaint-api-key"
+                                type={showSecret ? "text" : "password"}
+                                value={lamaInpaintKeySetting?.value ?? ""}
+                                onChange={(e) => updateSetting("lama_inpaint_api_key", e.target.value)}
+                                placeholder={lamaInpaintKeySetting?.hasValue ? "留空则保持原值" : "无鉴权可留空"}
+                            />
+                            <Button
+                                variant="outline"
+                                size="icon"
+                                className="h-11 w-11"
+                                aria-label={showSecret ? "隐藏 API Key" : "显示 API Key"}
+                                onClick={() => setShowSecret((prev) => !prev)}
+                            >
+                                {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </Button>
+                        </div>
                     </div>
                 </CardContent>
             </Card>

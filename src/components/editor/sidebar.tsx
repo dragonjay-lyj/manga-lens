@@ -66,6 +66,11 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { RechargePanel } from "@/components/profile/recharge-panel"
 import { RichTextEditor } from "@/components/editor/rich-text-editor"
+import {
+    OPENAI_COMPATIBLE_PROVIDER_PRESETS,
+    getOpenAICompatibleProviderPreset,
+    guessOpenAICompatibleProviderPresetId,
+} from "@/lib/ai/provider-presets"
 
 interface EditorSidebarProps {
     className?: string
@@ -210,8 +215,14 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const isComicModuleEnabled = settings.enableComicModule ?? true
     const isBubbleDetectionEnabled = isComicModuleEnabled && (settings.enableBubbleDetection ?? true)
     const isPatchEditorEnabled = isComicModuleEnabled && (settings.enablePatchEditor ?? true)
+    const ocrEngine = settings.ocrEngine ?? "auto"
+    const repairEngine = settings.repairEngine ?? "ai"
     const defaultOrientation: "vertical" | "horizontal" =
         (settings.defaultVerticalText ?? true) ? "vertical" : "horizontal"
+    const openaiProviderPresetId = useMemo(() => {
+        if (settings.provider !== "openai") return "openai"
+        return guessOpenAICompatibleProviderPresetId(settings.baseUrl || "")
+    }, [settings.baseUrl, settings.provider])
 
     const applyDefaultOrientationToBlocks = useCallback((
         blocks: Array<{
@@ -643,6 +654,9 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const useServerDetectionPipeline = ocrEngine !== "ai_vision"
+        const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
+        const preferComicDetector = ocrEngine === "auto" || ocrEngine === "comic_text_detector"
         const detectionHints =
             imageWidth && imageHeight
                 ? getDetectionRegionHints(imageWidth, imageHeight)
@@ -663,7 +677,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                         sourceLanguageAllowlist: getSourceLanguageAllowlist(),
                         imageWidth,
                         imageHeight,
-                        preferComicDetector: true,
+                        preferComicDetector,
+                        ocrEngine,
                         ...detectionHints,
                     }),
                 })
@@ -696,14 +711,27 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             return tryServerDetect()
         }
 
-        // 非网站 API 模式下，也尝试优先使用后台配置的 comic-text-detector。
-        try {
-            const serverResult = await tryServerDetect()
-            if (serverResult.success && serverResult.blocks.length > 0) {
-                return serverResult
+        if (useServerDetectionPipeline) {
+            // 非网站 API 模式下，也尝试后台 OCR 适配层（CTD/MangaOCR/PaddleOCR/Baidu）。
+            try {
+                const serverResult = await tryServerDetect()
+                if (serverResult.success && serverResult.blocks.length > 0) {
+                    return serverResult
+                }
+            } catch (error) {
+                if (strictServerDetectionEngine) {
+                    throw error
+                }
+                // Fallback to user-provided model key.
             }
-        } catch {
-            // Fallback to user-provided model key.
+        }
+
+        if (strictServerDetectionEngine) {
+            throw new Error(
+                locale === "zh"
+                    ? "所选 OCR 引擎不可用，请检查 /admin/settings/ai 配置"
+                    : "Selected OCR engine is unavailable. Check /admin/settings/ai"
+            )
         }
 
         return detectTextBlocks({
@@ -731,6 +759,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         getSourceLanguageHintForDetection,
         getTargetLanguageForDetection,
         locale,
+        ocrEngine,
         parseApiError,
         settings.apiKey,
         settings.baseUrl,
@@ -2452,6 +2481,41 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 </Select>
                             </div>
                         </div>
+                        <div className="space-y-1.5">
+                            <Label htmlFor="ocr-engine-select" className="text-xs">
+                                {locale === "zh" ? "OCR 引擎" : "OCR engine"}
+                            </Label>
+                            <Select
+                                value={ocrEngine}
+                                onValueChange={(value: "auto" | "comic_text_detector" | "manga_ocr" | "paddle_ocr" | "baidu_ocr" | "ai_vision") =>
+                                    updateSettings({ ocrEngine: value })
+                                }
+                            >
+                                <SelectTrigger id="ocr-engine-select" className="h-9">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="auto">
+                                        {locale === "zh" ? "自动（CTD 优先，失败回退 AI 视觉）" : "Auto (CTD first, fallback to AI vision)"}
+                                    </SelectItem>
+                                    <SelectItem value="comic_text_detector">
+                                        {locale === "zh" ? "CTD（仅 comic-text-detector）" : "CTD only"}
+                                    </SelectItem>
+                                    <SelectItem value="manga_ocr">
+                                        {locale === "zh" ? "MangaOCR（仅后端适配）" : "MangaOCR (backend adapter only)"}
+                                    </SelectItem>
+                                    <SelectItem value="paddle_ocr">
+                                        {locale === "zh" ? "PaddleOCR（仅后端适配）" : "PaddleOCR (backend adapter only)"}
+                                    </SelectItem>
+                                    <SelectItem value="baidu_ocr">
+                                        {locale === "zh" ? "百度 OCR（仅后端适配）" : "Baidu OCR (backend adapter only)"}
+                                    </SelectItem>
+                                    <SelectItem value="ai_vision">
+                                        {locale === "zh" ? "AI 视觉 OCR（Gemini/OpenAI）" : "AI vision OCR (Gemini/OpenAI)"}
+                                    </SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
                         <div className="space-y-2">
                             <div className="flex items-center justify-between gap-2">
                                 <Label className="text-xs">
@@ -3109,6 +3173,28 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                             }
                                         />
                                     </div>
+                                    <div className="space-y-1.5 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                        <Label htmlFor="repair-engine-select" className="text-xs">
+                                            {locale === "zh" ? "修补引擎" : "Repair engine"}
+                                        </Label>
+                                        <Select
+                                            value={repairEngine}
+                                            onValueChange={(value: "ai" | "lama") => updateSettings({ repairEngine: value })}
+                                            disabled={!isPatchEditorEnabled}
+                                        >
+                                            <SelectTrigger id="repair-engine-select" className="h-8">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="ai">
+                                                    {locale === "zh" ? "AI 重绘（当前模型）" : "AI repaint (current model)"}
+                                                </SelectItem>
+                                                <SelectItem value="lama">
+                                                    {locale === "zh" ? "LAMA 修复服务（后端）" : "LAMA inpaint service (backend)"}
+                                                </SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
                                     <div className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
                                         <Label htmlFor="comic-default-vertical" className="text-xs cursor-pointer">
                                             {locale === "zh" ? "默认竖排文字（新文本框）" : "Default vertical text (new text boxes)"}
@@ -3215,6 +3301,129 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 )}
                             </div>
 
+                            <div className="space-y-3 rounded-lg border border-border/60 bg-muted/40 p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="hq-mode-enable" className="cursor-pointer">
+                                            {locale === "zh" ? "高质量翻译模式 (Beta)" : "High-quality Translation (Beta)"}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "结合多图上下文提高一致性；会增加处理时间和配额消耗。"
+                                                : "Uses multi-page context for better consistency, with higher time and token cost."}
+                                        </p>
+                                    </div>
+                                    <Switch
+                                        id="hq-mode-enable"
+                                        checked={settings.highQualityMode ?? false}
+                                        onCheckedChange={(checked) => updateSettings({ highQualityMode: checked })}
+                                    />
+                                </div>
+
+                                {settings.highQualityMode && (
+                                    <>
+                                        <Separator />
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="space-y-1.5">
+                                                <Label htmlFor="hq-batch-size" className="text-xs">
+                                                    {locale === "zh" ? "每批图片数" : "Batch size"}
+                                                </Label>
+                                                <Input
+                                                    id="hq-batch-size"
+                                                    type="number"
+                                                    min={1}
+                                                    max={20}
+                                                    className="h-9"
+                                                    value={String(settings.highQualityBatchSize ?? 4)}
+                                                    onChange={(e) => {
+                                                        const raw = Number(e.target.value)
+                                                        const nextValue = Number.isFinite(raw) ? Math.max(1, Math.min(20, Math.round(raw))) : 4
+                                                        updateSettings({ highQualityBatchSize: nextValue })
+                                                    }}
+                                                />
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <Label htmlFor="hq-reset-batches" className="text-xs">
+                                                    {locale === "zh" ? "记忆重置批次" : "Session reset batches"}
+                                                </Label>
+                                                <Input
+                                                    id="hq-reset-batches"
+                                                    type="number"
+                                                    min={1}
+                                                    max={50}
+                                                    className="h-9"
+                                                    value={String(settings.highQualitySessionResetBatches ?? 3)}
+                                                    onChange={(e) => {
+                                                        const raw = Number(e.target.value)
+                                                        const nextValue = Number.isFinite(raw) ? Math.max(1, Math.min(50, Math.round(raw))) : 3
+                                                        updateSettings({ highQualitySessionResetBatches: nextValue })
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="hq-rpm-limit" className="text-xs">
+                                                {locale === "zh" ? "RPM 限制（0=不限制）" : "RPM limit (0=off)"}
+                                            </Label>
+                                            <Input
+                                                id="hq-rpm-limit"
+                                                type="number"
+                                                min={0}
+                                                max={300}
+                                                className="h-9"
+                                                value={String(settings.highQualityRpmLimit ?? 0)}
+                                                onChange={(e) => {
+                                                    const raw = Number(e.target.value)
+                                                    const nextValue = Number.isFinite(raw) ? Math.max(0, Math.min(300, Math.round(raw))) : 0
+                                                    updateSettings({ highQualityRpmLimit: nextValue })
+                                                }}
+                                            />
+                                        </div>
+
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div className="flex items-center justify-between rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                                <Label htmlFor="hq-low-reasoning" className="text-xs cursor-pointer">
+                                                    {locale === "zh" ? "低推理模式" : "Low reasoning mode"}
+                                                </Label>
+                                                <Switch
+                                                    id="hq-low-reasoning"
+                                                    checked={settings.highQualityLowReasoning ?? false}
+                                                    onCheckedChange={(checked) => updateSettings({ highQualityLowReasoning: checked })}
+                                                />
+                                            </div>
+                                            <div className="flex items-center justify-between rounded-md border border-border/50 bg-background/60 px-2.5 py-2">
+                                                <Label htmlFor="hq-force-json" className="text-xs cursor-pointer">
+                                                    {locale === "zh" ? "强制 JSON 上下文" : "Force JSON context"}
+                                                </Label>
+                                                <Switch
+                                                    id="hq-force-json"
+                                                    checked={settings.highQualityForceJson ?? true}
+                                                    onCheckedChange={(checked) => updateSettings({ highQualityForceJson: checked })}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="hq-context-prompt" className="text-xs">
+                                                {locale === "zh" ? "上下文提示词（可选）" : "Context prompt (optional)"}
+                                            </Label>
+                                            <Textarea
+                                                id="hq-context-prompt"
+                                                className="min-h-[84px] resize-none text-xs"
+                                                value={settings.highQualityContextPrompt ?? ""}
+                                                onChange={(e) => updateSettings({ highQualityContextPrompt: e.target.value })}
+                                                placeholder={
+                                                    locale === "zh"
+                                                        ? "例如：保持角色口吻一致，专有名词不漂移，拟声词尽量短促。"
+                                                        : "e.g. Keep character voice consistent, preserve terms, keep SFX concise."
+                                                }
+                                            />
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+
                             <div className="space-y-2">
                                 <Label htmlFor="editor-max-retries">
                                     {locale === "zh" ? "失败自动重试次数" : "Auto retry count"}
@@ -3277,15 +3486,62 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
                                     {/* Base URL (仅 OpenAI) */}
                                     {settings.provider === "openai" && (
-                                        <div className="space-y-2">
-                                            <Label htmlFor="editor-base-url">{t.editor.settings.baseUrl}</Label>
-                                            <Input
-                                                id="editor-base-url"
-                                                value={settings.baseUrl}
-                                                onChange={(e) => updateSettings({ baseUrl: e.target.value })}
-                                                placeholder={t.editor.settings.baseUrlPlaceholder}
-                                            />
-                                        </div>
+                                        <>
+                                            <div className="space-y-2">
+                                                <Label htmlFor="editor-provider-preset">
+                                                    {locale === "zh" ? "兼容服务商预设" : "Compatible provider preset"}
+                                                </Label>
+                                                <Select
+                                                    value={openaiProviderPresetId}
+                                                    onValueChange={(value) => {
+                                                        if (value === "custom") {
+                                                            return
+                                                        }
+                                                        const preset = getOpenAICompatibleProviderPreset(value)
+                                                        if (!preset) {
+                                                            return
+                                                        }
+                                                        updateSettings({
+                                                            baseUrl: preset.baseUrl,
+                                                            model: (settings.model || "").trim() || preset.modelHint,
+                                                        })
+                                                        toast.success(
+                                                            locale === "zh"
+                                                                ? `已切换到 ${preset.label} 预设`
+                                                                : `Switched to ${preset.label} preset`
+                                                        )
+                                                    }}
+                                                >
+                                                    <SelectTrigger id="editor-provider-preset">
+                                                        <SelectValue />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        {OPENAI_COMPATIBLE_PROVIDER_PRESETS.map((preset) => (
+                                                            <SelectItem key={preset.id} value={preset.id}>
+                                                                {preset.label}
+                                                            </SelectItem>
+                                                        ))}
+                                                        <SelectItem value="custom">
+                                                            {locale === "zh" ? "自定义" : "Custom"}
+                                                        </SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {locale === "zh"
+                                                        ? "内置：OpenAI / SiliconFlow / DeepSeek / 火山引擎 / Ollama / Sakura。"
+                                                        : "Built-in presets: OpenAI / SiliconFlow / DeepSeek / Volcengine / Ollama / Sakura."}
+                                                </p>
+                                            </div>
+                                            <div className="space-y-2">
+                                                <Label htmlFor="editor-base-url">{t.editor.settings.baseUrl}</Label>
+                                                <Input
+                                                    id="editor-base-url"
+                                                    value={settings.baseUrl}
+                                                    onChange={(e) => updateSettings({ baseUrl: e.target.value })}
+                                                    placeholder={t.editor.settings.baseUrlPlaceholder}
+                                                />
+                                            </div>
+                                        </>
                                     )}
 
                                     {/* 模型选择 */}
