@@ -637,6 +637,81 @@ export function EditorToolbar() {
         }
     }
 
+    const toHexColor = (value: number) =>
+        Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")
+
+    const createSelectionDominantTextColorSampler = (image: HTMLImageElement) => {
+        const canvas = document.createElement("canvas")
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return () => null
+
+        canvas.width = image.width
+        canvas.height = image.height
+        ctx.drawImage(image, 0, 0)
+
+        return (selection: Selection): string | null => {
+            const x = Math.max(0, Math.min(image.width - 1, Math.floor(selection.x)))
+            const y = Math.max(0, Math.min(image.height - 1, Math.floor(selection.y)))
+            const maxW = Math.max(1, image.width - x)
+            const maxH = Math.max(1, image.height - y)
+            const w = Math.max(1, Math.min(maxW, Math.floor(selection.width)))
+            const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
+            const data = ctx.getImageData(x, y, w, h).data
+
+            const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+
+            for (let i = 0; i < data.length; i += 4) {
+                const alpha = data[i + 3]
+                if (alpha < 200) continue
+
+                const r = data[i]
+                const g = data[i + 1]
+                const b = data[i + 2]
+                const max = Math.max(r, g, b)
+                const min = Math.min(r, g, b)
+                const delta = max - min
+                const saturation = max === 0 ? 0 : delta / max
+                const luminance = r * 0.299 + g * 0.587 + b * 0.114
+
+                if (luminance > 205 || luminance < 20) continue
+                if (saturation < 0.16) continue
+
+                const key = `${Math.round(r / 24)}-${Math.round(g / 24)}-${Math.round(b / 24)}`
+                const bucket = buckets.get(key)
+                if (bucket) {
+                    bucket.count += 1
+                    bucket.r += r
+                    bucket.g += g
+                    bucket.b += b
+                } else {
+                    buckets.set(key, { count: 1, r, g, b })
+                }
+            }
+
+            if (!buckets.size) return null
+
+            let best: { count: number; r: number; g: number; b: number } | null = null
+            for (const bucket of buckets.values()) {
+                if (!best || bucket.count > best.count) {
+                    best = bucket
+                }
+            }
+
+            if (!best) return null
+
+            const minCount = Math.max(18, Math.floor((w * h) * 0.004))
+            if (best.count < minCount) return null
+
+            const avgR = best.r / best.count
+            const avgG = best.g / best.count
+            const avgB = best.b / best.count
+            const chroma = Math.max(avgR, avgG, avgB) - Math.min(avgR, avgG, avgB)
+            if (chroma < 18) return null
+
+            return `#${toHexColor(avgR)}${toHexColor(avgG)}${toHexColor(avgB)}`
+        }
+    }
+
     const getSelectionDarkRatio = (image: HTMLImageElement, selections: Selection[]): number => {
         if (!selections.length) return 0
 
@@ -857,6 +932,17 @@ export function EditorToolbar() {
         const total = selections.length
         const hasManySelections = total >= 10
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
+        const useColorAnchors = trackSelectionProgress
+        const sampleDominantTextColor = useColorAnchors
+            ? createSelectionDominantTextColorSampler(originalImg)
+            : null
+        const selectionDominantColorMap = new Map<string, string>(
+            useColorAnchors
+                ? selections
+                    .map((selection) => [selection.id, sampleDominantTextColor?.(selection) || null] as const)
+                    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+                : []
+        )
         const selectionDarkRatioMap = new Map<string, number>(
             selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
         )
@@ -923,6 +1009,14 @@ export function EditorToolbar() {
             const universalColorHint = useWhiteOutline
                 ? "颜色要求：尽量保留该选区原文字色；若对比不足，仅增强描边/轮廓，不要把文字统一改成黑色。"
                 : "颜色要求：保持该选区原有文字颜色与描边风格，不要统一黑字。"
+            const dominantTextColor = selectionDominantColorMap.get(selection.id)
+            const explicitColorAnchorHint = dominantTextColor
+                ? (
+                    locale === "zh"
+                        ? `颜色锚点：该选区原文字主色约为 ${dominantTextColor}，请保持同色系（允许轻微明暗变化），禁止替换成纯黑字。`
+                        : `Color anchor: dominant source text color is about ${dominantTextColor}. Keep the same color family (minor brightness changes allowed), and do not switch to pure black.`
+                )
+                : null
 
             return [
                 effectivePrompt,
@@ -930,6 +1024,7 @@ export function EditorToolbar() {
                 "【当前选区约束】",
                 layoutHint,
                 universalColorHint,
+                ...(explicitColorAnchorHint ? [explicitColorAnchorHint] : []),
                 ...englishLayoutHints,
                 ...hardHints,
             ].join("\n")
