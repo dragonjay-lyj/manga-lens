@@ -673,6 +673,37 @@ export function EditorToolbar() {
         }
     }
 
+    const computePatchInkDensity = async (imageDataUrl: string): Promise<number> => {
+        try {
+            const image = await loadImage(imageDataUrl)
+            const sampleSize = 256
+            const canvas = document.createElement("canvas")
+            const ctx = canvas.getContext("2d")
+            if (!ctx) return 0
+
+            canvas.width = sampleSize
+            canvas.height = sampleSize
+            ctx.drawImage(image, 0, 0, sampleSize, sampleSize)
+            const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data
+
+            let darkPixels = 0
+            let totalPixels = 0
+            for (let i = 0; i < data.length; i += 4) {
+                const alpha = data[i + 3]
+                if (alpha < 20) continue
+                const luminance = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
+                if (luminance < 170) {
+                    darkPixels += 1
+                }
+                totalPixels += 1
+            }
+            if (!totalPixels) return 0
+            return darkPixels / totalPixels
+        } catch {
+            return 0
+        }
+    }
+
     const toHexColor = (value: number) =>
         Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")
 
@@ -743,7 +774,7 @@ export function EditorToolbar() {
                 const luminance = r * 0.299 + g * 0.587 + b * 0.114
 
                 if (luminance > 205 || luminance < 20) continue
-                if (saturation < 0.16) continue
+                if (saturation < 0.1) continue
 
                 const key = `${Math.round(r / 24)}-${Math.round(g / 24)}-${Math.round(b / 24)}`
                 const bucket = buckets.get(key)
@@ -768,7 +799,7 @@ export function EditorToolbar() {
 
             if (!best) return null
 
-            const minCount = Math.max(18, Math.floor((w * h) * 0.004))
+            const minCount = Math.max(8, Math.floor((w * h) * 0.0018))
             if (best.count < minCount) return null
 
             const avgR = best.r / best.count
@@ -1462,6 +1493,7 @@ export function EditorToolbar() {
 
                 if (englishTarget && sourcePatch) {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
+                    const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const likelyOverflow = edgeInkRatio > 0.42
                     if (likelyOverflow) {
                         if (updateToolbarProgress) {
@@ -1487,7 +1519,8 @@ export function EditorToolbar() {
                         )
                         if (retryOverflow.success && retryOverflow.imageData) {
                             const retryEdgeRatio = await computeEdgeInkRatio(retryOverflow.imageData)
-                            if (retryEdgeRatio + 0.03 < edgeInkRatio) {
+                            const retryInkDensity = await computePatchInkDensity(retryOverflow.imageData)
+                            if (retryEdgeRatio + 0.03 < edgeInkRatio && retryInkDensity >= baseInkDensity * 0.62) {
                                 finalImageData = retryOverflow.imageData
                                 finalSelection = overflowSelection
                                 inputPatchForFinalCheck = overflowPatch
@@ -1497,6 +1530,7 @@ export function EditorToolbar() {
                 }
                 if (!englishTarget && directionMeta.targetLangCode === "zh" && sourcePatch) {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
+                    const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const isLikelyVertical = selection.height > selection.width * 1.2
                     const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.32 : 0.4)
                     if (likelyOverflow) {
@@ -1519,7 +1553,8 @@ export function EditorToolbar() {
                         const retryOverflow = await runGenerateRequestWithRetry(overflowPatch, overflowPrompt, 1)
                         if (retryOverflow.success && retryOverflow.imageData) {
                             const retryEdgeRatio = await computeEdgeInkRatio(retryOverflow.imageData)
-                            if (retryEdgeRatio + 0.02 < edgeInkRatio) {
+                            const retryInkDensity = await computePatchInkDensity(retryOverflow.imageData)
+                            if (retryEdgeRatio + 0.02 < edgeInkRatio && retryInkDensity >= baseInkDensity * 0.66) {
                                 finalImageData = retryOverflow.imageData
                                 finalSelection = overflowSelection
                                 inputPatchForFinalCheck = overflowPatch
@@ -1648,6 +1683,33 @@ export function EditorToolbar() {
             )
         }
 
+        const sourceColorSampler = createSelectionDominantTextColorSampler(originalImg)
+        const selectionDominantColorMap = new Map<string, string>(
+            sourceSelections
+                .map((selection) => [selection.id, sourceColorSampler(selection)] as const)
+                .filter((entry): entry is [string, string] => Boolean(entry[1]))
+        )
+        const maskPromptWithColorHints = selectionDominantColorMap.size
+            ? [
+                effectivePrompt,
+                "",
+                locale === "zh"
+                    ? "【遮罩模式颜色锚点】请按以下选区主色保留文字颜色，不要统一黑字："
+                    : "[Mask mode color anchors] Keep text colors by selection, do not normalize to black:",
+                ...sourceSelections.slice(0, 24).map((selection, idx) => {
+                    const color = selectionDominantColorMap.get(selection.id)
+                    if (!color) {
+                        return locale === "zh"
+                            ? `${idx + 1}. 选区#${idx + 1}: 无稳定色样，保持原风格。`
+                            : `${idx + 1}. Selection #${idx + 1}: no stable color sample, keep original style.`
+                    }
+                    return locale === "zh"
+                        ? `${idx + 1}. 选区#${idx + 1} 主色≈${color}`
+                        : `${idx + 1}. Selection #${idx + 1} dominant color≈${color}`
+                }),
+            ].join("\n")
+            : effectivePrompt
+
         const inputImageData = sourceSelections.length
             ? (
                 useReverseMaskMode
@@ -1658,7 +1720,7 @@ export function EditorToolbar() {
 
         const result = await runGenerateRequestWithRetry(
             inputImageData,
-            effectivePrompt,
+            maskPromptWithColorHints,
             resolveRetryLimit()
         )
 
@@ -1735,15 +1797,10 @@ export function EditorToolbar() {
 
         let colorAdjustedResultData = result.imageData
         if (sourceSelections.length > 0) {
-            const sampleDominantTextColor = createSelectionDominantTextColorSampler(originalImg)
-            const selectionDominantColorMap = new Map<string, string>(
-                sourceSelections
-                    .map((selection) => [selection.id, sampleDominantTextColor(selection)] as const)
-                    .filter((entry): entry is [string, string] => Boolean(entry[1]))
-            )
-
             if (selectionDominantColorMap.size > 0) {
                 if (updateToolbarProgress) {
+                    setProgress(72)
+                    setProgressText("1/2")
                     setProgressDetail(
                         locale === "zh"
                             ? "遮罩结果处理中：执行文字颜色校正..."
@@ -1798,6 +1855,10 @@ export function EditorToolbar() {
                     )
 
                     if (updateToolbarProgress) {
+                        const progressBase = 72
+                        const progressSpan = 22
+                        const progressRatio = Math.max(0, Math.min(1, (i + 1) / Math.max(1, sourceSelections.length)))
+                        setProgress(progressBase + progressSpan * progressRatio)
                         setProgressDetail(
                             locale === "zh"
                                 ? `遮罩结果颜色校正 ${i + 1}/${sourceSelections.length}`
@@ -1805,6 +1866,14 @@ export function EditorToolbar() {
                         )
                     }
                 }
+            } else if (updateToolbarProgress) {
+                setProgress(90)
+                setProgressText("1/2")
+                setProgressDetail(
+                    locale === "zh"
+                        ? "遮罩结果处理中：未提取到稳定颜色样本，跳过颜色校正。"
+                        : "Mask post-processing: no stable color sample found, skipped color correction."
+                )
             }
         }
 
