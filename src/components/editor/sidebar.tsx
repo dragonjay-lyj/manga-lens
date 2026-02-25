@@ -60,6 +60,7 @@ import {
     type TextDetectionRegion,
     type TranslationDirection,
 } from "@/lib/ai/ai-service"
+import { translateTextBatch, type BatchTranslateItem } from "@/lib/ai/text-translate"
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { EDITOR_IMAGE_ACCEPT, expandEditorUploadFiles, normalizeEditorImageFiles } from "@/lib/utils/image-import"
 import type { Selection } from "@/types/database"
@@ -147,6 +148,8 @@ const SETTINGS_IMPORT_KEYS = [
     "suppressFurigana",
     "autoTextColorAdapt",
     "bulkTextTranslateOcr",
+    "singleRetranslateDeepMode",
+    "singleRetranslateContextWindow",
     "detectionRegionMode",
     "chapterBulkTranslate",
     "comicType",
@@ -189,6 +192,14 @@ function richHtmlToPlainText(html: string): string {
         .trim()
 }
 
+function plainTextToRichHtml(text: string): string {
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br/>")
+}
+
 export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const folderInputRef = useRef<HTMLInputElement>(null)
@@ -207,6 +218,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const [replaceText, setReplaceText] = useState("")
     const [replaceScope, setReplaceScope] = useState<"translated" | "source" | "both">("translated")
     const [selectedBlockIndexes, setSelectedBlockIndexes] = useState<number[]>([])
+    const [retranslatingBlockIndexes, setRetranslatingBlockIndexes] = useState<number[]>([])
     const [bulkTextValue, setBulkTextValue] = useState("")
     const [copiedBlocks, setCopiedBlocks] = useState<Array<{ sourceText: string; translatedText: string; richTextHtml?: string; bbox: { x: number; y: number; width: number; height: number }; style?: Record<string, unknown> }>>([])
     const [clearGalleryArmed, setClearGalleryArmed] = useState(false)
@@ -635,9 +647,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const canRunAutoDetect = settings.useServerApi || Boolean(settings.apiKey)
     const detectedBlocks = useMemo(() => currentImage?.detectedTextBlocks || [], [currentImage?.detectedTextBlocks])
     const selectedBlockSet = useMemo(() => new Set(selectedBlockIndexes), [selectedBlockIndexes])
+    const retranslatingBlockSet = useMemo(() => new Set(retranslatingBlockIndexes), [retranslatingBlockIndexes])
 
     useEffect(() => {
         setSelectedBlockIndexes([])
+        setRetranslatingBlockIndexes([])
         setBulkTextValue("")
     }, [currentImage?.id])
 
@@ -1806,6 +1820,207 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setDetectedTextBlocks(currentImage.id, nextBlocks)
     }, [currentImage, setDetectedTextBlocks])
 
+    const handleDetectedSourceEdit = useCallback((index: number, sourceText: string) => {
+        if (!currentImage) return
+        const nextBlocks = [...(currentImage.detectedTextBlocks || [])]
+        if (!nextBlocks[index]) return
+        nextBlocks[index] = {
+            ...nextBlocks[index],
+            sourceText,
+        }
+        setDetectedTextBlocks(currentImage.id, nextBlocks)
+    }, [currentImage, setDetectedTextBlocks])
+
+    const runBatchTextTranslateRequest = useCallback(async (
+        items: BatchTranslateItem[],
+        targetLanguage: string,
+        contextHint?: string
+    ): Promise<Map<string, string>> => {
+        if (!items.length) return new Map()
+
+        if (settings.useServerApi) {
+            const res = await fetch("/api/ai/translate-text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    items,
+                    targetLanguage,
+                    contextHint,
+                }),
+            })
+            if (!res.ok) {
+                throw new Error(
+                    await parseApiError(
+                        res,
+                        locale === "zh" ? "网站 API 批量翻译失败" : "Server batch translation failed"
+                    )
+                )
+            }
+            const data = await res.json()
+            const translatedItems = Array.isArray(data.items) ? data.items : []
+            return new Map(
+                translatedItems.map((item: { id: string; content: string }) => [
+                    String(item.id),
+                    String(item.content || ""),
+                ])
+            )
+        }
+
+        if (!settings.apiKey) {
+            throw new Error(locale === "zh" ? "缺少 API Key" : "Missing API key")
+        }
+
+        const result = await translateTextBatch({
+            items,
+            targetLanguage,
+            contextHint,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
+        })
+        if (!result.success) {
+            throw new Error(result.error || (locale === "zh" ? "批量翻译失败" : "Batch translation failed"))
+        }
+        return new Map(result.items.map((item) => [item.id, item.content]))
+    }, [
+        locale,
+        parseApiError,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.model,
+        settings.provider,
+        settings.useServerApi,
+    ])
+
+    const handleRetranslateDetectedBlock = useCallback(async (
+        index: number,
+        mode: "current_only" | "with_context" = "with_context",
+        options?: { forceDeepMode?: boolean }
+    ) => {
+        if (!currentImage) return
+        const block = (currentImage.detectedTextBlocks || [])[index]
+        if (!block) return
+
+        const sourceText = (block.sourceText || "").trim()
+        if (!sourceText) {
+            toast.warning(locale === "zh" ? "请先填写原文" : "Please enter source text first")
+            return
+        }
+        if (!settings.useServerApi && !settings.apiKey) {
+            toast.error(locale === "zh" ? "缺少 API Key" : "Missing API key")
+            return
+        }
+        if (retranslatingBlockSet.has(index)) return
+
+        setRetranslatingBlockIndexes((prev) => (prev.includes(index) ? prev : [...prev, index]))
+        try {
+            const deepModeEnabled = Boolean(options?.forceDeepMode) || (settings.singleRetranslateDeepMode ?? false)
+            const configuredContextWindow = Math.max(0, Math.min(8, Math.floor(settings.singleRetranslateContextWindow ?? 2)))
+            const contextWindow = mode === "current_only" ? 0 : configuredContextWindow
+            const allBlocks = currentImage.detectedTextBlocks || []
+            const contextStart = Math.max(0, index - contextWindow)
+            const contextEnd = Math.min(allBlocks.length - 1, index + contextWindow)
+            const truncate = (value: string, max = 90) => {
+                if (value.length <= max) return value
+                return `${value.slice(0, max)}...`
+            }
+            const contextLines = allBlocks.slice(contextStart, contextEnd + 1).map((item, offset) => {
+                const realIndex = contextStart + offset
+                const source = truncate((item.sourceText || "").replace(/\s+/g, " ").trim(), 120)
+                const translated = truncate((item.translatedText || "").replace(/\s+/g, " ").trim(), 120)
+                return `${realIndex === index ? ">>" : "  "}#${realIndex + 1} src=${source} | tr=${translated}`
+            })
+            const contextHintParts: string[] = []
+            if (deepModeEnabled) {
+                contextHintParts.push(
+                    locale === "zh"
+                        ? "深度模式：更注重语气、指代关系、上下文一致性与自然表达，必要时可重写但保持语义准确。"
+                        : "Deep mode: prioritize tone, coreference, contextual coherence and natural phrasing while preserving meaning."
+                )
+                if (options?.forceDeepMode) {
+                    contextHintParts.push(
+                        locale === "zh"
+                            ? "本次为临时深度模式（Alt 快捷触发），不会修改全局设置。"
+                            : "Temporary deep mode enabled for this request via Alt-click; global settings remain unchanged."
+                    )
+                }
+            }
+            if (settings.chapterBulkTranslate) {
+                contextHintParts.push(
+                    locale === "zh"
+                        ? "保持同页台词术语和角色语气一致。"
+                        : "Keep terminology and character voice consistent on this page."
+                )
+            }
+            if (contextLines.length > 0) {
+                contextHintParts.push(
+                    locale === "zh" ? "上下文窗口：" : "Context window:",
+                    ...contextLines
+                )
+            }
+            if (mode === "current_only") {
+                contextHintParts.push(
+                    locale === "zh"
+                        ? "只翻译当前句，不参考邻近台词。"
+                        : "Translate this line only without neighboring context."
+                )
+            }
+            const contextHint = contextHintParts.length > 0
+                ? contextHintParts.join("\n")
+                : undefined
+            const translatedMap = await runBatchTextTranslateRequest(
+                [{ id: String(index), content: sourceText }],
+                getTargetLanguageForDetection(),
+                contextHint
+            )
+            const translatedText = (translatedMap.get(String(index)) || "").trim()
+            if (!translatedText) {
+                throw new Error(locale === "zh" ? "未返回有效译文" : "Empty translation result")
+            }
+
+            const nextBlocks = [...(currentImage.detectedTextBlocks || [])]
+            if (!nextBlocks[index]) return
+            nextBlocks[index] = {
+                ...nextBlocks[index],
+                sourceText,
+                translatedText,
+                richTextHtml: plainTextToRichHtml(translatedText),
+            }
+            setDetectedTextBlocks(currentImage.id, nextBlocks)
+            toast.success(
+                mode === "current_only"
+                    ? (locale === "zh" ? "仅当前句重翻译完成" : "Current-line retranslation completed")
+                    : (locale === "zh" ? "带上下文重翻译完成" : "Context-aware retranslation completed")
+            )
+        } catch (error) {
+            const message = error instanceof Error
+                ? error.message
+                : (
+                    mode === "current_only"
+                        ? (locale === "zh" ? "仅当前句重翻译失败" : "Current-line retranslation failed")
+                        : (locale === "zh" ? "带上下文重翻译失败" : "Context-aware retranslation failed")
+                )
+            toast.error(message)
+        } finally {
+            setRetranslatingBlockIndexes((prev) => prev.filter((item) => item !== index))
+        }
+    }, [
+        currentImage,
+        getTargetLanguageForDetection,
+        locale,
+        retranslatingBlockSet,
+        runBatchTextTranslateRequest,
+        setDetectedTextBlocks,
+        settings.apiKey,
+        settings.chapterBulkTranslate,
+        settings.singleRetranslateContextWindow,
+        settings.singleRetranslateDeepMode,
+        settings.useServerApi,
+    ])
+
     const toggleBlockSelection = useCallback((index: number, checked: boolean) => {
         setSelectedBlockIndexes((prev) => {
             if (checked) {
@@ -2837,6 +3052,42 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     : "After OCR, send multiple blocks in one translation request for better consistency and fewer calls."}
                             </p>
                         </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="single-retranslate-deep-mode" className="text-xs">
+                                    {locale === "zh" ? "单句重翻译深度模式" : "Single-line retranslate deep mode"}
+                                </Label>
+                                <Switch
+                                    id="single-retranslate-deep-mode"
+                                    checked={settings.singleRetranslateDeepMode ?? false}
+                                    onCheckedChange={(checked) => updateSettings({ singleRetranslateDeepMode: checked })}
+                                />
+                            </div>
+                            <div className="space-y-1.5">
+                                <Label htmlFor="single-retranslate-context-window" className="text-xs">
+                                    {locale === "zh" ? "单句重翻译上下文窗口（前后条数）" : "Single-line context window (neighbor count)"}
+                                </Label>
+                                <Input
+                                    id="single-retranslate-context-window"
+                                    type="number"
+                                    min={0}
+                                    max={8}
+                                    step={1}
+                                    className="h-8"
+                                    value={String(settings.singleRetranslateContextWindow ?? 2)}
+                                    onChange={(event) => {
+                                        const raw = Number(event.target.value)
+                                        const nextValue = Number.isFinite(raw) ? Math.max(0, Math.min(8, Math.floor(raw))) : 2
+                                        updateSettings({ singleRetranslateContextWindow: nextValue })
+                                    }}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "用于“带上下文重翻译”按钮：可携带邻近台词上下文，深度模式会更重视语气与语境。"
+                                    : "Used by the 'Context Retranslate' quick button: include nearby lines as context; deep mode emphasizes tone and discourse coherence."}
+                            </p>
+                        </div>
                         <div className="grid grid-cols-2 gap-2">
                             <div className="space-y-1.5">
                                 <Label htmlFor="comic-type" className="text-xs">
@@ -3213,7 +3464,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         <div className="space-y-2">
                                             {detectedBlocks.slice(0, 20).map((block, index) => (
                                                 <div key={`${index}-${block.sourceText}-${block.translatedText}`} className="rounded-md border border-border/60 bg-background/80 p-2">
-                                                    <div className="mb-1 flex items-center justify-between">
+                                                    <div className="mb-2 flex items-center justify-between gap-2">
                                                         <label className="inline-flex items-center gap-2 text-[11px] text-muted-foreground">
                                                             <input
                                                                 type="checkbox"
@@ -3224,21 +3475,76 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                             />
                                                             {locale === "zh" ? `文本块 #${index + 1}` : `Block #${index + 1}`}
                                                         </label>
+                                                        <div className="flex items-center gap-1">
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                size="sm"
+                                                                className="h-7 px-2 text-[11px]"
+                                                                onClick={(event) => void handleRetranslateDetectedBlock(
+                                                                    index,
+                                                                    "current_only",
+                                                                    { forceDeepMode: event.altKey }
+                                                                )}
+                                                                disabled={retranslatingBlockSet.has(index) || !(block.sourceText || "").trim()}
+                                                                title={
+                                                                    locale === "zh"
+                                                                        ? "仅重翻译当前句，不带邻近上下文。按住 Alt 点击可仅本次启用深度模式。"
+                                                                        : "Retranslate current sentence only without neighboring context. Hold Alt while clicking to enable one-off deep mode."
+                                                                }
+                                                            >
+                                                                {retranslatingBlockSet.has(index) ? (
+                                                                    <>
+                                                                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                                                        {locale === "zh" ? "处理中" : "Running"}
+                                                                    </>
+                                                                ) : (
+                                                                    locale === "zh" ? "仅当前句" : "Current only"
+                                                                )}
+                                                            </Button>
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                size="sm"
+                                                                className="h-7 px-2 text-[11px]"
+                                                                onClick={() => void handleRetranslateDetectedBlock(index, "with_context")}
+                                                                disabled={retranslatingBlockSet.has(index) || !(block.sourceText || "").trim()}
+                                                                title={locale === "zh" ? "带上下文窗口进行重翻译（推荐）" : "Retranslate with nearby context window (recommended)"}
+                                                            >
+                                                                {retranslatingBlockSet.has(index) ? (
+                                                                    <>
+                                                                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                                                                        {locale === "zh" ? "处理中" : "Running"}
+                                                                    </>
+                                                                ) : (
+                                                                    locale === "zh" ? "带上下文" : "With context"
+                                                                )}
+                                                            </Button>
+                                                        </div>
                                                     </div>
-                                                    <p className="text-[11px] leading-snug">
-                                                        <span className="text-muted-foreground">{locale === "zh" ? "原文" : "Src"}:</span>{" "}
-                                                        {block.sourceText || "-"}
-                                                    </p>
-                                                    <div className="mt-1 space-y-1">
-                                                        <Label className="text-[10px] text-muted-foreground">
-                                                            {locale === "zh" ? "译文（富文本 WYSIWYG）" : "Translation (WYSIWYG)"}
-                                                        </Label>
-                                                        <RichTextEditor
-                                                            value={block.richTextHtml || block.translatedText || ""}
-                                                            locale={locale}
-                                                            placeholder={locale === "zh" ? "输入修正译文" : "Edit translated text"}
-                                                            onChange={(html) => handleDetectedTextEdit(index, html)}
-                                                        />
+                                                    <div className="grid gap-2 md:grid-cols-2">
+                                                        <div className="space-y-1">
+                                                            <Label className="text-[10px] text-muted-foreground">
+                                                                {locale === "zh" ? "原文（可编辑）" : "Source (editable)"}
+                                                            </Label>
+                                                            <Textarea
+                                                                value={block.sourceText || ""}
+                                                                onChange={(e) => handleDetectedSourceEdit(index, e.target.value)}
+                                                                placeholder={locale === "zh" ? "输入或修正原文" : "Edit source text"}
+                                                                className="min-h-[64px] text-xs"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <Label className="text-[10px] text-muted-foreground">
+                                                                {locale === "zh" ? "译文（富文本 WYSIWYG）" : "Translation (WYSIWYG)"}
+                                                            </Label>
+                                                            <RichTextEditor
+                                                                value={block.richTextHtml || block.translatedText || ""}
+                                                                locale={locale}
+                                                                placeholder={locale === "zh" ? "输入修正译文" : "Edit translated text"}
+                                                                onChange={(html) => handleDetectedTextEdit(index, html)}
+                                                            />
+                                                        </div>
                                                     </div>
                                                     <p className="text-[10px] text-muted-foreground">
                                                         bbox: x={block.bbox.x.toFixed(3)}, y={block.bbox.y.toFixed(3)}, w={block.bbox.width.toFixed(3)}, h={block.bbox.height.toFixed(3)}

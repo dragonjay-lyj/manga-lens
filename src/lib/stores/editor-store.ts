@@ -109,6 +109,8 @@ export interface EditorSettings {
     suppressFurigana: boolean
     autoTextColorAdapt: boolean
     bulkTextTranslateOcr: boolean
+    singleRetranslateDeepMode: boolean
+    singleRetranslateContextWindow: number
     detectionRegionMode: "full" | "selection_only" | "selection_ignore"
     chapterBulkTranslate: boolean
     comicType: "auto" | "manga" | "western"
@@ -251,6 +253,8 @@ const defaultSettings: EditorSettings = {
     suppressFurigana: false,
     autoTextColorAdapt: true,
     bulkTextTranslateOcr: false,
+    singleRetranslateDeepMode: false,
+    singleRetranslateContextWindow: 2,
     detectionRegionMode: "full",
     chapterBulkTranslate: false,
     comicType: "auto",

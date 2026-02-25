@@ -145,6 +145,11 @@ export function EditorCanvas() {
     const [resizeHandle, setResizeHandle] = useState<ResizeHandle>(null)
     const [resizeStartPoint, setResizeStartPoint] = useState<Point | null>(null)
     const [originalSelection, setOriginalSelection] = useState<Selection | null>(null)
+    const [activeSelectionId, setActiveSelectionId] = useState<string | null>(null)
+    const [isDraggingSelection, setIsDraggingSelection] = useState(false)
+    const [draggingSelectionId, setDraggingSelectionId] = useState<string | null>(null)
+    const [selectionDragStartPoint, setSelectionDragStartPoint] = useState<Point | null>(null)
+    const [originalSelectionForDrag, setOriginalSelectionForDrag] = useState<Selection | null>(null)
     const [activeShapeId, setActiveShapeId] = useState<string | null>(null)
     const [isDraggingShape, setIsDraggingShape] = useState(false)
     const [draggingShapeId, setDraggingShapeId] = useState<string | null>(null)
@@ -166,7 +171,16 @@ export function EditorCanvas() {
         setOcrDialogSelectionId(null)
         setOcrDialogSourceText("")
         setOcrDialogTranslatedText("")
+        setActiveSelectionId(null)
     }, [currentImage?.id])
+
+    useEffect(() => {
+        if (!currentImage || !activeSelectionId) return
+        const exists = (currentImage.selections || []).some((selection) => selection.id === activeSelectionId)
+        if (!exists) {
+            setActiveSelectionId(null)
+        }
+    }, [activeSelectionId, currentImage])
 
     useEffect(() => {
         if (!isPatchEditorEnabled && toolMode !== "selection") {
@@ -814,6 +828,7 @@ export function EditorCanvas() {
 
         setZoom(targetZoom)
         setPan(nextPanX, nextPanY)
+        setActiveSelectionId(selection.id)
     }, [setPan, setZoom])
 
     const fillSelectionAsMask = useCallback((selection: Selection) => {
@@ -1117,7 +1132,7 @@ export function EditorCanvas() {
             const selections = currentImage.selections || []
             for (const sel of selections) {
                 const status = currentImage.selectionProgress?.[sel.id]?.status ?? "pending"
-                drawSelection(ctx, sel, x, y, zoom, false, status)
+                drawSelection(ctx, sel, x, y, zoom, sel.id === activeSelectionId, status)
             }
         }
 
@@ -1125,7 +1140,7 @@ export function EditorCanvas() {
         if (currentSelection && !showResult) {
             drawSelection(ctx, currentSelection, x, y, zoom, true)
         }
-    }, [zoom, panX, panY, currentImage, showResult, currentSelection, annotationShapes, guides, activeShapeId, drawAnnotationShape, drawGuideLine, drawShapeHandles, showInpaintOverlay, maskOverlayOpacity, originalOpacity, inpaintOpacity])
+    }, [zoom, panX, panY, currentImage, showResult, currentSelection, annotationShapes, guides, activeShapeId, activeSelectionId, drawAnnotationShape, drawGuideLine, drawShapeHandles, showInpaintOverlay, maskOverlayOpacity, originalOpacity, inpaintOpacity])
 
     // 加载原图与修复遮罩
     useEffect(() => {
@@ -1241,6 +1256,50 @@ export function EditorCanvas() {
                 return
             }
 
+            if (
+                !showResult &&
+                toolMode === "selection" &&
+                activeSelectionId &&
+                (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight")
+            ) {
+                if (!currentImage?.selections?.length) return
+                const image = imageRef.current
+                if (!image) return
+
+                const targetSelection = currentImage.selections.find((selection) => selection.id === activeSelectionId)
+                if (!targetSelection) return
+
+                e.preventDefault()
+                const step = e.shiftKey ? 10 : 1
+                let dx = 0
+                let dy = 0
+                if (e.key === "ArrowLeft") dx = -step
+                if (e.key === "ArrowRight") dx = step
+                if (e.key === "ArrowUp") dy = -step
+                if (e.key === "ArrowDown") dy = step
+
+                const maxX = Math.max(0, image.width - targetSelection.width)
+                const maxY = Math.max(0, image.height - targetSelection.height)
+                const nextX = Math.max(0, Math.min(maxX, Math.round(targetSelection.x + dx)))
+                const nextY = Math.max(0, Math.min(maxY, Math.round(targetSelection.y + dy)))
+
+                if (nextX === targetSelection.x && nextY === targetSelection.y) return
+
+                updateSelections(
+                    currentImage.id,
+                    currentImage.selections.map((selection) =>
+                        selection.id === activeSelectionId
+                            ? {
+                                ...selection,
+                                x: nextX,
+                                y: nextY,
+                            }
+                            : selection
+                    )
+                )
+                return
+            }
+
             if (e.key === "Escape" && !showResult) {
                 if (isDrawing && toolMode === "selection") {
                     e.preventDefault()
@@ -1254,14 +1313,25 @@ export function EditorCanvas() {
                     return
                 }
 
-                if (toolMode === "selection" && currentImage?.selections?.length) {
+                if (toolMode === "selection" && activeSelectionId) {
                     e.preventDefault()
-                    const nextSelections = currentImage.selections.slice(0, -1)
-                    updateSelections(currentImage.id, nextSelections)
-                    toast.info(locale === "zh" ? "已删除最后一个选区" : "Deleted last selection")
+                    setActiveSelectionId(null)
+                    toast.info(locale === "zh" ? "已取消选中选区" : "Selection unselected")
                     return
                 }
             }
+        }
+
+        const onRequestDeleteSelection = () => {
+            if (showResult || toolMode !== "selection" || !currentImage?.selections?.length) return
+            const targetSelectionId =
+                activeSelectionId ??
+                currentImage.selections[currentImage.selections.length - 1]?.id
+            if (!targetSelectionId) return
+            const nextSelections = currentImage.selections.filter((selection) => selection.id !== targetSelectionId)
+            updateSelections(currentImage.id, nextSelections)
+            setActiveSelectionId(nextSelections[nextSelections.length - 1]?.id || null)
+            toast.info(locale === "zh" ? "已删除选区" : "Selection deleted")
         }
         const onKeyUp = (e: KeyboardEvent) => {
             if (e.code === "Space") {
@@ -1271,14 +1341,16 @@ export function EditorCanvas() {
         const onBlur = () => setIsSpacePressed(false)
 
         window.addEventListener("keydown", onKeyDown)
+        window.addEventListener("mangalens:delete-active-selection", onRequestDeleteSelection as EventListener)
         window.addEventListener("keyup", onKeyUp)
         window.addEventListener("blur", onBlur)
         return () => {
             window.removeEventListener("keydown", onKeyDown)
+            window.removeEventListener("mangalens:delete-active-selection", onRequestDeleteSelection as EventListener)
             window.removeEventListener("keyup", onKeyUp)
             window.removeEventListener("blur", onBlur)
         }
-    }, [currentImage, drawCanvas, isDrawing, locale, showResult, toolMode, updateSelections])
+    }, [activeSelectionId, currentImage, drawCanvas, isDrawing, locale, showResult, toolMode, updateSelections])
 
     // 获取鼠标在图片上的坐标
     const getImageCoordinates = (clientX: number, clientY: number): Point | null => {
@@ -1484,6 +1556,36 @@ export function EditorCanvas() {
         return null
     }, [currentImage, showResult, zoom, panX, panY])
 
+    const getHitSelectionBody = useCallback((clientX: number, clientY: number): string | null => {
+        const canvas = canvasRef.current
+        const image = imageRef.current
+        if (!canvas || !image || !currentImage || showResult) return null
+
+        const rect = canvas.getBoundingClientRect()
+        const canvasX = clientX - rect.left
+        const canvasY = clientY - rect.top
+
+        const scaledWidth = image.width * zoom
+        const scaledHeight = image.height * zoom
+        const offsetX = (canvas.width - scaledWidth) / 2 + panX
+        const offsetY = (canvas.height - scaledHeight) / 2 + panY
+
+        const selections = currentImage.selections || []
+        for (let i = selections.length - 1; i >= 0; i -= 1) {
+            const selection = selections[i]
+            const x = offsetX + selection.x * zoom
+            const y = offsetY + selection.y * zoom
+            const width = selection.width * zoom
+            const height = selection.height * zoom
+            const inside = canvasX >= x && canvasX <= x + width && canvasY >= y && canvasY <= y + height
+            if (inside) {
+                return selection.id
+            }
+        }
+
+        return null
+    }, [currentImage, panX, panY, showResult, zoom])
+
     // 获取调整手柄对应的光标样式
     const getResizeCursor = (handle: ResizeHandle): string => {
         switch (handle) {
@@ -1539,6 +1641,7 @@ export function EditorCanvas() {
             if (shapeHandleHit) {
                 const hitShape = getShapeById(shapeHandleHit.shapeId)
                 if (hitShape) {
+                    setActiveSelectionId(null)
                     setActiveShapeId(hitShape.id)
                     setIsResizingShape(true)
                     setResizingShapeId(hitShape.id)
@@ -1556,6 +1659,7 @@ export function EditorCanvas() {
             if (hitShapeId) {
                 const hitShape = getShapeById(hitShapeId)
                 if (hitShape) {
+                    setActiveSelectionId(null)
                     setActiveShapeId(hitShape.id)
                     setIsDraggingShape(true)
                     setDraggingShapeId(hitShape.id)
@@ -1572,6 +1676,8 @@ export function EditorCanvas() {
             if (hitResult) {
                 const selection = currentImage.selections?.find(s => s.id === hitResult.selectionId)
                 if (selection) {
+                    setActiveShapeId(null)
+                    setActiveSelectionId(hitResult.selectionId)
                     setIsResizing(true)
                     setResizingSelectionId(hitResult.selectionId)
                     setResizeHandle(hitResult.handle)
@@ -1580,6 +1686,25 @@ export function EditorCanvas() {
                     return
                 }
             }
+
+            const hitSelectionId = getHitSelectionBody(e.clientX, e.clientY)
+            if (hitSelectionId) {
+                const selection = currentImage.selections?.find((item) => item.id === hitSelectionId)
+                if (selection) {
+                    setActiveShapeId(null)
+                    setActiveSelectionId(hitSelectionId)
+                    setIsDraggingSelection(true)
+                    setDraggingSelectionId(hitSelectionId)
+                    setSelectionDragStartPoint({ x: e.clientX, y: e.clientY })
+                    setOriginalSelectionForDrag({ ...selection })
+                    if (canvasRef.current) {
+                        canvasRef.current.style.cursor = "move"
+                    }
+                    return
+                }
+            }
+
+            setActiveSelectionId(null)
             setActiveShapeId(null)
         }
 
@@ -1647,7 +1772,12 @@ export function EditorCanvas() {
                             return
                         }
                         const hitResult = getHitHandle(e.clientX, e.clientY)
-                        canvas.style.cursor = hitResult ? getResizeCursor(hitResult.handle) : "crosshair"
+                        if (hitResult) {
+                            canvas.style.cursor = getResizeCursor(hitResult.handle)
+                            return
+                        }
+                        const hitSelectionId = getHitSelectionBody(e.clientX, e.clientY)
+                        canvas.style.cursor = hitSelectionId ? "move" : "crosshair"
                     }
                 }
             }
@@ -1678,6 +1808,32 @@ export function EditorCanvas() {
             setPan(
                 panSessionRef.current.originPanX + dx,
                 panSessionRef.current.originPanY + dy
+            )
+            return
+        }
+
+        if (isDraggingSelection && selectionDragStartPoint && originalSelectionForDrag && draggingSelectionId && currentImage) {
+            const image = imageRef.current
+            if (!image) return
+
+            const dx = (e.clientX - selectionDragStartPoint.x) / zoom
+            const dy = (e.clientY - selectionDragStartPoint.y) / zoom
+            const maxX = Math.max(0, image.width - originalSelectionForDrag.width)
+            const maxY = Math.max(0, image.height - originalSelectionForDrag.height)
+            const nextX = Math.max(0, Math.min(maxX, originalSelectionForDrag.x + dx))
+            const nextY = Math.max(0, Math.min(maxY, originalSelectionForDrag.y + dy))
+
+            updateSelections(
+                currentImage.id,
+                (currentImage.selections || []).map((selection) =>
+                    selection.id === draggingSelectionId
+                        ? {
+                            ...selection,
+                            x: Math.round(nextX),
+                            y: Math.round(nextY),
+                        }
+                        : selection
+                )
             )
             return
         }
@@ -1981,6 +2137,17 @@ export function EditorCanvas() {
             return
         }
 
+        if (isDraggingSelection) {
+            setIsDraggingSelection(false)
+            setDraggingSelectionId(null)
+            setSelectionDragStartPoint(null)
+            setOriginalSelectionForDrag(null)
+            if (canvas) {
+                canvas.style.cursor = idleCursor
+            }
+            return
+        }
+
         if (isDraggingShape) {
             setIsDraggingShape(false)
             setDraggingShapeId(null)
@@ -2024,6 +2191,7 @@ export function EditorCanvas() {
                 // 只有当选区有一定大小时才添加
                 const newSelections = [...(currentImage.selections || []), currentSelection]
                 updateSelections(currentImage.id, newSelections)
+                setActiveSelectionId(currentSelection.id)
             }
             setIsDrawing(false)
             setStartPoint(null)
@@ -2058,6 +2226,7 @@ export function EditorCanvas() {
     const handleClearSelections = () => {
         if (currentImage) {
             clearSelections(currentImage.id)
+            setActiveSelectionId(null)
         }
     }
 
@@ -2534,7 +2703,8 @@ export function EditorCanvas() {
                             <li>{locale === "zh" ? "2. 魔棒模式：可切换自动/深字/浅字，容差决定相似度，面积上限防止一键吞掉大背景。" : "2. Magic wand: switch Auto/Dark/Light tone, tolerance controls similarity, area cap avoids huge flood fill."}</li>
                             <li>{locale === "zh" ? "3. 导入 mask：点击上传图标，可直接用外部 mask 图做修复。" : "3. Import mask: use upload icon to inpaint from an external mask image."}</li>
                             <li>{locale === "zh" ? "4. 透明度预设：编辑/对比/遮罩三个按钮可快速切换图层显示。" : "4. Opacity presets: Edit/Compare/Mask quickly switch layer visibility."}</li>
-                            <li>{locale === "zh" ? "5. Esc：取消当前绘制，或删除最后一个选区（手动画框模式）。" : "5. Esc: cancel current drawing, or delete last selection (manual selection mode)."}</li>
+                            <li>{locale === "zh" ? "5. Esc：取消当前绘制或取消选中选区；Delete 删除当前选中选区。" : "5. Esc: cancel current drawing or unselect active selection; Delete removes active selection."}</li>
+                            <li>{locale === "zh" ? "6. 方向键：微调当前选区位置；Shift + 方向键：快速移动 10px。" : "6. Arrow keys: nudge active selection; Shift + arrows: move by 10px."}</li>
                         </ul>
                     </DialogContent>
                 </Dialog>
@@ -2676,6 +2846,7 @@ export function EditorCanvas() {
                                 } else if (currentSelection && currentSelection.width > 10 && currentSelection.height > 10) {
                                     const newSelections = [...(currentImage.selections || []), currentSelection]
                                     updateSelections(currentImage.id, newSelections)
+                                    setActiveSelectionId(currentSelection.id)
                                 }
                                 setIsDrawing(false)
                                 setStartPoint(null)

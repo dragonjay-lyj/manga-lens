@@ -100,6 +100,10 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
+    type PipelineStageKey = "ocr" | "translate" | "fillback"
+    const [pipelineStageActive, setPipelineStageActive] = useState<PipelineStageKey | null>(null)
+    const [pipelineStageDurations, setPipelineStageDurations] = useState<Partial<Record<PipelineStageKey, number>>>({})
+    const pipelineStageStartRef = useRef<{ stage: PipelineStageKey; startedAt: number } | null>(null)
     const stopBatchRequestedRef = useRef(false)
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
@@ -121,6 +125,34 @@ export function EditorToolbar() {
     const parseApiError = async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
         return data?.error || `${fallback} (${res.status})`
+    }
+
+    const resetPipelineStageStats = () => {
+        pipelineStageStartRef.current = null
+        setPipelineStageActive(null)
+        setPipelineStageDurations({})
+    }
+
+    const beginPipelineStage = (stage: PipelineStageKey) => {
+        const now = performance.now()
+        const current = pipelineStageStartRef.current
+        if (current && current.stage !== stage) {
+            const elapsed = Math.max(0, Math.round(now - current.startedAt))
+            setPipelineStageDurations((prev) => ({ ...prev, [current.stage]: elapsed }))
+        }
+        pipelineStageStartRef.current = { stage, startedAt: now }
+        setPipelineStageActive(stage)
+    }
+
+    const finishPipelineStage = (stage: PipelineStageKey) => {
+        const now = performance.now()
+        const current = pipelineStageStartRef.current
+        if (current && current.stage === stage) {
+            const elapsed = Math.max(0, Math.round(now - current.startedAt))
+            setPipelineStageDurations((prev) => ({ ...prev, [stage]: elapsed }))
+            pipelineStageStartRef.current = null
+        }
+        setPipelineStageActive((prev) => (prev === stage ? null : prev))
     }
 
     const resolveRetryLimit = (extra: number = 0) =>
@@ -1180,6 +1212,231 @@ export function EditorToolbar() {
         return lines.join("\n")
     }, [locale, settings.highQualityContextPrompt, settings.highQualityLowReasoning, settings.highQualityMode])
 
+    type PretranslateOcrStageResult = {
+        blocks: DetectedTextBlock[]
+    }
+
+    const runPretranslateOcrStage = async (
+        originalImg: HTMLImageElement,
+        selections: Selection[],
+        updateToolbarProgress: boolean,
+        showFailureToast: boolean,
+        canRunPretranslate: boolean,
+        trackStage: boolean,
+        existingDetectedBlocks: DetectedTextBlock[] = []
+    ): Promise<PretranslateOcrStageResult> => {
+        if (trackStage) {
+            beginPipelineStage("ocr")
+        }
+        let allBlocks: DetectedTextBlock[] = applyAngleThresholdFilter(existingDetectedBlocks)
+        try {
+            if (canRunPretranslate) {
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        settings.highQualityMode
+                            ? (locale === "zh" ? "高质量阶段 1/3：OCR 文本识别..." : "HQ stage 1/3: OCR text detection...")
+                            : (locale === "zh" ? "视觉模型预翻译中..." : "Running vision pre-translation...")
+                    )
+                }
+
+                const detectResult = await runDetectTextRequest(
+                    imageToDataUrl(originalImg),
+                    getTargetLanguageForDetection(),
+                    selections,
+                    originalImg.width,
+                    originalImg.height
+                )
+
+                if (!detectResult.success) {
+                    if (showFailureToast) {
+                        toast.warning(
+                            locale === "zh"
+                                ? `预翻译 OCR 失败，继续原流程: ${detectResult.error || "未知错误"}`
+                                : `Pre-translate OCR failed, continuing: ${detectResult.error || "Unknown error"}`
+                        )
+                    }
+                    allBlocks = applyAngleThresholdFilter(existingDetectedBlocks)
+                } else {
+                    allBlocks = detectResult.blocks || []
+                }
+            }
+
+            if (!allBlocks.length) {
+                return { blocks: [] }
+            }
+
+            const scopedBlocks = selections.length
+                ? allBlocks.filter((block) => {
+                    const blockRect = block.bbox
+                    return selections.some((selection) =>
+                        intersectsNormalizedRect(
+                            blockRect,
+                            selectionToNormalizedRect(selection, originalImg.width, originalImg.height)
+                        )
+                    )
+                })
+                : allBlocks
+
+            return {
+                blocks: scopedBlocks,
+            }
+        } finally {
+            if (trackStage) {
+                finishPipelineStage("ocr")
+            }
+        }
+    }
+
+    const runPretranslateTranslateStage = async (
+        blocks: DetectedTextBlock[],
+        updateToolbarProgress: boolean,
+        canRunPretranslate: boolean,
+        trackStage: boolean
+    ): Promise<DetectedTextBlock[]> => {
+        if (trackStage) {
+            beginPipelineStage("translate")
+        }
+        const shouldRunTranslationStage = (settings.bulkTextTranslateOcr ?? false) || Boolean(settings.highQualityMode)
+        try {
+            if (!shouldRunTranslationStage || !blocks.length || !canRunPretranslate) {
+                return blocks
+            }
+
+            const translationItems: BatchTranslateItem[] = blocks
+                .map((block, index) => ({
+                    id: String(index + 1),
+                    content: (block.sourceText || "").trim(),
+                }))
+                .filter((item) => item.content)
+
+            if (!translationItems.length) {
+                return blocks
+            }
+
+            if (updateToolbarProgress) {
+                setProgressDetail(
+                    settings.highQualityMode
+                        ? (locale === "zh" ? "高质量阶段 2/3：批量翻译 OCR 文本..." : "HQ stage 2/3: translating OCR texts...")
+                        : (locale === "zh" ? "OCR 文本批量翻译中（单次调用）..." : "Bulk translating OCR texts (single call)...")
+                )
+            }
+
+            try {
+                const translatedMap = await runBatchTextTranslateRequest(
+                    translationItems,
+                    getTargetLanguageForDetection(),
+                    settings.chapterBulkTranslate
+                        ? (locale === "zh" ? "保持同一话角色语气与术语一致" : "Keep terms and voices consistent in this chapter")
+                        : undefined
+                )
+                return blocks.map((block, index) => {
+                    const translatedText = translatedMap.get(String(index + 1))
+                    if (!translatedText?.trim()) return block
+                    return {
+                        ...block,
+                        translatedText: translatedText.trim(),
+                    }
+                })
+            } catch (error) {
+                const message = error instanceof Error ? error.message : "Unknown error"
+                toast.warning(
+                    locale === "zh"
+                        ? `批量翻译失败，回退检测译文：${message}`
+                        : `Bulk translation failed, fallback to detector translation: ${message}`
+                )
+                return blocks
+            }
+        } finally {
+            if (trackStage) {
+                finishPipelineStage("translate")
+            }
+        }
+    }
+
+    const buildPretranslatePromptFromBlocks = (
+        imageId: string,
+        basePrompt: string,
+        blocks: DetectedTextBlock[],
+        updateToolbarProgress: boolean,
+        trackStage: boolean
+    ): string => {
+        if (trackStage) {
+            beginPipelineStage("fillback")
+        }
+        try {
+            setDetectedTextBlocks(imageId, applyDefaultOrientationToBlocks(blocks))
+
+            if (updateToolbarProgress) {
+                setProgressDetail(
+                    settings.highQualityMode
+                        ? (
+                            locale === "zh"
+                                ? `高质量阶段 3/3：回填文本块并构建提示词（${blocks.length} 条）...`
+                                : `HQ stage 3/3: fillback and prompt assembly (${blocks.length} blocks)...`
+                        )
+                        : (
+                            locale === "zh"
+                                ? `预翻译完成，命中 ${blocks.length} 条文本`
+                                : `Pre-translation ready: ${blocks.length} text blocks`
+                        )
+                )
+            }
+
+            const forceJsonContext = settings.highQualityMode && (settings.highQualityForceJson ?? true)
+            const lines = blocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
+                if (forceJsonContext) {
+                    return JSON.stringify({
+                        index: index + 1,
+                        sourceText: block.sourceText || "",
+                        translatedText: block.translatedText || "",
+                        bbox: {
+                            x: Number(block.bbox.x.toFixed(4)),
+                            y: Number(block.bbox.y.toFixed(4)),
+                            width: Number(block.bbox.width.toFixed(4)),
+                            height: Number(block.bbox.height.toFixed(4)),
+                        },
+                        style: {
+                            textColor: block.style?.textColor || null,
+                            outlineColor: block.style?.outlineColor || null,
+                            angle: block.style?.angle ?? null,
+                            orientation: block.style?.orientation || "auto",
+                            alignment: block.style?.alignment || "auto",
+                            fontWeight: block.style?.fontWeight || "auto",
+                        },
+                    })
+                }
+                const styleHint = block.style
+                    ? `style: color=${block.style.textColor || "?"}, outline=${block.style.outlineColor || "?"}, angle=${block.style.angle ?? "?"}, orientation=${block.style.orientation || "auto"}, align=${block.style.alignment || "auto"}, weight=${block.style.fontWeight || "auto"}`
+                    : "style: (none)"
+                const lineHint = block.lines?.length
+                    ? `lines: ${block.lines.join(" / ")}`
+                    : "lines: (none)"
+                return (
+                    `${index + 1}. 原文: ${block.sourceText || "(空)"} | 译文: ${block.translatedText || "(空)"} | `
+                    + `bbox: x=${block.bbox.x.toFixed(3)}, y=${block.bbox.y.toFixed(3)}, `
+                    + `w=${block.bbox.width.toFixed(3)}, h=${block.bbox.height.toFixed(3)} | `
+                    + `${lineHint} | ${styleHint}`
+                )
+            })
+
+            return [
+                basePrompt,
+                "",
+                forceJsonContext
+                    ? "以下是视觉模型预翻译 JSON（用于保持台词内容与位置）："
+                    : "以下是视觉模型预翻译结果（可用于保持台词内容与位置）：",
+                ...lines,
+                forceJsonContext
+                    ? "请严格依据以上 JSON 的译文与 bbox 排版信息执行。"
+                    : "请优先遵循以上翻译与布局信息。",
+            ].join("\n")
+        } finally {
+            if (trackStage) {
+                finishPipelineStage("fillback")
+            }
+        }
+    }
+
     const buildPretranslateContextPrompt = async (
         imageId: string,
         originalImg: HTMLImageElement,
@@ -1189,175 +1446,49 @@ export function EditorToolbar() {
         showFailureToast: boolean,
         existingDetectedBlocks: DetectedTextBlock[] = []
     ): Promise<PretranslatePromptResult> => {
-        if (!enablePretranslate) {
+        const shouldRunThreeStagePipeline = enablePretranslate || Boolean(settings.highQualityMode)
+        if (!shouldRunThreeStagePipeline) {
+            if (updateToolbarProgress) {
+                resetPipelineStageStats()
+            }
             return { prompt: basePrompt }
         }
+
         const canRunPretranslate = settings.useServerApi || Boolean(settings.apiKey)
-        let allBlocks: DetectedTextBlock[] = applyAngleThresholdFilter(existingDetectedBlocks)
+        const trackStage = updateToolbarProgress
+        if (trackStage) {
+            resetPipelineStageStats()
+        }
+        const ocrStage = await runPretranslateOcrStage(
+            originalImg,
+            selections,
+            updateToolbarProgress,
+            showFailureToast,
+            canRunPretranslate,
+            trackStage,
+            existingDetectedBlocks
+        )
 
-        if (enablePretranslate && canRunPretranslate) {
-            if (updateToolbarProgress) {
-                setProgressDetail(locale === "zh" ? "视觉模型预翻译中..." : "Running vision pre-translation...")
-            }
-
-            const detectResult = await runDetectTextRequest(
-                imageToDataUrl(originalImg),
-                getTargetLanguageForDetection(),
-                selections,
-                originalImg.width,
-                originalImg.height
-            )
-
-            if (!detectResult.success) {
-                if (showFailureToast) {
-                    toast.warning(
-                        locale === "zh"
-                            ? `预翻译失败，继续原流程: ${detectResult.error || "未知错误"}`
-                            : `Pre-translation failed, continuing: ${detectResult.error || "Unknown error"}`
-                    )
-                }
-                // 预翻译失败时，若已有自动检测结果，继续使用已有结果增强提示词
-                allBlocks = existingDetectedBlocks
-            } else {
-                allBlocks = detectResult.blocks || []
-            }
+        if (!ocrStage.blocks.length) {
+            clearDetectedTextBlocks(imageId)
+            return { prompt: basePrompt }
         }
 
-        if (!allBlocks.length) {
-            if (enablePretranslate) {
-                clearDetectedTextBlocks(imageId)
-            }
-            return {
-                prompt: basePrompt,
-            }
-        }
-
-        const scopedBlocks = selections.length
-            ? allBlocks.filter((block) => {
-                const blockRect = block.bbox
-                return selections.some((selection) =>
-                    intersectsNormalizedRect(
-                        blockRect,
-                        selectionToNormalizedRect(selection, originalImg.width, originalImg.height)
-                    )
-                )
-            })
-            : allBlocks
-
-        if (!scopedBlocks.length) {
-            if (enablePretranslate) {
-                clearDetectedTextBlocks(imageId)
-            }
-            return {
-                prompt: basePrompt,
-            }
-        }
-
-        let translatedScopedBlocks = scopedBlocks
-        if (settings.bulkTextTranslateOcr ?? false) {
-            const translationItems: BatchTranslateItem[] = scopedBlocks
-                .map((block, index) => ({
-                    id: String(index + 1),
-                    content: (block.sourceText || "").trim(),
-                }))
-                .filter((item) => item.content)
-
-            if (translationItems.length > 0) {
-                if (updateToolbarProgress) {
-                    setProgressDetail(
-                        locale === "zh"
-                            ? "OCR 文本批量翻译中（单次调用）..."
-                            : "Bulk translating OCR texts (single call)..."
-                    )
-                }
-                try {
-                    const translatedMap = await runBatchTextTranslateRequest(
-                        translationItems,
-                        getTargetLanguageForDetection(),
-                        settings.chapterBulkTranslate
-                            ? (locale === "zh" ? "保持同一话角色语气与术语一致" : "Keep terms and voices consistent in this chapter")
-                            : undefined
-                    )
-                    translatedScopedBlocks = scopedBlocks.map((block, index) => {
-                        const translatedText = translatedMap.get(String(index + 1))
-                        if (!translatedText?.trim()) return block
-                        return {
-                            ...block,
-                            translatedText: translatedText.trim(),
-                        }
-                    })
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : "Unknown error"
-                    toast.warning(
-                        locale === "zh"
-                            ? `批量翻译失败，回退检测译文：${message}`
-                            : `Bulk translation failed, fallback to detector translation: ${message}`
-                    )
-                }
-            }
-        }
-
-        if (enablePretranslate) {
-            setDetectedTextBlocks(imageId, applyDefaultOrientationToBlocks(translatedScopedBlocks))
-        }
-
-        if (updateToolbarProgress) {
-            setProgressDetail(
-                locale === "zh"
-                    ? `预翻译完成，命中 ${translatedScopedBlocks.length} 条文本`
-                    : `Pre-translation ready: ${translatedScopedBlocks.length} text blocks`
-            )
-        }
-
-        const forceJsonContext = settings.highQualityMode && (settings.highQualityForceJson ?? true)
-        const lines = translatedScopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
-            if (forceJsonContext) {
-                return JSON.stringify({
-                    index: index + 1,
-                    sourceText: block.sourceText || "",
-                    translatedText: block.translatedText || "",
-                    bbox: {
-                        x: Number(block.bbox.x.toFixed(4)),
-                        y: Number(block.bbox.y.toFixed(4)),
-                        width: Number(block.bbox.width.toFixed(4)),
-                        height: Number(block.bbox.height.toFixed(4)),
-                    },
-                    style: {
-                        textColor: block.style?.textColor || null,
-                        outlineColor: block.style?.outlineColor || null,
-                        angle: block.style?.angle ?? null,
-                        orientation: block.style?.orientation || "auto",
-                        alignment: block.style?.alignment || "auto",
-                        fontWeight: block.style?.fontWeight || "auto",
-                    },
-                })
-            }
-            const styleHint = block.style
-                ? `style: color=${block.style.textColor || "?"}, outline=${block.style.outlineColor || "?"}, angle=${block.style.angle ?? "?"}, orientation=${block.style.orientation || "auto"}, align=${block.style.alignment || "auto"}, weight=${block.style.fontWeight || "auto"}`
-                : "style: (none)"
-            const lineHint = block.lines?.length
-                ? `lines: ${block.lines.join(" / ")}`
-                : "lines: (none)"
-            return (
-                `${index + 1}. 原文: ${block.sourceText || "(空)"} | 译文: ${block.translatedText || "(空)"} | `
-                + `bbox: x=${block.bbox.x.toFixed(3)}, y=${block.bbox.y.toFixed(3)}, `
-                + `w=${block.bbox.width.toFixed(3)}, h=${block.bbox.height.toFixed(3)} | `
-                + `${lineHint} | ${styleHint}`
-            )
-        })
+        const translatedBlocks = await runPretranslateTranslateStage(
+            ocrStage.blocks,
+            updateToolbarProgress,
+            canRunPretranslate,
+            trackStage
+        )
 
         return {
-            prompt: [
-            basePrompt,
-            "",
-            forceJsonContext
-                ? "以下是视觉模型预翻译 JSON（用于保持台词内容与位置）："
-                : "以下是视觉模型预翻译结果（可用于保持台词内容与位置）：",
-            ...lines,
-            forceJsonContext
-                ? "请严格依据以上 JSON 的译文与 bbox 排版信息执行。"
-                : "请优先遵循以上翻译与布局信息。",
-            ].join("\n"),
+            prompt: buildPretranslatePromptFromBlocks(
+                imageId,
+                basePrompt,
+                translatedBlocks,
+                updateToolbarProgress,
+                trackStage
+            ),
         }
     }
 
@@ -2374,6 +2505,7 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        resetPipelineStageStats()
         setImageStatus(currentImage.id, "processing")
 
         try {
@@ -2417,6 +2549,7 @@ export function EditorToolbar() {
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
+            resetPipelineStageStats()
         }
     }
 
@@ -2441,6 +2574,7 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        resetPipelineStageStats()
         setImageStatus(currentImage.id, "processing")
 
         try {
@@ -2480,6 +2614,7 @@ export function EditorToolbar() {
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
+            resetPipelineStageStats()
         }
     }
 
@@ -2516,6 +2651,7 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        resetPipelineStageStats()
         stopBatchRequestedRef.current = false
         setProgress(0)
         setProgressText(`0/${imagesToProcess.length}`)
@@ -2739,6 +2875,7 @@ export function EditorToolbar() {
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
+            resetPipelineStageStats()
         }
     }
 
@@ -2848,6 +2985,7 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        resetPipelineStageStats()
         setImageStatus(currentImage.id, "processing")
         setProgress(0)
         setProgressText("0/2")
@@ -2946,6 +3084,7 @@ export function EditorToolbar() {
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
+            resetPipelineStageStats()
         }
     }
 
@@ -2976,6 +3115,7 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        resetPipelineStageStats()
         setImageStatus(currentImage.id, "processing")
 
         try {
@@ -3014,6 +3154,7 @@ export function EditorToolbar() {
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
+            resetPipelineStageStats()
         }
     }
 
@@ -3230,6 +3371,17 @@ export function EditorToolbar() {
 
     const hasResult = currentImage?.resultUrl
     const hasCompletedImages = images.some((img) => img.resultUrl)
+    const pipelineStages: PipelineStageKey[] = ["ocr", "translate", "fillback"]
+    const hasPipelineStageStats = pipelineStageActive !== null || Object.keys(pipelineStageDurations).length > 0
+    const getPipelineStageLabel = (stage: PipelineStageKey) => {
+        if (stage === "ocr") return locale === "zh" ? "OCR" : "OCR"
+        if (stage === "translate") return locale === "zh" ? "翻译" : "Translate"
+        return locale === "zh" ? "回填" : "Fillback"
+    }
+    const formatDuration = (ms?: number) => {
+        if (typeof ms !== "number" || Number.isNaN(ms)) return ""
+        return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
+    }
 
     return (
         <div className="h-14 border-b border-border glass flex items-center gap-3 px-4 overflow-hidden">
@@ -3258,6 +3410,31 @@ export function EditorToolbar() {
                         </div>
                         {progressDetail && (
                             <span className="text-xs text-muted-foreground truncate">{progressDetail}</span>
+                        )}
+                        {hasPipelineStageStats && (
+                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                {pipelineStages.map((stage) => {
+                                    const isActive = pipelineStageActive === stage
+                                    const duration = pipelineStageDurations[stage]
+                                    const isDone = typeof duration === "number"
+                                    return (
+                                        <span
+                                            key={stage}
+                                            className={
+                                                isActive
+                                                    ? "rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-blue-500"
+                                                    : isDone
+                                                        ? "rounded border border-green-500/40 bg-green-500/10 px-1.5 py-0.5 text-green-600"
+                                                        : "rounded border border-border/60 bg-muted/30 px-1.5 py-0.5"
+                                            }
+                                        >
+                                            {getPipelineStageLabel(stage)}
+                                            {isDone ? ` ${formatDuration(duration)}` : ""}
+                                            {isActive ? ` · ${locale === "zh" ? "进行中" : "Running"}` : ""}
+                                        </span>
+                                    )
+                                })}
+                            </div>
                         )}
                     </div>
                 )}

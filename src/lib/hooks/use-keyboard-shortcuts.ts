@@ -15,7 +15,7 @@ interface KeyboardShortcutsOptions {
  * - Ctrl+Z: 撤销
  * - Ctrl+Shift+Z / Ctrl+Y: 重做
  * - Ctrl+S: 保存项目（阻止默认行为）
- * - Delete / Backspace: 删除当前选区或图片
+ * - Delete / Backspace: 删除当前活动选区
  * - Escape: 取消当前操作
  * - +/-: 缩放
  * - 0: 重置视图
@@ -30,8 +30,6 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
         resetView,
         setShowResult,
         setCurrentImage,
-        removeImage,
-        clearSelections,
         undo,
         redo,
         canUndo,
@@ -101,17 +99,7 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
             // Delete / Backspace: 删除
             if (e.key === "Delete" || e.key === "Backspace") {
                 e.preventDefault()
-                if (currentImage) {
-                    if (currentImage.selections?.length) {
-                        // 如果有选区，清除选区
-                        clearSelections(currentImage.id)
-                        toast.info("已清除选区")
-                    } else {
-                        // 否则删除图片
-                        removeImage(currentImage.id)
-                        toast.info("已删除图片")
-                    }
-                }
+                window.dispatchEvent(new CustomEvent("mangalens:delete-active-selection"))
                 return
             }
 
@@ -193,8 +181,6 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions = {}) {
             setZoom,
             resetView,
             setShowResult,
-            removeImage,
-            clearSelections,
             options,
             images,
             currentImageId,
