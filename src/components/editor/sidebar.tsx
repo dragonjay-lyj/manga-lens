@@ -213,9 +213,13 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const sidecarImportInputRef = useRef<HTMLInputElement>(null)
     const wordImportInputRef = useRef<HTMLInputElement>(null)
     const textLayerImportInputRef = useRef<HTMLInputElement>(null)
+    const ocrJsonImportInputRef = useRef<HTMLInputElement>(null)
     const findInputRef = useRef<HTMLInputElement>(null)
     const screenshotTranslateInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
+    const [isBatchAutoDetecting, setIsBatchAutoDetecting] = useState(false)
+    const [isBatchTranslatingDetected, setIsBatchTranslatingDetected] = useState(false)
+    const [batchStageProgressText, setBatchStageProgressText] = useState("")
     const [rechargeDialogOpen, setRechargeDialogOpen] = useState(false)
     const [manualJsonOpen, setManualJsonOpen] = useState(false)
     const [manualJsonInput, setManualJsonInput] = useState("")
@@ -962,6 +966,29 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         settings.useServerApi,
     ])
 
+    const buildSelectionsFromDetectedBlocks = useCallback((
+        blocks: DetectTextResponse["blocks"],
+        imageWidth: number,
+        imageHeight: number,
+        idPrefix: string
+    ): Selection[] => {
+        return blocks
+            .map((block, index) => {
+                const x = Math.max(0, Math.round(block.bbox.x * imageWidth))
+                const y = Math.max(0, Math.round(block.bbox.y * imageHeight))
+                const width = Math.max(12, Math.round(block.bbox.width * imageWidth))
+                const height = Math.max(12, Math.round(block.bbox.height * imageHeight))
+                return {
+                    id: `${idPrefix}-${Date.now()}-${index}`,
+                    x: Math.min(x, Math.max(0, imageWidth - 1)),
+                    y: Math.min(y, Math.max(0, imageHeight - 1)),
+                    width: Math.min(width, Math.max(1, imageWidth - x)),
+                    height: Math.min(height, Math.max(1, imageHeight - y)),
+                }
+            })
+            .filter((selection) => selection.width > 4 && selection.height > 4)
+    }, [])
+
     const handleAutoDetectText = useCallback(async () => {
         if (!currentImage) {
             toast.error(locale === "zh" ? "请先选择图片" : "Please select an image first")
@@ -987,21 +1014,12 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 throw new Error(result.error || (locale === "zh" ? "自动识别失败" : "Auto detection failed"))
             }
 
-            const detectedSelections = result.blocks
-                .map((block, index) => {
-                    const x = Math.max(0, Math.round(block.bbox.x * image.width))
-                    const y = Math.max(0, Math.round(block.bbox.y * image.height))
-                    const width = Math.max(12, Math.round(block.bbox.width * image.width))
-                    const height = Math.max(12, Math.round(block.bbox.height * image.height))
-                    return {
-                        id: `auto-${Date.now()}-${index}`,
-                        x: Math.min(x, Math.max(0, image.width - 1)),
-                        y: Math.min(y, Math.max(0, image.height - 1)),
-                        width: Math.min(width, Math.max(1, image.width - x)),
-                        height: Math.min(height, Math.max(1, image.height - y)),
-                    }
-                })
-                .filter((selection) => selection.width > 4 && selection.height > 4)
+            const detectedSelections = buildSelectionsFromDetectedBlocks(
+                result.blocks,
+                image.width,
+                image.height,
+                "auto"
+            )
 
             if (!detectedSelections.length) {
                 clearDetectedTextBlocks(currentImage.id)
@@ -1030,6 +1048,91 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setDetectedTextBlocks,
         runAutoDetect,
         applyDefaultOrientationToBlocks,
+        buildSelectionsFromDetectedBlocks,
+        updateSelections,
+    ])
+
+    const handleAutoDetectAllImages = useCallback(async () => {
+        if (!sortedImages.length) {
+            toast.warning(locale === "zh" ? "请先上传图片" : "Please upload images first")
+            return
+        }
+        if (!canRunAutoDetect) {
+            toast.error(
+                locale === "zh"
+                    ? "自动检测需要填写 API Key 或启用网站 API"
+                    : "Auto-detection requires API key or server API"
+            )
+            return
+        }
+        if (isBatchAutoDetecting || isBatchTranslatingDetected) return
+
+        setIsBatchAutoDetecting(true)
+        let successCount = 0
+        let emptyCount = 0
+        let failedCount = 0
+
+        try {
+            const total = sortedImages.length
+            for (let i = 0; i < total; i++) {
+                const imageItem = sortedImages[i]
+                setBatchStageProgressText(
+                    locale === "zh"
+                        ? `阶段1/2 OCR ${i + 1}/${total}: ${imageItem.file.name}`
+                        : `Stage 1/2 OCR ${i + 1}/${total}: ${imageItem.file.name}`
+                )
+                try {
+                    const image = await loadImage(imageItem.originalUrl)
+                    const imageData = imageToDataUrl(image)
+                    const result = await runAutoDetect(imageData, image.width, image.height)
+
+                    if (!result.success) {
+                        failedCount++
+                        continue
+                    }
+                    const selections = buildSelectionsFromDetectedBlocks(
+                        result.blocks,
+                        image.width,
+                        image.height,
+                        "auto-batch"
+                    )
+                    if (!selections.length) {
+                        clearDetectedTextBlocks(imageItem.id)
+                        emptyCount++
+                        continue
+                    }
+
+                    updateSelections(imageItem.id, selections)
+                    setDetectedTextBlocks(imageItem.id, applyDefaultOrientationToBlocks(result.blocks))
+                    successCount++
+                } catch (error) {
+                    failedCount++
+                    console.error("Batch OCR detect failed:", { imageId: imageItem.id, error })
+                }
+            }
+
+            const summary = locale === "zh"
+                ? `OCR 完成：成功 ${successCount}，空结果 ${emptyCount}，失败 ${failedCount}`
+                : `OCR finished: success ${successCount}, empty ${emptyCount}, failed ${failedCount}`
+            setBatchStageProgressText(summary)
+            toast.success(summary)
+        } finally {
+            setIsBatchAutoDetecting(false)
+            window.setTimeout(() => {
+                setBatchStageProgressText("")
+            }, 3500)
+        }
+    }, [
+        applyDefaultOrientationToBlocks,
+        buildSelectionsFromDetectedBlocks,
+        canRunAutoDetect,
+        clearDetectedTextBlocks,
+        isBatchAutoDetecting,
+        isBatchTranslatingDetected,
+        locale,
+        runAutoDetect,
+        setDetectedTextBlocks,
+        sortedImages,
         updateSelections,
     ])
 
@@ -1846,6 +1949,32 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setDetectedTextBlocks(currentImage.id, nextBlocks)
     }, [currentImage, setDetectedTextBlocks])
 
+    const handleDetectedAngleEdit = useCallback((index: number, angleInput: number) => {
+        if (!currentImage) return
+        if (!Number.isFinite(angleInput)) return
+        const clamped = Math.max(-180, Math.min(180, Math.round(angleInput * 2) / 2))
+        const nextBlocks = [...(currentImage.detectedTextBlocks || [])]
+        if (!nextBlocks[index]) return
+
+        nextBlocks[index] = {
+            ...nextBlocks[index],
+            style: {
+                ...(nextBlocks[index].style || {}),
+                angle: clamped,
+            },
+        }
+        setDetectedTextBlocks(currentImage.id, nextBlocks)
+    }, [currentImage, setDetectedTextBlocks])
+
+    const handleDetectedAngleNudge = useCallback((index: number, delta: number) => {
+        if (!currentImage) return
+        const block = (currentImage.detectedTextBlocks || [])[index]
+        if (!block) return
+        const currentAngle = Number(block.style?.angle ?? 0)
+        const safeCurrent = Number.isFinite(currentAngle) ? currentAngle : 0
+        handleDetectedAngleEdit(index, safeCurrent + delta)
+    }, [currentImage, handleDetectedAngleEdit])
+
     const convertDetectedBlockText = useCallback(async (
         index: number,
         field: "source" | "translated",
@@ -2107,6 +2236,119 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         settings.provider,
         settings.stripReasoningContent,
         settings.useServerApi,
+    ])
+
+    const handleTranslateDetectedForAllImages = useCallback(async () => {
+        if (!sortedImages.length) {
+            toast.warning(locale === "zh" ? "请先上传图片" : "Please upload images first")
+            return
+        }
+        if (!settings.useServerApi && !settings.apiKey) {
+            toast.error(locale === "zh" ? "缺少 API Key" : "Missing API key")
+            return
+        }
+        if (isBatchTranslatingDetected || isBatchAutoDetecting) return
+
+        const targetImages = sortedImages.filter((img) =>
+            (img.detectedTextBlocks || []).some((block) => (block.sourceText || "").trim())
+        )
+        if (!targetImages.length) {
+            toast.warning(locale === "zh" ? "没有可翻译的 OCR 原文" : "No OCR source text to translate")
+            return
+        }
+
+        setIsBatchTranslatingDetected(true)
+        let successImages = 0
+        let translatedBlocks = 0
+        let skippedImages = 0
+        let failedImages = 0
+
+        try {
+            const total = targetImages.length
+            for (let i = 0; i < total; i++) {
+                const imageItem = targetImages[i]
+                setBatchStageProgressText(
+                    locale === "zh"
+                        ? `阶段2/2 翻译 ${i + 1}/${total}: ${imageItem.file.name}`
+                        : `Stage 2/2 Translate ${i + 1}/${total}: ${imageItem.file.name}`
+                )
+
+                const blocks = [...(imageItem.detectedTextBlocks || [])]
+                const sourceItems: BatchTranslateItem[] = blocks
+                    .map((block, index) => ({
+                        id: String(index),
+                        content: (block.sourceText || "").trim(),
+                    }))
+                    .filter((item) => item.content)
+
+                if (!sourceItems.length) {
+                    skippedImages++
+                    continue
+                }
+
+                try {
+                    const translatedMap = await runBatchTextTranslateRequest(
+                        sourceItems,
+                        getTargetLanguageForDetection(),
+                        settings.chapterBulkTranslate
+                            ? (locale === "zh"
+                                ? "保持同页台词术语与角色语气一致。"
+                                : "Keep terms and character tone consistent on the page.")
+                            : undefined
+                    )
+
+                    let changed = 0
+                    blocks.forEach((block, index) => {
+                        const translated = (translatedMap.get(String(index)) || "").trim()
+                        if (!translated) return
+                        const nextRich = plainTextToRichHtml(translated)
+                        if (block.translatedText === translated && (block.richTextHtml || "") === nextRich) {
+                            return
+                        }
+                        blocks[index] = {
+                            ...block,
+                            translatedText: translated,
+                            richTextHtml: nextRich,
+                        }
+                        changed++
+                    })
+
+                    if (!changed) {
+                        skippedImages++
+                        continue
+                    }
+
+                    setDetectedTextBlocks(imageItem.id, blocks)
+                    successImages++
+                    translatedBlocks += changed
+                } catch (error) {
+                    failedImages++
+                    console.error("Batch OCR text translate failed:", { imageId: imageItem.id, error })
+                }
+            }
+
+            const summary = locale === "zh"
+                ? `批量翻译完成：更新 ${translatedBlocks} 条（${successImages} 张图），跳过 ${skippedImages}，失败 ${failedImages}`
+                : `Batch translation done: ${translatedBlocks} blocks updated (${successImages} images), skipped ${skippedImages}, failed ${failedImages}`
+            setBatchStageProgressText(summary)
+            toast.success(summary)
+        } finally {
+            setIsBatchTranslatingDetected(false)
+            window.setTimeout(() => {
+                setBatchStageProgressText("")
+            }, 3500)
+        }
+    }, [
+        getTargetLanguageForDetection,
+        isBatchAutoDetecting,
+        isBatchTranslatingDetected,
+        locale,
+        runBatchTextTranslateRequest,
+        setDetectedTextBlocks,
+        settings.apiKey,
+        settings.chapterBulkTranslate,
+        settings.useServerApi,
+        sortedImages,
     ])
 
     const handleRetranslateDetectedBlock = useCallback(async (
@@ -2663,6 +2905,184 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
     }, [currentImage, images, locale])
+
+    const handleExportOcrSourceJson = useCallback((scope: "current" | "all") => {
+        const targetImages = scope === "all"
+            ? images.filter((img) => (img.detectedTextBlocks || []).length > 0)
+            : currentImage
+                ? [currentImage]
+                : []
+
+        if (!targetImages.length) {
+            toast.warning(locale === "zh" ? "没有可导出的 OCR JSON" : "No OCR JSON to export")
+            return
+        }
+
+        const payload = {
+            schemaVersion: 1,
+            type: "mangalens.ocr-source",
+            scope,
+            exportedAt: new Date().toISOString(),
+            images: targetImages.map((img) => ({
+                imageId: img.id,
+                fileName: img.file.name,
+                blocks: (img.detectedTextBlocks || []).map((block, index) => ({
+                    index,
+                    sourceText: block.sourceText || "",
+                    bbox: block.bbox,
+                    sourceLanguage: block.sourceLanguage || "",
+                    lines: block.lines || [],
+                    segments: block.segments || [],
+                    style: block.style || {},
+                })),
+            })),
+        }
+
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = scope === "all"
+            ? `manga-lens-ocr-source-all-${Date.now()}.json`
+            : `${currentImage?.file.name.replace(/\.[^.]+$/, "") || "current"}-ocr-source.json`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, [currentImage, images, locale])
+
+    const handleImportOcrTranslatedJson = useCallback(async (file: File) => {
+        try {
+            const raw = await file.text()
+            const parsed = JSON.parse(raw) as Record<string, unknown>
+
+            type ImportBlock = {
+                index?: number
+                id?: string | number
+                sourceText?: string
+                translatedText?: string
+                translation?: string
+                content?: string
+                text?: string
+            }
+
+            const applyImportedBlocksToImage = (
+                imageId: string,
+                importBlocksRaw: unknown
+            ): number => {
+                const imageItem = images.find((img) => img.id === imageId)
+                if (!imageItem) return 0
+                const importBlocks = Array.isArray(importBlocksRaw)
+                    ? (importBlocksRaw as ImportBlock[])
+                    : []
+                if (!importBlocks.length) return 0
+
+                const nextBlocks = [...(imageItem.detectedTextBlocks || [])]
+                if (!nextBlocks.length) return 0
+
+                let changed = 0
+                const usedMatchIndex = new Set<number>()
+                importBlocks.forEach((item) => {
+                    if (!item || typeof item !== "object") return
+                    const translated = String(
+                        item.translatedText ??
+                        item.translation ??
+                        item.content ??
+                        item.text ??
+                        ""
+                    ).trim()
+                    if (!translated) return
+
+                    const numericIndex = Number(
+                        item.index ??
+                        item.id ??
+                        -1
+                    )
+                    let targetIndex = Number.isFinite(numericIndex) ? Math.floor(numericIndex) : -1
+
+                    if (targetIndex < 0 || targetIndex >= nextBlocks.length) {
+                        const source = String(item.sourceText ?? "").trim()
+                        if (source) {
+                            const matchIndex = nextBlocks.findIndex((block, idx) => {
+                                if (usedMatchIndex.has(idx)) return false
+                                return (block.sourceText || "").trim() === source
+                            })
+                            if (matchIndex >= 0) {
+                                targetIndex = matchIndex
+                            }
+                        }
+                    }
+
+                    if (targetIndex < 0 || targetIndex >= nextBlocks.length) return
+                    usedMatchIndex.add(targetIndex)
+
+                    const nextRich = plainTextToRichHtml(translated)
+                    const prev = nextBlocks[targetIndex]
+                    if (prev.translatedText === translated && (prev.richTextHtml || "") === nextRich) return
+
+                    nextBlocks[targetIndex] = {
+                        ...prev,
+                        translatedText: translated,
+                        richTextHtml: nextRich,
+                    }
+                    changed++
+                })
+
+                if (changed > 0) {
+                    setDetectedTextBlocks(imageItem.id, nextBlocks)
+                }
+                return changed
+            }
+
+            const importedImages = Array.isArray(parsed.images)
+                ? parsed.images as Array<Record<string, unknown>>
+                : []
+
+            let totalChanged = 0
+            let matchedImages = 0
+            let missedImages = 0
+
+            if (importedImages.length > 0) {
+                importedImages.forEach((item) => {
+                    const imageId = String(item.imageId || "").trim()
+                    const fileName = String(item.fileName || "").trim()
+                    const matchedImage = imageId
+                        ? images.find((img) => img.id === imageId)
+                        : images.find((img) => img.file.name === fileName)
+                    if (!matchedImage) {
+                        missedImages++
+                        return
+                    }
+                    const changed = applyImportedBlocksToImage(matchedImage.id, item.blocks)
+                    if (changed > 0) {
+                        matchedImages++
+                        totalChanged += changed
+                    }
+                })
+            } else {
+                if (!currentImage) {
+                    throw new Error(locale === "zh" ? "请先选择图片，再导入当前页翻译 JSON" : "Select an image before importing current-page translation JSON")
+                }
+                totalChanged = applyImportedBlocksToImage(
+                    currentImage.id,
+                    parsed.blocks ?? parsed.items ?? parsed
+                )
+                matchedImages = totalChanged > 0 ? 1 : 0
+            }
+
+            if (!totalChanged) {
+                toast.warning(locale === "zh" ? "未匹配到可回填的译文" : "No translatable entries matched")
+                return
+            }
+
+            const summary = locale === "zh"
+                ? `已回填 ${totalChanged} 条译文（${matchedImages} 张图${missedImages > 0 ? `，${missedImages} 张未匹配` : ""}）`
+                : `Applied ${totalChanged} translations (${matchedImages} images${missedImages > 0 ? `, ${missedImages} unmatched` : ""})`
+            toast.success(summary)
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "导入译文 JSON 失败" : "Failed to import translated JSON"))
+        }
+    }, [currentImage, images, locale, setDetectedTextBlocks])
 
     const handleImportWord = useCallback(async (file: File) => {
         if (!currentImage) return
@@ -3522,6 +3942,38 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                             : "Auto-detection needs API key or server API"}
                                     </p>
                                 )}
+                                <div className="grid grid-cols-2 gap-2">
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="w-full"
+                                        onClick={() => void handleAutoDetectAllImages()}
+                                        disabled={isBatchAutoDetecting || isBatchTranslatingDetected || !canRunAutoDetect || !images.length}
+                                    >
+                                        {isBatchAutoDetecting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                        {locale === "zh" ? "阶段1：全部OCR" : "Stage 1: OCR all"}
+                                    </Button>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="w-full"
+                                        onClick={() => void handleTranslateDetectedForAllImages()}
+                                        disabled={isBatchAutoDetecting || isBatchTranslatingDetected || (!settings.useServerApi && !settings.apiKey) || !images.length}
+                                    >
+                                        {isBatchTranslatingDetected && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                        {locale === "zh" ? "阶段2：全部翻译" : "Stage 2: Translate all"}
+                                    </Button>
+                                </div>
+                                <p className="text-[11px] text-muted-foreground">
+                                    {locale === "zh"
+                                        ? "分步模式：先跑全部 OCR，再跑全部翻译，避免识别/翻译模型来回切换。"
+                                        : "Stage mode: run OCR for all pages first, then translate all OCR texts to avoid frequent model switching."}
+                                </p>
+                                {batchStageProgressText && (
+                                    <p className="text-[11px] text-muted-foreground">
+                                        {batchStageProgressText}
+                                    </p>
+                                )}
                             </>
                         ) : (
                             <p className="text-xs text-muted-foreground rounded-md border border-border/60 bg-muted/30 p-2">
@@ -3698,6 +4150,48 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         >
                                             {locale === "zh" ? "导出原文（全部）" : "Export Source (All)"}
                                         </Button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={() => handleExportOcrSourceJson("current")}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "导出 OCR JSON（当前）" : "Export OCR JSON (Current)"}
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={() => handleExportOcrSourceJson("all")}
+                                            disabled={!images.some((img) => (img.detectedTextBlocks || []).length > 0)}
+                                        >
+                                            {locale === "zh" ? "导出 OCR JSON（全部）" : "Export OCR JSON (All)"}
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs col-span-2"
+                                            onClick={() => ocrJsonImportInputRef.current?.click()}
+                                            disabled={!images.length}
+                                        >
+                                            {locale === "zh" ? "导入翻译 JSON 回填" : "Import translated JSON"}
+                                        </Button>
+                                        <input
+                                            ref={ocrJsonImportInputRef}
+                                            type="file"
+                                            accept=".json"
+                                            className="hidden"
+                                            aria-label={locale === "zh" ? "导入翻译 JSON" : "Import translated JSON"}
+                                            onChange={(event) => {
+                                                const file = event.target.files?.[0]
+                                                if (!file) return
+                                                void handleImportOcrTranslatedJson(file)
+                                                event.currentTarget.value = ""
+                                            }}
+                                        />
                                     </div>
                                     <div className="rounded-md border border-border/60 bg-muted/30 p-2 space-y-2">
                                         <p className="text-[11px] font-medium">
@@ -3895,6 +4389,45 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                                 onChange={(html) => handleDetectedTextEdit(index, html)}
                                                             />
                                                         </div>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <Label className="text-[10px] text-muted-foreground">
+                                                            {locale === "zh" ? "旋转角度" : "Rotation angle"}
+                                                        </Label>
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-6 px-2 text-[10px]"
+                                                            onClick={() => handleDetectedAngleNudge(index, -0.5)}
+                                                        >
+                                                            -0.5°
+                                                        </Button>
+                                                        <Input
+                                                            type="number"
+                                                            className="h-6 w-24 text-[10px]"
+                                                            value={String(
+                                                                Number.isFinite(Number(block.style?.angle))
+                                                                    ? Number(block.style?.angle)
+                                                                    : 0
+                                                            )}
+                                                            min={-180}
+                                                            max={180}
+                                                            step={0.5}
+                                                            onChange={(event) => {
+                                                                const value = Number(event.target.value)
+                                                                handleDetectedAngleEdit(index, value)
+                                                            }}
+                                                        />
+                                                        <Button
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-6 px-2 text-[10px]"
+                                                            onClick={() => handleDetectedAngleNudge(index, 0.5)}
+                                                        >
+                                                            +0.5°
+                                                        </Button>
                                                     </div>
                                                     <p className="text-[10px] text-muted-foreground">
                                                         bbox: x={block.bbox.x.toFixed(3)}, y={block.bbox.y.toFixed(3)}, w={block.bbox.width.toFixed(3)}, h={block.bbox.height.toFixed(3)}

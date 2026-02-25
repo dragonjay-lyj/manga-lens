@@ -313,7 +313,7 @@ export function RichTextEditor({
                         type="range"
                         min={10}
                         max={100}
-                        step={5}
+                        step={1}
                         value={textOpacity}
                         aria-label={locale === "zh" ? "文本透明度" : "Text opacity"}
                         onChange={(e) => setTextOpacity(Number(e.target.value))}
