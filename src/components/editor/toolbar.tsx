@@ -1471,6 +1471,9 @@ export function EditorToolbar() {
                 forceJsonContext
                     ? "请严格依据以上 JSON 的译文与 bbox 排版信息执行。"
                     : "请优先遵循以上翻译与布局信息。",
+                locale === "zh"
+                    ? "硬性要求：必须逐条使用提供的译文文本，不得改写、增删或替换同义句。"
+                    : "Hard requirement: use the provided translated text verbatim per block; do not paraphrase, omit, or rewrite.",
             ].join("\n")
         } finally {
             if (trackStage) {
@@ -1488,8 +1491,43 @@ export function EditorToolbar() {
         showFailureToast: boolean,
         existingDetectedBlocks: DetectedTextBlock[] = []
     ): Promise<PretranslatePromptResult> => {
+        const normalizedExistingBlocks = applyDefaultOrientationToBlocks(existingDetectedBlocks).filter((block) => {
+            const source = (block.sourceText || "").trim()
+            const translated = (block.translatedText || "").trim()
+            return Boolean(source || translated)
+        })
+        const scopedExistingBlocks = selections.length
+            ? normalizedExistingBlocks.filter((block) => {
+                const blockRect = block.bbox
+                return selections.some((selection) =>
+                    intersectsNormalizedRect(
+                        blockRect,
+                        selectionToNormalizedRect(selection, originalImg.width, originalImg.height)
+                    )
+                )
+            })
+            : normalizedExistingBlocks
+
         const shouldRunThreeStagePipeline = enablePretranslate || Boolean(settings.highQualityMode)
         if (!shouldRunThreeStagePipeline) {
+            if (scopedExistingBlocks.length > 0) {
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        locale === "zh"
+                            ? `使用已编辑 OCR 文本回填（${scopedExistingBlocks.length} 条）...`
+                            : `Applying existing OCR text blocks (${scopedExistingBlocks.length})...`
+                    )
+                }
+                return {
+                    prompt: buildPretranslatePromptFromBlocks(
+                        imageId,
+                        basePrompt,
+                        scopedExistingBlocks,
+                        updateToolbarProgress,
+                        false
+                    ),
+                }
+            }
             if (updateToolbarProgress) {
                 resetPipelineStageStats()
             }
@@ -1541,7 +1579,8 @@ export function EditorToolbar() {
         selections: Selection[],
         effectivePrompt: string,
         updateToolbarProgress: boolean,
-        trackSelectionProgress: boolean
+        trackSelectionProgress: boolean,
+        forceSlowFallbacks: boolean = false
     ) => {
         if (trackSelectionProgress) {
             initializeSelectionProgress(imageId, selections.map((selection) => selection.id))
@@ -1552,7 +1591,7 @@ export function EditorToolbar() {
         const englishTarget = directionMeta.targetLangCode === "en"
         const total = selections.length
         const hasManySelections = total >= 10
-        const enableSlowGenerationFallbacks = settings.enableSlowGenerationFallbacks ?? false
+        const enableSlowGenerationFallbacks = forceSlowFallbacks || (settings.enableSlowGenerationFallbacks ?? false)
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
         const useColorAnchors = trackSelectionProgress && (settings.autoTextColorAdapt ?? true)
         const sampleDominantTextColor = useColorAnchors
@@ -2115,6 +2154,13 @@ export function EditorToolbar() {
                 effectivePrompt,
                 "",
                 locale === "zh"
+                    ? "【遮罩模式一致性约束】保持每个气泡与原文相近的字体风格（字重/描边/朝向），不要统一成另一种字体。"
+                    : "[Mask-mode consistency] Keep each bubble close to original font style (weight/stroke/orientation), avoid global font unification.",
+                locale === "zh"
+                    ? "若译文较长，请优先换行与缩小字号，禁止截断文字。"
+                    : "If translation is longer, prioritize line-wrap and font-size reduction. Never clip text.",
+                "",
+                locale === "zh"
                     ? "【遮罩模式颜色锚点】请按以下选区主色保留文字颜色，不要统一黑字："
                     : "[Mask mode color anchors] Keep text colors by selection, do not normalize to black:",
                 ...sourceSelections.slice(0, 24).map((selection, idx) => {
@@ -2129,7 +2175,7 @@ export function EditorToolbar() {
                         : `${idx + 1}. Selection #${idx + 1} dominant color≈${color}`
                 }),
             ].join("\n")
-            : effectivePrompt
+                    : effectivePrompt
 
         const inputImageData = sourceSelections.length
             ? (
@@ -2211,7 +2257,8 @@ export function EditorToolbar() {
                     sourceSelections,
                     effectivePrompt,
                     updateToolbarProgress,
-                    trackSelectionProgress
+                    trackSelectionProgress,
+                    true
                 )
             }
         }
@@ -2298,6 +2345,83 @@ export function EditorToolbar() {
             }
         }
 
+        if (!sourceSelections.length) {
+            if (updateToolbarProgress) {
+                setProgress(100)
+                setProgressText("1/1")
+                setProgressDetail(
+                    useReverseMaskMode
+                        ? (locale === "zh" ? "反向遮罩模式处理完成" : "Inverse-mask processing complete")
+                        : (locale === "zh" ? "遮罩模式处理完成" : "Mask-mode processing complete")
+                )
+            }
+            return colorAdjustedResultData
+        }
+
+        const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
+        const problematicSelections: Selection[] = []
+
+        for (const selection of sourceSelections) {
+            const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
+            const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
+            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+                computeEdgeInkRatio(generatedPatch),
+                computePatchInkDensity(sourcePatch),
+                computePatchInkDensity(generatedPatch),
+            ])
+            const isLikelyVertical = selection.height > selection.width * 1.2
+            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+            const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
+            const likelyFontDrift =
+                sourceInkDensity > 0.02 &&
+                (densityRatio < 0.48 || densityRatio > 2.2)
+
+            if (likelyClipped || likelyFontDrift) {
+                problematicSelections.push(selection)
+            }
+        }
+
+        if (problematicSelections.length > 0) {
+            if (updateToolbarProgress) {
+                setProgress(86)
+                setProgressText("1/2")
+                setProgressDetail(
+                    locale === "zh"
+                        ? `遮罩后检测到 ${problematicSelections.length} 个选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelections.length} selections look clipped/style-drifted after mask mode, patch-refining...`
+                )
+            }
+
+            if (trackSelectionProgress) {
+                const problematicIds = new Set(problematicSelections.map((selection) => selection.id))
+                sourceSelections.forEach((selection) => {
+                    if (!problematicIds.has(selection.id)) {
+                        setSelectionProgress(imageId, selection.id, "completed")
+                    }
+                })
+            }
+
+            try {
+                return await processSelectionsPatchMode(
+                    imageId,
+                    originalImg,
+                    colorAdjustedResultImage,
+                    problematicSelections,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress,
+                    true
+                )
+            } catch (error) {
+                console.warn("Mask post-refine failed, keeping mask result:", error)
+                toast.warning(
+                    locale === "zh"
+                        ? "局部回补失败，已保留遮罩结果。"
+                        : "Patch refinement failed. Keeping mask-mode output."
+                )
+            }
+        }
+
         if (trackSelectionProgress) {
             sourceSelections.forEach((selection) => setSelectionProgress(imageId, selection.id, "completed"))
         }
@@ -2310,10 +2434,6 @@ export function EditorToolbar() {
                     ? (locale === "zh" ? "反向遮罩模式处理完成" : "Inverse-mask processing complete")
                     : (locale === "zh" ? "遮罩模式处理完成" : "Mask-mode processing complete")
             )
-        }
-
-        if (!sourceSelections.length) {
-            return colorAdjustedResultData
         }
 
         return compositeSelectionsFromFullImage(
@@ -2587,6 +2707,125 @@ export function EditorToolbar() {
             })
             setImageStatus(currentImage.id, "failed", undefined, errorMessage)
             toast.error(t.errors.generateFailed + ": " + getShortError(errorMessage), { duration: 8000 })
+        } finally {
+            setProcessing(false)
+            setProgress(0)
+            setProgressText("")
+            setProgressDetail("")
+            resetPipelineStageStats()
+        }
+    }
+
+    const handleGenerateFromEditedOcr = async () => {
+        if (!currentImage) {
+            toast.error(t.errors.noImage)
+            return
+        }
+
+        const editedBlocks = (currentImage.detectedTextBlocks || []).filter((block) => {
+            const source = (block.sourceText || "").trim()
+            const translated = (block.translatedText || "").trim()
+            return Boolean(source || translated)
+        })
+
+        if (!editedBlocks.length) {
+            toast.warning(
+                locale === "zh"
+                    ? "当前图片没有可用 OCR 文本，请先执行 OCR 并回填。"
+                    : "No usable OCR text blocks on current image. Run OCR and fill back first."
+            )
+            return
+        }
+
+        // 检查 API 配置
+        if (settings.useServerApi) {
+            const originalImg = await loadImage(currentImage.originalUrl)
+            const existingSelections = currentImage.selections || []
+            const effectiveSelections = existingSelections.length > 0
+                ? existingSelections
+                : blocksToSelections(editedBlocks, originalImg.width, originalImg.height, "ocr-fillback")
+            const COST_PER_GENERATION = 10
+            const generationUnits = useMaskMode
+                ? 1
+                : Math.max(1, effectiveSelections.length || 0)
+            const totalCost = COST_PER_GENERATION * generationUnits
+            const deducted = await deductCoins(totalCost)
+            if (!deducted) {
+                return
+            }
+            toast.info(`已扣除 ${totalCost} Coins`)
+        } else if (!settings.apiKey) {
+            toast.error(t.errors.apiKeyRequired)
+            return
+        }
+
+        if (!settings.useServerApi && settings.provider === "gemini" && settings.model && !settings.model.includes("image")) {
+            toast.warning("当前 Gemini 模型可能不支持图像输出，建议使用 gemini-2.5-flash-image")
+        }
+
+        setProcessing(true)
+        resetPipelineStageStats()
+        setImageStatus(currentImage.id, "processing")
+
+        try {
+            const originalImg = await loadImage(currentImage.originalUrl)
+            const existingSelections = currentImage.selections || []
+            const effectiveSelections = existingSelections.length > 0
+                ? existingSelections
+                : blocksToSelections(editedBlocks, originalImg.width, originalImg.height, "ocr-fillback")
+
+            if (!existingSelections.length && effectiveSelections.length > 0) {
+                updateSelections(currentImage.id, effectiveSelections)
+            }
+
+            if (!effectiveSelections.length) {
+                throw new Error(locale === "zh" ? "未生成可用选区，请先框选或执行 OCR 检测" : "No usable selections. Draw selections or run OCR first.")
+            }
+
+            const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
+                direction: settings.translationDirection,
+                sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
+                comicType: settings.comicType,
+                textStylePreset: settings.textStylePreset,
+                preferredFontFamily: settings.preferredOutputFontFamily,
+            }))
+
+            const resultUrl = await processImage(
+                currentImage.id,
+                currentImage.originalUrl,
+                currentImage.imageOnlyBaseUrl,
+                effectiveSelections,
+                editedBlocks,
+                basePrompt,
+                true,
+                false
+            )
+
+            setImageStatus(currentImage.id, "completed", resultUrl)
+            setShowResult(true)
+            void logUsage("generate", {
+                source: settings.useServerApi ? "server_api" : "custom_key",
+                mode: activeMaskMode,
+                selectionCount: effectiveSelections.length,
+                workflow: "edited_ocr_fillback",
+            })
+            toast.success(
+                locale === "zh"
+                    ? `已按编辑 OCR 回填生成（${effectiveSelections.length} 个选区）`
+                    : `Generated with edited OCR fillback (${effectiveSelections.length} selections)`
+            )
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : "未知错误"
+            console.error("Generate from edited OCR failed:", {
+                provider: settings.provider,
+                model: settings.model,
+                error,
+            })
+            setImageStatus(currentImage.id, "failed", undefined, errorMessage)
+            toast.error(
+                (locale === "zh" ? "按已编辑 OCR 回填生成失败: " : "Generate from edited OCR failed: ") + getShortError(errorMessage),
+                { duration: 8000 }
+            )
         } finally {
             setProcessing(false)
             setProgress(0)
@@ -3440,6 +3679,11 @@ export function EditorToolbar() {
 
     const hasResult = currentImage?.resultUrl
     const hasCompletedImages = images.some((img) => img.resultUrl)
+    const hasEditedOcrBlocks = (currentImage?.detectedTextBlocks || []).some((block) => {
+        const source = (block.sourceText || "").trim()
+        const translated = (block.translatedText || "").trim()
+        return Boolean(source || translated)
+    })
     const currentImageIndex = currentImage ? images.findIndex((img) => img.id === currentImage.id) : -1
     const canGoPrevImage = currentImageIndex > 0
     const canGoNextImage = currentImageIndex >= 0 && currentImageIndex < images.length - 1
@@ -3575,6 +3819,24 @@ export function EditorToolbar() {
                         <Play className="h-4 w-4 mr-2" />
                     )}
                     {t.editor.toolbar.generate}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleGenerateFromEditedOcr}
+                    disabled={isProcessing || !currentImage || !hasEditedOcrBlocks}
+                    title={
+                        locale === "zh"
+                            ? "只使用当前已编辑的 OCR 文本回填生成，不会重新检测。"
+                            : "Generate using current edited OCR texts only, without re-detection."
+                    }
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <FileText className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "按已编辑OCR回填生成" : "Generate from edited OCR"}
                 </Button>
 
                 <Button
