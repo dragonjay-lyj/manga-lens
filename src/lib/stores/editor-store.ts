@@ -109,6 +109,8 @@ export interface EditorSettings {
     suppressFurigana: boolean
     autoTextColorAdapt: boolean
     bulkTextTranslateOcr: boolean
+    enableStagedPipeline: boolean
+    enableSlowGenerationFallbacks: boolean
     stripReasoningContent: boolean
     singleRetranslateDeepMode: boolean
     singleRetranslateContextWindow: number
@@ -254,6 +256,8 @@ const defaultSettings: EditorSettings = {
     suppressFurigana: false,
     autoTextColorAdapt: true,
     bulkTextTranslateOcr: false,
+    enableStagedPipeline: false,
+    enableSlowGenerationFallbacks: false,
     stripReasoningContent: true,
     singleRetranslateDeepMode: false,
     singleRetranslateContextWindow: 2,

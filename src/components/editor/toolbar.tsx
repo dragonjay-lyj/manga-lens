@@ -396,7 +396,7 @@ export function EditorToolbar() {
 
             const errorText = (result.error || "").toLowerCase()
             const canRetry =
-                /429|rate|timeout|timed out|network|temporarily|overload|503|502|504/.test(errorText)
+                /429|rate|network|temporarily|overload|503|502|504/.test(errorText)
             if (!canRetry || attempt >= totalRetries) {
                 break
             }
@@ -821,8 +821,8 @@ export function EditorToolbar() {
             const sampleHeight = 256
             const beforeCanvas = document.createElement("canvas")
             const afterCanvas = document.createElement("canvas")
-            const beforeCtx = beforeCanvas.getContext("2d")
-            const afterCtx = afterCanvas.getContext("2d")
+            const beforeCtx = beforeCanvas.getContext("2d", { willReadFrequently: true })
+            const afterCtx = afterCanvas.getContext("2d", { willReadFrequently: true })
             if (!beforeCtx || !afterCtx) return 1
 
             beforeCanvas.width = sampleWidth
@@ -857,7 +857,7 @@ export function EditorToolbar() {
             const image = await loadImage(imageDataUrl)
             const sampleSize = 320
             const canvas = document.createElement("canvas")
-            const ctx = canvas.getContext("2d")
+            const ctx = canvas.getContext("2d", { willReadFrequently: true })
             if (!ctx) return 0
 
             canvas.width = sampleSize
@@ -898,7 +898,7 @@ export function EditorToolbar() {
             const image = await loadImage(imageDataUrl)
             const sampleSize = 256
             const canvas = document.createElement("canvas")
-            const ctx = canvas.getContext("2d")
+            const ctx = canvas.getContext("2d", { willReadFrequently: true })
             if (!ctx) return 0
 
             canvas.width = sampleSize
@@ -962,7 +962,7 @@ export function EditorToolbar() {
 
     const createSelectionDominantTextColorSampler = (image: HTMLImageElement) => {
         const canvas = document.createElement("canvas")
-        const ctx = canvas.getContext("2d")
+        const ctx = canvas.getContext("2d", { willReadFrequently: true })
         if (!ctx) return () => null
 
         canvas.width = image.width
@@ -1066,9 +1066,9 @@ export function EditorToolbar() {
             const height = Math.max(1, generatedImg.height)
 
             const sourceCanvas = document.createElement("canvas")
-            const sourceCtx = sourceCanvas.getContext("2d")
+            const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true })
             const outputCanvas = document.createElement("canvas")
-            const outputCtx = outputCanvas.getContext("2d")
+            const outputCtx = outputCanvas.getContext("2d", { willReadFrequently: true })
             if (!sourceCtx || !outputCtx) return null
 
             sourceCanvas.width = width
@@ -1135,7 +1135,7 @@ export function EditorToolbar() {
         if (!selections.length) return 0
 
         const canvas = document.createElement("canvas")
-        const ctx = canvas.getContext("2d")
+        const ctx = canvas.getContext("2d", { willReadFrequently: true })
         if (!ctx) return 0
         canvas.width = image.width
         canvas.height = image.height
@@ -1552,6 +1552,7 @@ export function EditorToolbar() {
         const englishTarget = directionMeta.targetLangCode === "en"
         const total = selections.length
         const hasManySelections = total >= 10
+        const enableSlowGenerationFallbacks = settings.enableSlowGenerationFallbacks ?? false
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
         const useColorAnchors = trackSelectionProgress && (settings.autoTextColorAdapt ?? true)
         const sampleDominantTextColor = useColorAnchors
@@ -1822,7 +1823,7 @@ export function EditorToolbar() {
                 const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
                 if (sourcePatch) {
                     let bestImageData = result.imageData
-                    const shouldRunDiffRetry = isHard || !hasManySelections
+                    const shouldRunDiffRetry = enableSlowGenerationFallbacks && (isHard || !hasManySelections)
                     let bestDiffRatio = 1
 
                     if (shouldRunDiffRetry) {
@@ -1911,7 +1912,7 @@ export function EditorToolbar() {
                     // ignore resolution inspect failures
                 }
 
-                if (englishTarget && sourcePatch) {
+                if (enableSlowGenerationFallbacks && englishTarget && sourcePatch) {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
                     const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const likelyOverflow = edgeInkRatio > 0.42
@@ -1948,7 +1949,7 @@ export function EditorToolbar() {
                         }
                     }
                 }
-                if (!englishTarget && directionMeta.targetLangCode === "zh" && sourcePatch) {
+                if (enableSlowGenerationFallbacks && !englishTarget && directionMeta.targetLangCode === "zh" && sourcePatch) {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
                     const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const isLikelyVertical = selection.height > selection.width * 1.2
@@ -2190,7 +2191,7 @@ export function EditorToolbar() {
                 originalDarkRatio > 0.008 &&
                 resultDarkRatio < originalDarkRatio * 0.2
 
-            if (suspiciousBlank) {
+            if (suspiciousBlank && (settings.enableSlowGenerationFallbacks ?? false)) {
                 if (updateToolbarProgress) {
                     setProgressDetail(
                         locale === "zh"

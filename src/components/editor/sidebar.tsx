@@ -151,6 +151,8 @@ const SETTINGS_IMPORT_KEYS = [
     "suppressFurigana",
     "autoTextColorAdapt",
     "bulkTextTranslateOcr",
+    "enableStagedPipeline",
+    "enableSlowGenerationFallbacks",
     "stripReasoningContent",
     "singleRetranslateDeepMode",
     "singleRetranslateContextWindow",
@@ -3816,6 +3818,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 </div>
                             </div>
                         </div>
+                        <div className="h-9 rounded-md border border-input bg-background px-2.5 flex items-center justify-between">
+                            <span className="text-[11px] text-muted-foreground">
+                                {locale === "zh" ? "慢速回退重试（防截断）" : "Slow fallback retry (anti-clipping)"}
+                            </span>
+                            <Switch
+                                id="enable-slow-generation-fallbacks"
+                                checked={settings.enableSlowGenerationFallbacks ?? false}
+                                onCheckedChange={(checked) => updateSettings({ enableSlowGenerationFallbacks: checked })}
+                            />
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                            {locale === "zh"
+                                ? "关闭后可减少 Gemini 超时与等待；开启后会在疑似截断时额外发起重试。"
+                                : "Keep this off to reduce Gemini timeout/latency. Turn on only when clipping is severe and extra retries are acceptable."}
+                        </p>
                         <div className="space-y-1.5">
                             <Label htmlFor="text-style-preset" className="text-xs">
                                 {locale === "zh" ? "字体样式预设" : "Text style preset"}
@@ -3942,36 +3959,56 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                             : "Auto-detection needs API key or server API"}
                                     </p>
                                 )}
-                                <div className="grid grid-cols-2 gap-2">
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="w-full"
-                                        onClick={() => void handleAutoDetectAllImages()}
-                                        disabled={isBatchAutoDetecting || isBatchTranslatingDetected || !canRunAutoDetect || !images.length}
-                                    >
-                                        {isBatchAutoDetecting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        {locale === "zh" ? "阶段1：全部OCR" : "Stage 1: OCR all"}
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="w-full"
-                                        onClick={() => void handleTranslateDetectedForAllImages()}
-                                        disabled={isBatchAutoDetecting || isBatchTranslatingDetected || (!settings.useServerApi && !settings.apiKey) || !images.length}
-                                    >
-                                        {isBatchTranslatingDetected && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        {locale === "zh" ? "阶段2：全部翻译" : "Stage 2: Translate all"}
-                                    </Button>
+                                <div className="h-9 rounded-md border border-input bg-background px-2.5 flex items-center justify-between">
+                                    <span className="text-[11px] text-muted-foreground">
+                                        {locale === "zh" ? "分步模式（OCR->翻译）" : "Stage mode (OCR->Translate)"}
+                                    </span>
+                                    <Switch
+                                        id="enable-staged-pipeline"
+                                        checked={settings.enableStagedPipeline ?? false}
+                                        onCheckedChange={(checked) => updateSettings({ enableStagedPipeline: checked })}
+                                    />
                                 </div>
-                                <p className="text-[11px] text-muted-foreground">
-                                    {locale === "zh"
-                                        ? "分步模式：先跑全部 OCR，再跑全部翻译，避免识别/翻译模型来回切换。"
-                                        : "Stage mode: run OCR for all pages first, then translate all OCR texts to avoid frequent model switching."}
-                                </p>
-                                {batchStageProgressText && (
+                                {settings.enableStagedPipeline ? (
+                                    <>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="w-full"
+                                                onClick={() => void handleAutoDetectAllImages()}
+                                                disabled={isBatchAutoDetecting || isBatchTranslatingDetected || !canRunAutoDetect || !images.length}
+                                            >
+                                                {isBatchAutoDetecting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                                {locale === "zh" ? "阶段1：全部OCR" : "Stage 1: OCR all"}
+                                            </Button>
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="w-full"
+                                                onClick={() => void handleTranslateDetectedForAllImages()}
+                                                disabled={isBatchAutoDetecting || isBatchTranslatingDetected || (!settings.useServerApi && !settings.apiKey) || !images.length}
+                                            >
+                                                {isBatchTranslatingDetected && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                                {locale === "zh" ? "阶段2：全部翻译" : "Stage 2: Translate all"}
+                                            </Button>
+                                        </div>
+                                        <p className="text-[11px] text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "分步模式：先跑全部 OCR，再跑全部翻译，避免识别/翻译模型来回切换。"
+                                                : "Stage mode: run OCR for all pages first, then translate all OCR texts to avoid frequent model switching."}
+                                        </p>
+                                        {batchStageProgressText && (
+                                            <p className="text-[11px] text-muted-foreground">
+                                                {batchStageProgressText}
+                                            </p>
+                                        )}
+                                    </>
+                                ) : (
                                     <p className="text-[11px] text-muted-foreground">
-                                        {batchStageProgressText}
+                                        {locale === "zh"
+                                            ? "已关闭分步模式。默认直接按当前流程处理。"
+                                            : "Stage mode is off. Current direct workflow is used by default."}
                                     </p>
                                 )}
                             </>

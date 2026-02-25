@@ -405,7 +405,7 @@ export function EditorCanvas() {
     const isMaskCanvasEmpty = useCallback(() => {
         const maskCanvas = maskCanvasRef.current
         if (!maskCanvas) return true
-        const ctx = maskCanvas.getContext("2d")
+        const ctx = maskCanvas.getContext("2d", { willReadFrequently: true })
         if (!ctx) return true
         const { data } = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
         for (let i = 3; i < data.length; i += 4) {
@@ -463,7 +463,7 @@ export function EditorCanvas() {
         const sourceCanvas = sourceDataCanvasRef.current
         sourceCanvas.width = image.width
         sourceCanvas.height = image.height
-        const sourceCtx = sourceCanvas.getContext("2d")
+        const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true })
         if (!sourceCtx) {
             sourceImageDataRef.current = null
             return
@@ -525,7 +525,7 @@ export function EditorCanvas() {
         }
 
         const maskCanvas = ensureMaskCanvas(width, height)
-        const maskCtx = maskCanvas.getContext("2d")
+        const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true })
         if (!maskCtx) return
         const maskImageData = maskCtx.getImageData(0, 0, width, height)
         const maskPixels = maskImageData.data
@@ -2234,7 +2234,9 @@ export function EditorCanvas() {
 
     // 滚轮缩放
     const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-        e.preventDefault()
+        if (e.cancelable) {
+            e.preventDefault()
+        }
         if (!showResult && toolMode === "brush" && e.altKey) {
             const delta = e.deltaY > 0 ? -2 : 2
             setBrushSize((prev) => Math.max(8, Math.min(128, prev + delta)))
@@ -2288,7 +2290,7 @@ export function EditorCanvas() {
 
             const importedMask = await loadImage(dataUrl)
             const maskCanvas = ensureMaskCanvas(baseImage.width, baseImage.height)
-            const maskCtx = maskCanvas.getContext("2d")
+            const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true })
             if (!maskCtx) {
                 throw new Error(locale === "zh" ? "无法初始化遮罩画布" : "Failed to initialize mask canvas")
             }
@@ -2779,7 +2781,9 @@ export function EditorCanvas() {
                         onWheel={handleWheel}
                         onContextMenu={handleContextMenu}
                         onTouchStart={(e: TouchEvent<HTMLCanvasElement>) => {
-                            e.preventDefault()
+                            if (e.cancelable) {
+                                e.preventDefault()
+                            }
                             const touch = e.touches[0]
                             if (touch) {
                                 if (showResult) {
@@ -2826,7 +2830,9 @@ export function EditorCanvas() {
                             }
                         }}
                         onTouchMove={(e: TouchEvent<HTMLCanvasElement>) => {
-                            e.preventDefault()
+                            if (e.cancelable) {
+                                e.preventDefault()
+                            }
                             if (isPanning && panSessionRef.current && e.touches[0]) {
                                 const touch = e.touches[0]
                                 const dx = touch.clientX - panSessionRef.current.mouseX
@@ -2861,7 +2867,9 @@ export function EditorCanvas() {
                             }
                         }}
                         onTouchEnd={(e: TouchEvent<HTMLCanvasElement>) => {
-                            e.preventDefault()
+                            if (e.cancelable) {
+                                e.preventDefault()
+                            }
                             if (isPanning) {
                                 setIsPanning(false)
                                 panSessionRef.current = null
