@@ -49,6 +49,7 @@ import { getMessages } from "@/lib/i18n"
 import {
     detectTextBlocks,
     filterBlocksByAngleThreshold,
+    filterLikelyFuriganaBlocks,
     GEMINI_MODELS,
     getDetectionTargetLanguageFromDirection,
     getSourceLanguageLabel,
@@ -130,6 +131,50 @@ const SOURCE_LANGUAGE_FILTER_OPTIONS: Array<{
     { code: "fi", shortLabel: "芬兰", fullLabel: "Suomi / Finnish" },
 ]
 
+const SETTINGS_IMPORT_KEYS = [
+    "provider",
+    "baseUrl",
+    "model",
+    "imageSize",
+    "concurrency",
+    "isSerial",
+    "maxRetries",
+    "ocrEngine",
+    "translationDirection",
+    "sourceLanguageAllowlist",
+    "enableAngleFilter",
+    "angleThreshold",
+    "suppressFurigana",
+    "autoTextColorAdapt",
+    "bulkTextTranslateOcr",
+    "detectionRegionMode",
+    "chapterBulkTranslate",
+    "comicType",
+    "textStylePreset",
+    "preferredOutputFontFamily",
+    "enableComicModule",
+    "enableBubbleDetection",
+    "enableSelectionOcr",
+    "enablePatchEditor",
+    "repairEngine",
+    "defaultVerticalText",
+    "useMaskMode",
+    "useReverseMaskMode",
+    "enablePretranslate",
+    "highQualityMode",
+    "highQualityBatchSize",
+    "highQualitySessionResetBatches",
+    "highQualityRpmLimit",
+    "highQualityLowReasoning",
+    "highQualityForceJson",
+    "highQualityContextPrompt",
+    "exportFormat",
+    "exportQuality",
+    "exportNamingMode",
+    "exportSequenceStart",
+    "useServerApi",
+] as const
+
 function richHtmlToPlainText(html: string): string {
     if (!html) return ""
     const parser = new DOMParser()
@@ -149,6 +194,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const folderInputRef = useRef<HTMLInputElement>(null)
     const imageOnlyBaseInputRef = useRef<HTMLInputElement>(null)
     const imageOnlyBaseBatchInputRef = useRef<HTMLInputElement>(null)
+    const settingsImportInputRef = useRef<HTMLInputElement>(null)
     const sidecarImportInputRef = useRef<HTMLInputElement>(null)
     const wordImportInputRef = useRef<HTMLInputElement>(null)
     const textLayerImportInputRef = useRef<HTMLInputElement>(null)
@@ -512,6 +558,67 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         }
     }, [addImages])
 
+    const handleExportSettings = useCallback(() => {
+        try {
+            const payload = {
+                schemaVersion: 1,
+                exportedAt: new Date().toISOString(),
+                settings,
+            }
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" })
+            const url = URL.createObjectURL(blob)
+            const anchor = document.createElement("a")
+            anchor.href = url
+            anchor.download = `manga-lens-settings-${Date.now()}.json`
+            anchor.click()
+            URL.revokeObjectURL(url)
+            toast.success(locale === "zh" ? "设置已导出" : "Settings exported")
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `导出设置失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `Failed to export settings: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }, [locale, settings])
+
+    const handleImportSettings = useCallback(async (files: FileList | null) => {
+        if (!files?.length) return
+        try {
+            const file = files[0]
+            const raw = await file.text()
+            const parsed = JSON.parse(raw) as Record<string, unknown>
+            const candidate = (parsed.settings && typeof parsed.settings === "object")
+                ? parsed.settings as Record<string, unknown>
+                : parsed
+
+            const patch: Record<string, unknown> = {}
+            for (const key of SETTINGS_IMPORT_KEYS) {
+                if (typeof candidate[key] !== "undefined") {
+                    patch[key] = candidate[key]
+                }
+            }
+
+            // 导入时不覆盖用户本地私钥，除非设置里显式提供且非空。
+            if (typeof candidate.apiKey === "string" && candidate.apiKey.trim()) {
+                patch.apiKey = candidate.apiKey
+            }
+
+            updateSettings(patch)
+            toast.success(
+                locale === "zh"
+                    ? `已导入设置（${Object.keys(patch).length} 项）`
+                    : `Imported settings (${Object.keys(patch).length} keys)`
+            )
+        } catch (error) {
+            toast.error(
+                locale === "zh"
+                    ? `导入设置失败：${error instanceof Error ? error.message : "未知错误"}`
+                    : `Failed to import settings: ${error instanceof Error ? error.message : "Unknown error"}`
+            )
+        }
+    }, [locale, updateSettings])
+
     // 监听全局粘贴事件
     // useEffect(() => {
     //   const handleGlobalPaste = (e: ClipboardEvent) => {
@@ -596,12 +703,16 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     }, [settings.sourceLanguageAllowlist, updateSettings])
 
     const applyAngleThresholdFilter = useCallback((blocks: DetectTextResponse["blocks"]) => {
-        return filterBlocksByAngleThreshold(
+        const filteredByFurigana = filterLikelyFuriganaBlocks(
             blocks,
+            settings.suppressFurigana ?? false
+        )
+        return filterBlocksByAngleThreshold(
+            filteredByFurigana,
             settings.angleThreshold ?? 1,
             settings.enableAngleFilter ?? false
         )
-    }, [settings.angleThreshold, settings.enableAngleFilter])
+    }, [settings.angleThreshold, settings.enableAngleFilter, settings.suppressFurigana])
 
     const parseApiError = useCallback(async (res: Response, fallback: string) => {
         const data = await res.json().catch(() => ({}))
@@ -656,7 +767,13 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     ): Promise<DetectTextResponse> => {
         const useServerDetectionPipeline = ocrEngine !== "ai_vision"
         const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
-        const preferComicDetector = ocrEngine === "auto" || ocrEngine === "comic_text_detector"
+        const webtoonRatio = imageWidth && imageHeight
+            ? imageHeight / Math.max(1, imageWidth)
+            : 0
+        const isLikelyWebtoon = webtoonRatio >= 2.2
+        const preferComicDetector =
+            (ocrEngine === "auto" || ocrEngine === "comic_text_detector") &&
+            !isLikelyWebtoon
         const detectionHints =
             imageWidth && imageHeight
                 ? getDetectionRegionHints(imageWidth, imageHeight)
@@ -664,6 +781,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         const tryServerDetect = async () => {
             const candidates = await buildDetectPayloadCandidates(imageData)
             let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+            let receivedEmptyResult = false
 
             for (let i = 0; i < candidates.length; i++) {
                 const payload = candidates[i]
@@ -698,13 +816,59 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
                 const data = await res.json()
                 const filteredBlocks = applyAngleThresholdFilter(data.blocks || [])
+                if (filteredBlocks.length > 0) {
+                    return {
+                        success: true,
+                        blocks: filteredBlocks,
+                    } as DetectTextResponse
+                }
+                receivedEmptyResult = true
+
+                if (isLikelyWebtoon && ocrEngine === "auto") {
+                    const aiVisionRes = await fetch("/api/ai/detect-text", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            imageData: payload,
+                            targetLanguage: getTargetLanguageForDetection(),
+                            sourceLanguageHint: getSourceLanguageHintForDetection(),
+                            sourceLanguageAllowlist: getSourceLanguageAllowlist(),
+                            imageWidth,
+                            imageHeight,
+                            preferComicDetector: false,
+                            ocrEngine: "ai_vision",
+                            ...detectionHints,
+                        }),
+                    })
+                    if (aiVisionRes.ok) {
+                        const aiVisionData = await aiVisionRes.json()
+                        const aiVisionBlocks = applyAngleThresholdFilter(aiVisionData.blocks || [])
+                        if (aiVisionBlocks.length > 0) {
+                            return {
+                                success: true,
+                                blocks: aiVisionBlocks,
+                            } as DetectTextResponse
+                        }
+                    }
+                }
+                if (i < candidates.length - 1) {
+                    continue
+                }
                 return {
                     success: true,
                     blocks: filteredBlocks,
                 } as DetectTextResponse
             }
 
-            throw new Error(lastError)
+            throw new Error(
+                receivedEmptyResult
+                    ? (
+                        locale === "zh"
+                            ? "未识别到文字。长条韩漫建议切换 OCR 引擎为 PaddleOCR / AI 视觉，或先手动框选再检测。"
+                            : "No text detected. For tall webtoons, try PaddleOCR / AI Vision, or draw selections first."
+                    )
+                    : lastError
+            )
         }
 
         if (settings.useServerApi) {
@@ -2205,6 +2369,26 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 variant="outline"
                                 size="sm"
                                 className="w-full"
+                                onClick={handleExportSettings}
+                            >
+                                <FileJson className="h-4 w-4 mr-2" />
+                                {locale === "zh" ? "导出设置" : "Export settings"}
+                            </Button>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full"
+                                onClick={() => settingsImportInputRef.current?.click()}
+                            >
+                                <FolderOpen className="h-4 w-4 mr-2" />
+                                {locale === "zh" ? "导入设置" : "Import settings"}
+                            </Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="w-full"
                                 onClick={() => imageOnlyBaseInputRef.current?.click()}
                                 disabled={!currentImage}
                             >
@@ -2296,6 +2480,17 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                             className="hidden"
                             onChange={(e) => {
                                 void handleCurrentImageOnlyBaseUpload(e.target.files)
+                                e.currentTarget.value = ""
+                            }}
+                        />
+                        <input
+                            ref={settingsImportInputRef}
+                            type="file"
+                            accept="application/json,.json"
+                            aria-label={locale === "zh" ? "导入编辑器设置" : "Import editor settings"}
+                            className="hidden"
+                            onChange={(e) => {
+                                void handleImportSettings(e.target.files)
                                 e.currentTarget.value = ""
                             }}
                         />
@@ -2589,6 +2784,57 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 {locale === "zh"
                                     ? "启用后仅保留 angle 在阈值范围内的文本块（常用于排除拟声词）。"
                                     : "When enabled, keeps only blocks whose angle is within threshold (useful to skip SFX)."}
+                            </p>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="suppress-furigana" className="text-xs">
+                                    {locale === "zh" ? "注音假名过滤" : "Suppress furigana"}
+                                </Label>
+                                <Switch
+                                    id="suppress-furigana"
+                                    checked={settings.suppressFurigana ?? false}
+                                    onCheckedChange={(checked) => updateSettings({ suppressFurigana: checked })}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "尝试过滤小尺寸假名注音块，减少漏擦与脏边（复杂页面建议按需开关）。"
+                                    : "Heuristically removes tiny furigana blocks to reduce unclean renders on complex pages."}
+                            </p>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="auto-text-color-adapt" className="text-xs">
+                                    {locale === "zh" ? "自动适配文字颜色" : "Auto text color adaptation"}
+                                </Label>
+                                <Switch
+                                    id="auto-text-color-adapt"
+                                    checked={settings.autoTextColorAdapt ?? true}
+                                    onCheckedChange={(checked) => updateSettings({ autoTextColorAdapt: checked })}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "根据原文颜色自动做颜色锚点与后处理，避免角色台词统一变黑。"
+                                    : "Uses source color anchors and post-correction to avoid turning all text black."}
+                            </p>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="bulk-text-translate-ocr" className="text-xs">
+                                    {locale === "zh" ? "OCR 文本批量翻译（单次调用）" : "Bulk OCR text translation (single call)"}
+                                </Label>
+                                <Switch
+                                    id="bulk-text-translate-ocr"
+                                    checked={settings.bulkTextTranslateOcr ?? false}
+                                    onCheckedChange={(checked) => updateSettings({ bulkTextTranslateOcr: checked })}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "预翻译后将多个文本块打包一次请求翻译，降低调用次数并增强上下文一致性。"
+                                    : "After OCR, send multiple blocks in one translation request for better consistency and fewer calls."}
                             </p>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
@@ -3660,6 +3906,52 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                     updateSettings({ exportQuality: parseInt(e.target.value) })
                                                 }
                                                 className="w-full accent-primary"
+                                            />
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-2">
+                                        <Label htmlFor="editor-export-naming-mode">
+                                            {locale === "zh" ? "导出命名" : "Export naming"}
+                                        </Label>
+                                        <Select
+                                            value={settings.exportNamingMode ?? "original"}
+                                            onValueChange={(value: "original" | "sequence") =>
+                                                updateSettings({ exportNamingMode: value })
+                                            }
+                                        >
+                                            <SelectTrigger id="editor-export-naming-mode">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="original">
+                                                    {locale === "zh" ? "保留原文件名" : "Keep original filename"}
+                                                </SelectItem>
+                                                <SelectItem value="sequence">
+                                                    {locale === "zh" ? "按序号命名（image+数字）" : "Sequence (image+number)"}
+                                                </SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+
+                                    {(settings.exportNamingMode ?? "original") === "sequence" && (
+                                        <div className="space-y-2">
+                                            <Label htmlFor="editor-export-sequence-start">
+                                                {locale === "zh" ? "起始编号" : "Start number"}
+                                            </Label>
+                                            <Input
+                                                id="editor-export-sequence-start"
+                                                type="number"
+                                                min={0}
+                                                step={1}
+                                                value={String(settings.exportSequenceStart ?? 1)}
+                                                onChange={(event) => {
+                                                    const raw = Number(event.target.value)
+                                                    const nextValue = Number.isFinite(raw)
+                                                        ? Math.max(0, Math.floor(raw))
+                                                        : 1
+                                                    updateSettings({ exportSequenceStart: nextValue })
+                                                }}
                                             />
                                         </div>
                                     )}

@@ -348,6 +348,17 @@ function guessMimeFromFileName(fileName: string): string {
     return "application/octet-stream"
 }
 
+function attachRelativePathToFileName(file: File): File {
+    const relativePath = (file.webkitRelativePath || "").trim()
+    if (!relativePath) return file
+    const normalized = sanitizeArchiveEntryName(relativePath)
+    if (!normalized || normalized === file.name) return file
+    return new File([file], normalized, {
+        type: file.type,
+        lastModified: file.lastModified || Date.now(),
+    })
+}
+
 export async function expandEditorUploadFiles(files: File[]): Promise<ExpandEditorUploadFilesResult> {
     const result: ExpandEditorUploadFilesResult = {
         files: [],
@@ -365,7 +376,7 @@ export async function expandEditorUploadFiles(files: File[]): Promise<ExpandEdit
             continue
         }
         if (!isZipArchiveFile(file)) {
-            result.files.push(file)
+            result.files.push(attachRelativePathToFileName(file))
             continue
         }
 

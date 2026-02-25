@@ -858,6 +858,65 @@ export function filterBlocksByAngleThreshold(
     })
 }
 
+function isLikelyKanaString(text: string): boolean {
+    const compact = text.replace(/\s+/g, "")
+    if (!compact) return false
+    const kanaMatches = compact.match(/[\u3040-\u30ff\u31f0-\u31ffー]/g) || []
+    const kanaRatio = kanaMatches.length / compact.length
+    const hasKanji = /[\u4e00-\u9fff]/.test(compact)
+    return !hasKanji && kanaRatio >= 0.75 && compact.length <= 12
+}
+
+function intersectsWithMargin(
+    a: TextBlockBBox,
+    b: TextBlockBBox,
+    margin: number
+): boolean {
+    return (
+        a.x - margin < b.x + b.width &&
+        a.x + a.width + margin > b.x &&
+        a.y - margin < b.y + b.height &&
+        a.y + a.height + margin > b.y
+    )
+}
+
+export function filterLikelyFuriganaBlocks(
+    blocks: DetectedTextBlock[],
+    enabled: boolean
+): DetectedTextBlock[] {
+    if (!enabled) return blocks
+    if (blocks.length <= 1) return blocks
+
+    const blockAreas = blocks.map((block) => Math.max(0, block.bbox.width * block.bbox.height))
+
+    return blocks.filter((block, index) => {
+        const source = (block.sourceText || "").trim()
+        if (!source) return false
+        if (!isLikelyKanaString(source)) return true
+
+        const bbox = block.bbox
+        const area = blockAreas[index]
+        const minEdge = Math.min(bbox.width, bbox.height)
+        const maxEdge = Math.max(bbox.width, bbox.height)
+        const smallCandidate = area <= 0.018 || minEdge <= 0.035 || maxEdge <= 0.16
+        if (!smallCandidate) {
+            return true
+        }
+
+        const hasNearbyMainText = blocks.some((other, otherIndex) => {
+            if (otherIndex === index) return false
+            const otherText = (other.sourceText || "").trim()
+            if (!otherText) return false
+            if (isLikelyKanaString(otherText)) return false
+            const otherArea = blockAreas[otherIndex]
+            if (otherArea < area * 2.2) return false
+            return intersectsWithMargin(bbox, other.bbox, 0.03)
+        })
+
+        return !hasNearbyMainText
+    })
+}
+
 function getInlineData(part: unknown): { data?: string } | undefined {
     if (!part || typeof part !== 'object') return undefined
     const p = part as Record<string, unknown>

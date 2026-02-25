@@ -48,6 +48,7 @@ export function RichTextEditor({
     const [strokeColor, setStrokeColor] = useState("#000000")
     const [strokeWidth, setStrokeWidth] = useState(1)
     const [textOpacity, setTextOpacity] = useState(100)
+    const [backgroundColor, setBackgroundColor] = useState("#ffffff")
     const normalizedValue = useMemo(() => ensureHtml(value), [value])
 
     const fontOptions = useMemo(
@@ -244,6 +245,43 @@ export function RichTextEditor({
                         onChange={(e) => setStrokeColor(e.target.value)}
                     />
                 </label>
+                <label
+                    className="inline-flex h-7 items-center rounded border border-border bg-background px-1.5 text-[11px] text-muted-foreground"
+                    aria-label={locale === "zh" ? "背景填充颜色" : "Background fill color"}
+                >
+                    <span className="mr-1">{locale === "zh" ? "填充" : "Bg"}</span>
+                    <input
+                        type="color"
+                        className="h-4 w-4 cursor-pointer border-0 bg-transparent p-0"
+                        value={backgroundColor}
+                        aria-label={locale === "zh" ? "选择背景填充颜色" : "Choose background fill color"}
+                        onChange={(e) => setBackgroundColor(e.target.value)}
+                    />
+                </label>
+                <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() =>
+                        applyInlineStyleToSelection({
+                            "background-color": backgroundColor,
+                        })
+                    }
+                >
+                    {locale === "zh" ? "应用填充" : "Apply fill"}
+                </Button>
+                <Button
+                    type="button"
+                    variant="ghost"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() =>
+                        applyInlineStyleToSelection({
+                            "background-color": "transparent",
+                        })
+                    }
+                >
+                    {locale === "zh" ? "填充透明" : "Clear fill"}
+                </Button>
                 <input
                     type="number"
                     min={0}

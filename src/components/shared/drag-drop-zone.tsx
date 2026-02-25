@@ -13,6 +13,29 @@ interface DragDropZoneProps {
     disabled?: boolean
 }
 
+type FileSystemEntryLike = {
+    isFile: boolean
+    isDirectory: boolean
+    name: string
+}
+
+type FileSystemFileEntryLike = FileSystemEntryLike & {
+    file: (successCallback: (file: File) => void, errorCallback?: (error: DOMException) => void) => void
+}
+
+type FileSystemDirectoryEntryLike = FileSystemEntryLike & {
+    createReader: () => {
+        readEntries: (
+            successCallback: (entries: FileSystemEntryLike[]) => void,
+            errorCallback?: (error: DOMException) => void
+        ) => void
+    }
+}
+
+type DataTransferItemWithEntry = DataTransferItem & {
+    webkitGetAsEntry?: () => FileSystemEntryLike | null
+}
+
 /**
  * 拖拽上传区域组件
  */
@@ -24,6 +47,51 @@ export function DragDropZone({
     disabled = false,
 }: DragDropZoneProps) {
     const [isDragging, setIsDragging] = useState(false)
+
+    const readFileEntry = useCallback((entry: FileSystemFileEntryLike) => {
+        return new Promise<File[]>((resolve) => {
+            entry.file(
+                (file) => resolve([file]),
+                () => resolve([])
+            )
+        })
+    }, [])
+
+    const readDirectoryEntries = useCallback((entry: FileSystemDirectoryEntryLike) => {
+        const reader = entry.createReader()
+        return new Promise<FileSystemEntryLike[]>((resolve) => {
+            const chunks: FileSystemEntryLike[] = []
+            const read = () => {
+                reader.readEntries(
+                    (entries) => {
+                        if (!entries.length) {
+                            resolve(chunks)
+                            return
+                        }
+                        chunks.push(...entries)
+                        read()
+                    },
+                    () => resolve(chunks)
+                )
+            }
+            read()
+        })
+    }, [])
+
+    const collectFilesFromEntry = useCallback(
+        async function collectFilesFromEntryRecursive(entry: FileSystemEntryLike): Promise<File[]> {
+            if (entry.isFile) {
+                return readFileEntry(entry as FileSystemFileEntryLike)
+            }
+            if (entry.isDirectory) {
+                const entries = await readDirectoryEntries(entry as FileSystemDirectoryEntryLike)
+                const nested = await Promise.all(entries.map((child) => collectFilesFromEntryRecursive(child)))
+                return nested.flat()
+            }
+            return []
+        },
+        [readDirectoryEntries, readFileEntry]
+    )
 
     const handleDragEnter = useCallback(
         (e: React.DragEvent) => {
@@ -57,14 +125,24 @@ export function DragDropZone({
     )
 
     const handleDrop = useCallback(
-        (e: React.DragEvent) => {
+        async (e: React.DragEvent) => {
             e.preventDefault()
             e.stopPropagation()
             setIsDragging(false)
 
             if (disabled) return
 
-            const files = Array.from(e.dataTransfer.files)
+            const dataTransferItems = Array.from(e.dataTransfer.items || [])
+            const entryFiles = await Promise.all(
+                dataTransferItems.map(async (item) => {
+                    const withEntry = item as DataTransferItemWithEntry
+                    const entry = withEntry.webkitGetAsEntry?.()
+                    if (!entry) return []
+                    return collectFilesFromEntry(entry)
+                })
+            )
+            const droppedFiles = entryFiles.flat()
+            const files = droppedFiles.length > 0 ? droppedFiles : Array.from(e.dataTransfer.files)
             const acceptedTypes = accept
                 .split(",")
                 .map((t) => t.trim().toLowerCase())
@@ -101,7 +179,7 @@ export function DragDropZone({
                 onFilesDropped(filteredFiles)
             }
         },
-        [accept, disabled, onFilesDropped]
+        [accept, collectFilesFromEntry, disabled, onFilesDropped]
     )
 
     return (

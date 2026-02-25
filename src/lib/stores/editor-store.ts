@@ -89,6 +89,7 @@ export interface ImageItem {
 
 // 导出格式类型
 export type ExportFormat = 'png' | 'jpg' | 'webp'
+export type ExportNamingMode = "original" | "sequence"
 
 // 编辑器设置
 export interface EditorSettings {
@@ -105,6 +106,9 @@ export interface EditorSettings {
     sourceLanguageAllowlist: SourceLanguageCode[]
     enableAngleFilter: boolean
     angleThreshold: number
+    suppressFurigana: boolean
+    autoTextColorAdapt: boolean
+    bulkTextTranslateOcr: boolean
     detectionRegionMode: "full" | "selection_only" | "selection_ignore"
     chapterBulkTranslate: boolean
     comicType: "auto" | "manga" | "western"
@@ -128,6 +132,8 @@ export interface EditorSettings {
     highQualityContextPrompt: string
     exportFormat: ExportFormat
     exportQuality: number // 0-100，仅用于 jpg/webp
+    exportNamingMode: ExportNamingMode
+    exportSequenceStart: number
     useServerApi: boolean // 使用网站提供的 API
 }
 
@@ -242,6 +248,9 @@ const defaultSettings: EditorSettings = {
     sourceLanguageAllowlist: [],
     enableAngleFilter: false,
     angleThreshold: 1,
+    suppressFurigana: false,
+    autoTextColorAdapt: true,
+    bulkTextTranslateOcr: false,
     detectionRegionMode: "full",
     chapterBulkTranslate: false,
     comicType: "auto",
@@ -265,6 +274,8 @@ const defaultSettings: EditorSettings = {
     highQualityContextPrompt: "",
     exportFormat: 'png',
     exportQuality: 90,
+    exportNamingMode: "original",
+    exportSequenceStart: 1,
     useServerApi: false,
 }
 

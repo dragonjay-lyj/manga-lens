@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useRef, useState } from "react"
 import { useEditorStore, useCurrentImage } from "@/lib/stores/editor-store"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -25,6 +25,7 @@ import {
     buildMangaEditPrompt,
     detectTextBlocks,
     filterBlocksByAngleThreshold,
+    filterLikelyFuriganaBlocks,
     getDetectionTargetLanguageFromDirection,
     getSourceLanguageLabel,
     generateImage,
@@ -34,6 +35,7 @@ import {
     type GenerateImageResponse,
     type TextDetectionRegion,
 } from "@/lib/ai/ai-service"
+import { translateTextBatch, type BatchTranslateItem } from "@/lib/ai/text-translate"
 import {
     loadImage,
     cropSelection,
@@ -98,6 +100,7 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
+    const stopBatchRequestedRef = useRef(false)
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
@@ -187,12 +190,17 @@ export function EditorToolbar() {
         return getTranslationDirectionMeta(direction).sourceLangLabel
     }
 
-    const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) =>
-        filterBlocksByAngleThreshold(
+    const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) => {
+        const filteredByFurigana = filterLikelyFuriganaBlocks(
             blocks,
+            settings.suppressFurigana ?? false
+        )
+        return filterBlocksByAngleThreshold(
+            filteredByFurigana,
             settings.angleThreshold ?? 1,
             settings.enableAngleFilter ?? false
         )
+    }
 
     const blocksToSelections = (
         blocks: DetectedTextBlock[],
@@ -364,6 +372,59 @@ export function EditorToolbar() {
         }
     }
 
+    const runBatchTextTranslateRequest = async (
+        items: BatchTranslateItem[],
+        targetLanguage: string,
+        contextHint?: string
+    ): Promise<Map<string, string>> => {
+        if (!items.length) return new Map()
+        if (settings.useServerApi) {
+            const res = await fetch("/api/ai/translate-text", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    items,
+                    targetLanguage,
+                    contextHint,
+                }),
+            })
+            if (!res.ok) {
+                throw new Error(
+                    await parseApiError(
+                        res,
+                        locale === "zh" ? "网站 API 批量翻译失败" : "Server batch translation failed"
+                    )
+                )
+            }
+            const data = await res.json()
+            return new Map(
+                (Array.isArray(data.items) ? data.items : []).map((item: { id: string; content: string }) => [
+                    String(item.id),
+                    String(item.content || ""),
+                ])
+            )
+        }
+
+        if (!settings.apiKey) {
+            throw new Error(locale === "zh" ? "缺少 API Key" : "Missing API key")
+        }
+        const result = await translateTextBatch({
+            items,
+            targetLanguage,
+            contextHint,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
+        })
+        if (!result.success) {
+            throw new Error(result.error || (locale === "zh" ? "批量翻译失败" : "Batch translation failed"))
+        }
+        return new Map(result.items.map((item) => [item.id, item.content]))
+    }
+
     const runDetectTextRequest = async (
         imageData: string,
         targetLanguage: string,
@@ -373,7 +434,13 @@ export function EditorToolbar() {
     ): Promise<DetectTextResponse> => {
         const useServerDetectionPipeline = ocrEngine !== "ai_vision"
         const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
-        const preferComicDetector = ocrEngine === "auto" || ocrEngine === "comic_text_detector"
+        const webtoonRatio = imageWidth && imageHeight
+            ? imageHeight / Math.max(1, imageWidth)
+            : 0
+        const isLikelyWebtoon = webtoonRatio >= 2.2
+        const preferComicDetector =
+            (ocrEngine === "auto" || ocrEngine === "comic_text_detector") &&
+            !isLikelyWebtoon
         const detectionRegionHints =
             imageWidth && imageHeight
                 ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
@@ -409,6 +476,7 @@ export function EditorToolbar() {
         }
 
         let lastError = locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed"
+        let receivedEmptyResult = false
         for (let i = 0; i < detectCandidates.length; i++) {
             const requestImageData = detectCandidates[i]
             try {
@@ -449,9 +517,49 @@ export function EditorToolbar() {
                 }
 
                 const data = await res.json()
+                const blocks = applyAngleThresholdFilter(data.blocks || [])
+                if (blocks.length > 0) {
+                    return {
+                        success: true,
+                        blocks,
+                    }
+                }
+                receivedEmptyResult = true
+
+                if (isLikelyWebtoon && ocrEngine === "auto") {
+                    const aiVisionRes = await fetch("/api/ai/detect-text", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            imageData: requestImageData,
+                            targetLanguage,
+                            sourceLanguageHint: getSourceLanguageHintForDetection(),
+                            sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
+                            imageWidth,
+                            imageHeight,
+                            preferComicDetector: false,
+                            ocrEngine: "ai_vision",
+                            ...detectionRegionHints,
+                        }),
+                    })
+                    if (aiVisionRes.ok) {
+                        const aiVisionData = await aiVisionRes.json()
+                        const aiVisionBlocks = applyAngleThresholdFilter(aiVisionData.blocks || [])
+                        if (aiVisionBlocks.length > 0) {
+                            return {
+                                success: true,
+                                blocks: aiVisionBlocks,
+                            }
+                        }
+                    }
+                }
+
+                if (i < detectCandidates.length - 1) {
+                    continue
+                }
                 return {
                     success: true,
-                    blocks: applyAngleThresholdFilter(data.blocks || []),
+                    blocks,
                 }
             } catch (error) {
                 lastError = error instanceof Error
@@ -467,7 +575,13 @@ export function EditorToolbar() {
             return {
                 success: false,
                 blocks: [],
-                error: lastError,
+                error: receivedEmptyResult
+                    ? (
+                        locale === "zh"
+                            ? "未识别到文字。长条韩漫建议切换 OCR 引擎为 PaddleOCR / AI 视觉，或先手动框选再检测。"
+                            : "No text detected. For tall webtoons, try PaddleOCR / AI Vision, or draw selections first."
+                    )
+                    : lastError,
             }
         }
 
@@ -1139,20 +1253,64 @@ export function EditorToolbar() {
             }
         }
 
+        let translatedScopedBlocks = scopedBlocks
+        if (settings.bulkTextTranslateOcr ?? false) {
+            const translationItems: BatchTranslateItem[] = scopedBlocks
+                .map((block, index) => ({
+                    id: String(index + 1),
+                    content: (block.sourceText || "").trim(),
+                }))
+                .filter((item) => item.content)
+
+            if (translationItems.length > 0) {
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        locale === "zh"
+                            ? "OCR 文本批量翻译中（单次调用）..."
+                            : "Bulk translating OCR texts (single call)..."
+                    )
+                }
+                try {
+                    const translatedMap = await runBatchTextTranslateRequest(
+                        translationItems,
+                        getTargetLanguageForDetection(),
+                        settings.chapterBulkTranslate
+                            ? (locale === "zh" ? "保持同一话角色语气与术语一致" : "Keep terms and voices consistent in this chapter")
+                            : undefined
+                    )
+                    translatedScopedBlocks = scopedBlocks.map((block, index) => {
+                        const translatedText = translatedMap.get(String(index + 1))
+                        if (!translatedText?.trim()) return block
+                        return {
+                            ...block,
+                            translatedText: translatedText.trim(),
+                        }
+                    })
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : "Unknown error"
+                    toast.warning(
+                        locale === "zh"
+                            ? `批量翻译失败，回退检测译文：${message}`
+                            : `Bulk translation failed, fallback to detector translation: ${message}`
+                    )
+                }
+            }
+        }
+
         if (enablePretranslate) {
-            setDetectedTextBlocks(imageId, applyDefaultOrientationToBlocks(scopedBlocks))
+            setDetectedTextBlocks(imageId, applyDefaultOrientationToBlocks(translatedScopedBlocks))
         }
 
         if (updateToolbarProgress) {
             setProgressDetail(
                 locale === "zh"
-                    ? `预翻译完成，命中 ${scopedBlocks.length} 条文本`
-                    : `Pre-translation ready: ${scopedBlocks.length} text blocks`
+                    ? `预翻译完成，命中 ${translatedScopedBlocks.length} 条文本`
+                    : `Pre-translation ready: ${translatedScopedBlocks.length} text blocks`
             )
         }
 
         const forceJsonContext = settings.highQualityMode && (settings.highQualityForceJson ?? true)
-        const lines = scopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
+        const lines = translatedScopedBlocks.slice(0, 20).map((block: DetectedTextBlock, index) => {
             if (forceJsonContext) {
                 return JSON.stringify({
                     index: index + 1,
@@ -1222,7 +1380,7 @@ export function EditorToolbar() {
         const total = selections.length
         const hasManySelections = total >= 10
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
-        const useColorAnchors = trackSelectionProgress
+        const useColorAnchors = trackSelectionProgress && (settings.autoTextColorAdapt ?? true)
         const sampleDominantTextColor = useColorAnchors
             ? createSelectionDominantTextColorSampler(originalImg)
             : null
@@ -1769,11 +1927,14 @@ export function EditorToolbar() {
             )
         }
 
-        const sourceColorSampler = createSelectionDominantTextColorSampler(originalImg)
+        const useColorAnchors = settings.autoTextColorAdapt ?? true
+        const sourceColorSampler = useColorAnchors ? createSelectionDominantTextColorSampler(originalImg) : null
         const selectionDominantColorMap = new Map<string, string>(
-            sourceSelections
-                .map((selection) => [selection.id, sourceColorSampler(selection)] as const)
-                .filter((entry): entry is [string, string] => Boolean(entry[1]))
+            useColorAnchors
+                ? sourceSelections
+                    .map((selection) => [selection.id, sourceColorSampler?.(selection) || null] as const)
+                    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+                : []
         )
         const maskPromptWithColorHints = selectionDominantColorMap.size
             ? [
@@ -2355,16 +2516,17 @@ export function EditorToolbar() {
         }
 
         setProcessing(true)
+        stopBatchRequestedRef.current = false
         setProgress(0)
         setProgressText(`0/${imagesToProcess.length}`)
         let failedCount = 0
+        let doneCount = 0
 
         try {
             const highQualityMode = settings.highQualityMode ?? false
             const highQualityBatchSize = Math.max(1, Math.min(20, settings.highQualityBatchSize ?? 4))
             const highQualitySessionResetBatches = Math.max(1, Math.min(50, settings.highQualitySessionResetBatches ?? 3))
             const highQualityRpmLimit = Math.max(0, Math.min(300, settings.highQualityRpmLimit ?? 0))
-            let nextRequestAt = 0
             const contextHistory: Array<{ detectedTextBlocks?: DetectedTextBlock[] }> = []
 
             const basePrompt = buildHighQualityPrompt(buildMangaEditPrompt(prompt, {
@@ -2382,49 +2544,18 @@ export function EditorToolbar() {
                         : "Chapter-level consistency context enabled"
                 )
             }
+            const updateOverallProgress = (doneCount: number) => {
+                setProgress((doneCount / imagesToProcess.length) * 100)
+                setProgressText(`${doneCount}/${imagesToProcess.length}`)
+            }
 
-            for (let i = 0; i < imagesToProcess.length; i++) {
-                const img = imagesToProcess[i]
-                if (highQualityMode) {
-                    const resetWindow = highQualityBatchSize * highQualitySessionResetBatches
-                    if (resetWindow > 0 && i > 0 && i % resetWindow === 0) {
-                        contextHistory.splice(0, contextHistory.length)
-                        setProgressDetail(
-                            locale === "zh"
-                                ? `已重置章节上下文记忆（第 ${Math.floor(i / highQualityBatchSize)} 批）`
-                                : `Context memory reset at batch ${Math.floor(i / highQualityBatchSize)}`
-                        )
-                    }
-                }
-
-                setImageStatus(img.id, "processing")
-                setProgress((i / imagesToProcess.length) * 100)
-                setProgressText(`${i}/${imagesToProcess.length}`)
-                setProgressDetail(
-                    locale === "zh"
-                        ? `处理中第 ${i + 1} 张图...`
-                        : `Processing image ${i + 1}...`
-                )
-
+            const runSingleImage = async (
+                img: (typeof imagesToProcess)[number],
+                imageIndex: number,
+                chapterPrompt: string
+            ) => {
+                const selections = applyToAll ? templateSelections : (img.selections || [])
                 try {
-                    if (highQualityMode && highQualityRpmLimit > 0) {
-                        const minInterval = Math.ceil(60000 / highQualityRpmLimit)
-                        const waitMs = Math.max(0, nextRequestAt - Date.now())
-                        if (waitMs > 0) {
-                            await new Promise((resolve) => setTimeout(resolve, waitMs))
-                        }
-                        nextRequestAt = Date.now() + minInterval
-                    }
-
-                    const selections = applyToAll ? templateSelections : (img.selections || [])
-                    const chapterPrompt = chapterContextEnabled
-                        ? buildChapterBulkPrompt(
-                            basePrompt,
-                            highQualityMode
-                                ? contextHistory.slice(-highQualityBatchSize)
-                                : imagesToProcess
-                        )
-                        : basePrompt
                     const resultUrl = await processImage(
                         img.id,
                         img.originalUrl,
@@ -2442,13 +2573,13 @@ export function EditorToolbar() {
                         selectionCount: selections.length,
                     })
 
-                    if (highQualityMode) {
-                        const latestImage = useEditorStore
-                            .getState()
-                            .images.find((item) => item.id === img.id)
-                        contextHistory.push({
-                            detectedTextBlocks: latestImage?.detectedTextBlocks || img.detectedTextBlocks || [],
-                        })
+                    const latestImage = useEditorStore
+                        .getState()
+                        .images.find((item) => item.id === img.id)
+                    return {
+                        success: true as const,
+                        imageIndex,
+                        detectedTextBlocks: latestImage?.detectedTextBlocks || img.detectedTextBlocks || [],
                     }
                 } catch (error) {
                     const errorMessage = error instanceof Error ? error.message : "未知错误"
@@ -2460,13 +2591,135 @@ export function EditorToolbar() {
                         error,
                     })
                     setImageStatus(img.id, "failed", undefined, errorMessage)
+                    return {
+                        success: false as const,
+                        imageIndex,
+                    }
                 }
-
-                setProgress(((i + 1) / imagesToProcess.length) * 100)
-                setProgressText(`${i + 1}/${imagesToProcess.length}`)
             }
 
-            if (failedCount > 0) {
+            const resetWindow = highQualityBatchSize * highQualitySessionResetBatches
+            const canRunParallelHighQuality =
+                highQualityMode &&
+                !settings.isSerial &&
+                highQualityRpmLimit === 0
+
+            if (canRunParallelHighQuality) {
+                const parallelBatchSize = Math.max(
+                    1,
+                    Math.min(highQualityBatchSize, settings.concurrency || 3, 6)
+                )
+
+                for (let start = 0; start < imagesToProcess.length; start += parallelBatchSize) {
+                    if (stopBatchRequestedRef.current) {
+                        break
+                    }
+                    const batch = imagesToProcess.slice(start, start + parallelBatchSize)
+                    const batchNo = Math.floor(start / parallelBatchSize) + 1
+
+                    if (resetWindow > 0 && start > 0 && start % resetWindow === 0) {
+                        contextHistory.splice(0, contextHistory.length)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `已重置章节上下文记忆（第 ${batchNo} 批）`
+                                : `Context memory reset at batch ${batchNo}`
+                        )
+                    }
+
+                    const chapterPrompt = chapterContextEnabled
+                        ? buildChapterBulkPrompt(basePrompt, contextHistory.slice(-highQualityBatchSize))
+                        : basePrompt
+
+                    batch.forEach((img, offset) => {
+                        if (stopBatchRequestedRef.current) return
+                        setImageStatus(img.id, "processing")
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `高质量批次 ${batchNo}：处理中第 ${start + offset + 1} 张图...`
+                                : `HQ batch ${batchNo}: processing image ${start + offset + 1}...`
+                        )
+                    })
+                    updateOverallProgress(doneCount)
+
+                    if (stopBatchRequestedRef.current) {
+                        break
+                    }
+
+                    const batchResults = await Promise.all(
+                        batch.map((img, offset) => runSingleImage(img, start + offset, chapterPrompt))
+                    )
+
+                    batchResults.forEach((result) => {
+                        doneCount += 1
+                        updateOverallProgress(doneCount)
+                        if (result.success) {
+                            contextHistory.push({
+                                detectedTextBlocks: result.detectedTextBlocks,
+                            })
+                        }
+                    })
+                }
+            } else {
+                let nextRequestAt = 0
+
+                for (let i = 0; i < imagesToProcess.length; i++) {
+                    if (stopBatchRequestedRef.current) {
+                        break
+                    }
+                    const img = imagesToProcess[i]
+                    if (highQualityMode && resetWindow > 0 && i > 0 && i % resetWindow === 0) {
+                        contextHistory.splice(0, contextHistory.length)
+                        setProgressDetail(
+                            locale === "zh"
+                                ? `已重置章节上下文记忆（第 ${Math.floor(i / highQualityBatchSize)} 批）`
+                                : `Context memory reset at batch ${Math.floor(i / highQualityBatchSize)}`
+                        )
+                    }
+
+                    setImageStatus(img.id, "processing")
+                    setProgressDetail(
+                        locale === "zh"
+                            ? `处理中第 ${i + 1} 张图...`
+                            : `Processing image ${i + 1}...`
+                    )
+                    updateOverallProgress(doneCount)
+
+                    if (highQualityMode && highQualityRpmLimit > 0) {
+                        const minInterval = Math.ceil(60000 / highQualityRpmLimit)
+                        const waitMs = Math.max(0, nextRequestAt - Date.now())
+                        if (waitMs > 0) {
+                            await new Promise((resolve) => setTimeout(resolve, waitMs))
+                        }
+                        nextRequestAt = Date.now() + minInterval
+                    }
+
+                    const chapterPrompt = chapterContextEnabled
+                        ? buildChapterBulkPrompt(
+                            basePrompt,
+                            highQualityMode
+                                ? contextHistory.slice(-highQualityBatchSize)
+                                : imagesToProcess
+                        )
+                        : basePrompt
+
+                    const result = await runSingleImage(img, i, chapterPrompt)
+                    doneCount += 1
+                    updateOverallProgress(doneCount)
+                    if (highQualityMode && result.success) {
+                        contextHistory.push({
+                            detectedTextBlocks: result.detectedTextBlocks,
+                        })
+                    }
+                }
+            }
+
+            if (stopBatchRequestedRef.current) {
+                toast.warning(
+                    locale === "zh"
+                        ? `已停止。已完成 ${doneCount}/${imagesToProcess.length} 张。`
+                        : `Stopped. Completed ${doneCount}/${imagesToProcess.length}.`
+                )
+            } else if (failedCount > 0) {
                 toast.error(
                     locale === "zh"
                         ? `完成 ${imagesToProcess.length} 张，其中失败 ${failedCount} 张。`
@@ -2482,10 +2735,21 @@ export function EditorToolbar() {
             }
         } finally {
             setProcessing(false)
+            stopBatchRequestedRef.current = false
             setProgress(0)
             setProgressText("")
             setProgressDetail("")
         }
+    }
+
+    const handleStopBatch = () => {
+        if (!isProcessing) return
+        stopBatchRequestedRef.current = true
+        toast.info(
+            locale === "zh"
+                ? "已请求停止：当前批次完成后将停止后续处理"
+                : "Stop requested: current batch will finish, then remaining tasks will stop."
+        )
     }
 
     const buildExportFilename = (baseName: string) => {
@@ -2499,6 +2763,52 @@ export function EditorToolbar() {
         return filename.slice(0, dotIndex)
     }
 
+    const getSequenceBaseName = (zeroBasedIndex: number) => {
+        const start = Math.max(0, Math.floor(settings.exportSequenceStart ?? 1))
+        const value = start + zeroBasedIndex
+        return `image${value}`
+    }
+
+    const resolveExportBaseName = (
+        imageItem?: { file?: File | null },
+        zeroBasedIndex?: number,
+        fallbackBase?: string
+    ) => {
+        if ((settings.exportNamingMode ?? "original") === "original") {
+            const originalBase = stripFileExtension(imageItem?.file?.name || "")
+            if (originalBase.trim()) {
+                return originalBase.trim()
+            }
+        }
+        if (typeof zeroBasedIndex === "number") {
+            return getSequenceBaseName(zeroBasedIndex)
+        }
+        if (imageItem?.file?.name) {
+            return stripFileExtension(imageItem.file.name)
+        }
+        return fallbackBase || `result-${Date.now()}`
+    }
+
+    const dedupeExportEntries = <T extends { name: string }>(entries: T[]): T[] => {
+        const nameCounter = new Map<string, number>()
+        return entries.map((entry) => {
+            const base = entry.name
+            const count = (nameCounter.get(base) || 0) + 1
+            nameCounter.set(base, count)
+            if (count === 1) {
+                return entry
+            }
+            const extIndex = base.lastIndexOf(".")
+            if (extIndex <= 0) {
+                return { ...entry, name: `${base}-${count}` }
+            }
+            return {
+                ...entry,
+                name: `${base.slice(0, extIndex)}-${count}${base.slice(extIndex)}`,
+            }
+        })
+    }
+
     const toExportDataUrl = async (dataUrl: string) => {
         if (settings.exportFormat === "png") return dataUrl
         return convertToFormat(dataUrl, settings.exportFormat, settings.exportQuality)
@@ -2509,7 +2819,8 @@ export function EditorToolbar() {
         if (!currentImage?.resultUrl) return
         try {
             const exported = await toExportDataUrl(currentImage.resultUrl)
-            downloadImage(exported, buildExportFilename(`result-${Date.now()}`))
+            const baseName = resolveExportBaseName(currentImage, 0, `result-${Date.now()}`)
+            downloadImage(exported, buildExportFilename(baseName))
             void logUsage("export", { type: "single", format: settings.exportFormat })
         } catch (error) {
             toast.error(
@@ -2717,12 +3028,12 @@ export function EditorToolbar() {
         try {
             const filesToDownload = await Promise.all(
                 completedImages.map(async (img, index) => ({
-                    name: buildExportFilename(`result-${index + 1}`),
+                    name: buildExportFilename(resolveExportBaseName(img, index, `result-${index + 1}`)),
                     dataUrl: await toExportDataUrl(img.resultUrl!),
                 }))
             )
 
-            await downloadImagesAsZip(filesToDownload)
+            await downloadImagesAsZip(dedupeExportEntries(filesToDownload))
             void logUsage("export", { type: "batch", count: completedImages.length, format: settings.exportFormat })
             toast.success(
                 locale === "zh"
@@ -2748,13 +3059,13 @@ export function EditorToolbar() {
         try {
             const filesToExport = await Promise.all(
                 completedImages.map(async (img, index) => ({
-                    name: img.file?.name || `result-${index + 1}`,
+                    name: buildExportFilename(resolveExportBaseName(img, index, `result-${index + 1}`)),
                     dataUrl: await toExportDataUrl(img.resultUrl!),
                 }))
             )
 
             await downloadImagesAsPdf(
-                filesToExport,
+                dedupeExportEntries(filesToExport),
                 `manga-lens-results-${Date.now()}.pdf`
             )
             void logUsage("export", { type: "pdf", count: completedImages.length, format: settings.exportFormat })
@@ -2782,11 +3093,11 @@ export function EditorToolbar() {
         try {
             const filesToExport = await Promise.all(
                 completedImages.map(async (img, index) => ({
-                    name: buildExportFilename(`page-${String(index + 1).padStart(3, "0")}`),
+                    name: buildExportFilename(resolveExportBaseName(img, index, `page-${String(index + 1).padStart(3, "0")}`)),
                     dataUrl: await toExportDataUrl(img.resultUrl!),
                 }))
             )
-            await downloadImagesAsCbz(filesToExport, `manga-lens-results-${Date.now()}.cbz`)
+            await downloadImagesAsCbz(dedupeExportEntries(filesToExport), `manga-lens-results-${Date.now()}.cbz`)
             void logUsage("export", { type: "cbz", count: completedImages.length, format: settings.exportFormat })
             toast.success(
                 locale === "zh"
@@ -2812,7 +3123,7 @@ export function EditorToolbar() {
         try {
             const entries = await Promise.all(
                 completedImages.map(async (img, index) => {
-                    const imageBaseName = stripFileExtension(img.file?.name || `result-${index + 1}`)
+                    const imageBaseName = resolveExportBaseName(img, index, `result-${index + 1}`)
                     const imageName = buildExportFilename(imageBaseName)
                     const sidecarName = `${imageBaseName}.sidecar.json`
                     return {
@@ -2840,8 +3151,26 @@ export function EditorToolbar() {
                 })
             )
 
+            const entryNameCounter = new Map<string, number>()
+            const uniqueEntries = entries.map((entry) => {
+                const key = entry.imageName
+                const count = (entryNameCounter.get(key) || 0) + 1
+                entryNameCounter.set(key, count)
+                if (count === 1) return entry
+                const extIndex = key.lastIndexOf(".")
+                const imageName = extIndex > 0
+                    ? `${key.slice(0, extIndex)}-${count}${key.slice(extIndex)}`
+                    : `${key}-${count}`
+                const sidecarBase = entry.sidecarName.replace(/\.sidecar\.json$/i, "")
+                return {
+                    ...entry,
+                    imageName,
+                    sidecarName: `${sidecarBase}-${count}.sidecar.json`,
+                }
+            })
+
             await downloadImagesWithSidecarZip(
-                entries,
+                uniqueEntries,
                 `manga-lens-ps-sidecar-${Date.now()}.zip`
             )
             void logUsage("export", { type: "zip_sidecar", count: completedImages.length, format: settings.exportFormat })
@@ -3001,6 +3330,14 @@ export function EditorToolbar() {
                         <Play className="h-4 w-4 mr-2" />
                     )}
                     {t.editor.toolbar.batchGenerate}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleStopBatch}
+                    disabled={!isProcessing}
+                >
+                    {locale === "zh" ? "停止" : "Stop"}
                 </Button>
 
                 <Button
