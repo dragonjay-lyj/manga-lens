@@ -615,39 +615,111 @@ export function downloadImage(dataUrl: string, filename: string): void {
     document.body.removeChild(link)
 }
 
+export type ExportProgressPhase = "prepare" | "pack" | "render" | "save"
+
+export interface ExportProgressState {
+    phase: ExportProgressPhase
+    done: number
+    total: number
+    percent: number
+    label?: string
+}
+
+export type ExportProgressCallback = (state: ExportProgressState) => void
+
+function clampPercent(input: number): number {
+    if (!Number.isFinite(input)) return 0
+    return Math.max(0, Math.min(100, input))
+}
+
 /**
  * 批量下载图片为 ZIP
  */
 export async function downloadImagesAsZip(
     images: Array<{ name: string; dataUrl: string }>,
-    zipFilename: string = 'manga-lens-results.zip'
+    zipFilename: string = 'manga-lens-results.zip',
+    onProgress?: ExportProgressCallback
 ): Promise<void> {
+    if (!images.length) return
     const JSZip = (await import('jszip')).default
     const { saveAs } = await import('file-saver')
 
     const zip = new JSZip()
+    onProgress?.({
+        phase: "prepare",
+        done: 0,
+        total: images.length,
+        percent: 0,
+        label: zipFilename,
+    })
 
-    for (const { name, dataUrl } of images) {
+    for (let index = 0; index < images.length; index++) {
+        const { name, dataUrl } = images[index]
         const base64Data = dataUrl.split(',')[1]
         zip.file(name, base64Data, { base64: true })
+        const preparePercent = images.length > 0
+            ? ((index + 1) / images.length) * 55
+            : 0
+        onProgress?.({
+            phase: "prepare",
+            done: index + 1,
+            total: images.length,
+            percent: clampPercent(preparePercent),
+            label: name,
+        })
     }
 
-    const content = await zip.generateAsync({ type: 'blob' })
+    const content = await zip.generateAsync({ type: 'blob' }, (metadata) => {
+        const zipPercent = Number(metadata.percent || 0)
+        const mappedPercent = 55 + (zipPercent * 0.44)
+        const done = Math.max(0, Math.min(images.length, Math.round((zipPercent / 100) * images.length)))
+        onProgress?.({
+            phase: "pack",
+            done,
+            total: images.length,
+            percent: clampPercent(mappedPercent),
+            label: metadata.currentFile ?? undefined,
+        })
+    })
+    onProgress?.({
+        phase: "save",
+        done: 0,
+        total: 1,
+        percent: 99,
+        label: zipFilename,
+    })
     saveAs(content, zipFilename)
+    onProgress?.({
+        phase: "save",
+        done: 1,
+        total: 1,
+        percent: 100,
+        label: zipFilename,
+    })
 }
 
 export async function downloadImagesAsCbz(
     images: Array<{ name: string; dataUrl: string }>,
-    cbzFilename: string = "manga-lens-results.cbz"
+    cbzFilename: string = "manga-lens-results.cbz",
+    onProgress?: ExportProgressCallback
 ): Promise<void> {
-    await downloadImagesAsZip(images, cbzFilename)
+    await downloadImagesAsZip(images, cbzFilename, onProgress)
 }
 
 export async function downloadImagesAsPdf(
     images: Array<{ name: string; dataUrl: string }>,
-    filename: string = "manga-lens-results.pdf"
+    filename: string = "manga-lens-results.pdf",
+    onProgress?: ExportProgressCallback
 ): Promise<void> {
     if (!images.length) return
+
+    onProgress?.({
+        phase: "prepare",
+        done: 0,
+        total: images.length,
+        percent: 0,
+        label: filename,
+    })
 
     const { jsPDF } = await import("jspdf")
     const firstImage = await loadImage(images[0].dataUrl)
@@ -671,9 +743,31 @@ export async function downloadImagesAsPdf(
             pdf.addPage([image.width, image.height], orientation)
         }
         pdf.addImage(dataUrl, format, 0, 0, image.width, image.height, undefined, "FAST")
+        const renderPercent = 5 + ((index + 1) / images.length) * 90
+        onProgress?.({
+            phase: "render",
+            done: index + 1,
+            total: images.length,
+            percent: clampPercent(renderPercent),
+            label: images[index].name,
+        })
     }
 
+    onProgress?.({
+        phase: "save",
+        done: 0,
+        total: 1,
+        percent: 98,
+        label: filename,
+    })
     pdf.save(filename)
+    onProgress?.({
+        phase: "save",
+        done: 1,
+        total: 1,
+        percent: 100,
+        label: filename,
+    })
 }
 
 export interface SidecarZipEntry {
@@ -685,7 +779,8 @@ export interface SidecarZipEntry {
 
 export async function downloadImagesWithSidecarZip(
     entries: SidecarZipEntry[],
-    zipFilename: string = "manga-lens-results-with-sidecar.zip"
+    zipFilename: string = "manga-lens-results-with-sidecar.zip",
+    onProgress?: ExportProgressCallback
 ): Promise<void> {
     if (!entries.length) return
 
@@ -696,11 +791,29 @@ export async function downloadImagesWithSidecarZip(
     const root = zip.folder("results")
     const imagesFolder = root?.folder("images")
     const sidecarsFolder = root?.folder("sidecars")
+    onProgress?.({
+        phase: "prepare",
+        done: 0,
+        total: entries.length,
+        percent: 0,
+        label: zipFilename,
+    })
 
-    for (const entry of entries) {
+    for (let index = 0; index < entries.length; index++) {
+        const entry = entries[index]
         const imageBase64 = entry.imageDataUrl.split(",")[1]
         imagesFolder?.file(entry.imageName, imageBase64, { base64: true })
         sidecarsFolder?.file(entry.sidecarName, JSON.stringify(entry.sidecar, null, 2))
+        const preparePercent = entries.length > 0
+            ? ((index + 1) / entries.length) * 55
+            : 0
+        onProgress?.({
+            phase: "prepare",
+            done: index + 1,
+            total: entries.length,
+            percent: clampPercent(preparePercent),
+            label: entry.imageName,
+        })
     }
 
     const manifest = {
@@ -714,8 +827,33 @@ export async function downloadImagesWithSidecarZip(
     }
     root?.file("manifest.json", JSON.stringify(manifest, null, 2))
 
-    const content = await zip.generateAsync({ type: "blob" })
+    const content = await zip.generateAsync({ type: "blob" }, (metadata) => {
+        const zipPercent = Number(metadata.percent || 0)
+        const mappedPercent = 55 + (zipPercent * 0.44)
+        const done = Math.max(0, Math.min(entries.length, Math.round((zipPercent / 100) * entries.length)))
+        onProgress?.({
+            phase: "pack",
+            done,
+            total: entries.length,
+            percent: clampPercent(mappedPercent),
+            label: metadata.currentFile ?? undefined,
+        })
+    })
+    onProgress?.({
+        phase: "save",
+        done: 0,
+        total: 1,
+        percent: 99,
+        label: zipFilename,
+    })
     saveAs(content, zipFilename)
+    onProgress?.({
+        phase: "save",
+        done: 1,
+        total: 1,
+        percent: 100,
+        label: zipFilename,
+    })
 }
 
 export interface HtmlExportEntry {
@@ -740,9 +878,17 @@ function escapeHtml(input: string): string {
  */
 export async function downloadImagesAsHtml(
     images: HtmlExportEntry[],
-    filename: string = 'manga-lens-results.html'
+    filename: string = 'manga-lens-results.html',
+    onProgress?: ExportProgressCallback
 ): Promise<void> {
     if (!images.length) return
+    onProgress?.({
+        phase: "prepare",
+        done: 0,
+        total: images.length,
+        percent: 5,
+        label: filename,
+    })
 
     const generatedAt = new Date().toLocaleString()
     const cards = images.map((item, index) => {
@@ -818,5 +964,19 @@ export async function downloadImagesAsHtml(
 
     const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
     const { saveAs } = await import('file-saver')
+    onProgress?.({
+        phase: "save",
+        done: 0,
+        total: 1,
+        percent: 95,
+        label: filename,
+    })
     saveAs(blob, filename)
+    onProgress?.({
+        phase: "save",
+        done: 1,
+        total: 1,
+        percent: 100,
+        label: filename,
+    })
 }

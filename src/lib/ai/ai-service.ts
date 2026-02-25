@@ -1,6 +1,7 @@
 // AI 服务 - 封装 Gemini 和 OpenAI 兼容接口
 
 import type { AIProvider } from '@/types/database'
+import { sanitizeModelText } from '@/lib/utils/text-sanitizer'
 
 export type ImageSizeOption = '1K' | '2K' | '4K'
 
@@ -83,6 +84,22 @@ export interface DetectTextResponse {
     blocks: DetectedTextBlock[]
     error?: string
     raw?: string
+}
+
+export interface TranslateImageSentenceRequest {
+    imageData: string
+    config: AIConfig
+    targetLanguage: string
+    sourceLanguageHint?: string
+    extraPrompt?: string
+    stripReasoningContent?: boolean
+}
+
+export interface TranslateImageSentenceResponse {
+    success: boolean
+    translatedText?: string
+    raw?: string
+    error?: string
 }
 
 const REQUEST_TIMEOUT_MS = 90_000
@@ -927,6 +944,40 @@ function getInlineData(part: unknown): { data?: string } | undefined {
     return undefined
 }
 
+function buildImageSentencePrompt(
+    targetLanguage: string,
+    options?: { sourceLanguageHint?: string; extraPrompt?: string }
+): string {
+    const sourceHint = options?.sourceLanguageHint?.trim()
+    const extraPrompt = options?.extraPrompt?.trim()
+    return [
+        sourceHint ? `源语言提示：${sourceHint}` : "源语言提示：自动识别",
+        `请只提取这张截图中的完整句子并翻译为${targetLanguage}。`,
+        "如果原图是被拆分的散句，请按语义重组为完整句子再翻译。",
+        "只返回译文本身，不要输出解释、前缀、JSON、markdown、思考过程。",
+        extraPrompt ? `补充要求：${extraPrompt}` : "",
+    ].filter(Boolean).join("\n")
+}
+
+function extractVisionTranslatedText(rawText: string): string {
+    const normalizedRaw = String(rawText || "").trim()
+    if (!normalizedRaw) return ""
+
+    const parsed = parseJsonFromText(normalizedRaw)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const obj = parsed as Record<string, unknown>
+        const fromKey = String(
+            obj.translation ??
+            obj.translatedText ??
+            obj.text ??
+            obj.content ??
+            ""
+        ).trim()
+        if (fromKey) return fromKey
+    }
+    return normalizedRaw
+}
+
 async function fetchWithTimeout(
     input: RequestInfo | URL,
     init: RequestInit,
@@ -1355,6 +1406,148 @@ async function detectWithOpenAI(request: DetectTextRequest): Promise<DetectTextR
     }
 }
 
+async function translateImageSentenceWithGemini(
+    request: TranslateImageSentenceRequest
+): Promise<TranslateImageSentenceResponse> {
+    const model = (request.config.model || "gemini-2.5-flash").trim()
+    const prompt = buildImageSentencePrompt(request.targetLanguage, {
+        sourceLanguageHint: request.sourceLanguageHint,
+        extraPrompt: request.extraPrompt,
+    })
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${request.config.apiKey}`
+
+    try {
+        const response = await fetchWithTimeout(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                contents: [{
+                    parts: [
+                        {
+                            inline_data: {
+                                mime_type: "image/png",
+                                data: request.imageData.replace(/^data:image\/\w+;base64,/, ""),
+                            },
+                        },
+                        { text: prompt },
+                    ],
+                }],
+                generationConfig: {
+                    temperature: 0.2,
+                },
+            }),
+        })
+
+        if (!response.ok) {
+            const apiError = await readApiError(response)
+            return {
+                success: false,
+                error: `Gemini vision translate ${response.status}: ${apiError}`,
+            }
+        }
+
+        const data = await response.json()
+        const parts = data.candidates?.[0]?.content?.parts || []
+        const rawText = parts
+            .map((part: { text?: string }) => (typeof part?.text === "string" ? part.text : ""))
+            .join("\n")
+            .trim()
+        const translatedText = sanitizeModelText(extractVisionTranslatedText(rawText), { enabled: Boolean(request.stripReasoningContent) })
+        if (!translatedText) {
+            return {
+                success: false,
+                raw: rawText,
+                error: "未返回有效译文",
+            }
+        }
+
+        return {
+            success: true,
+            translatedText,
+            raw: rawText,
+        }
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : "未知错误",
+        }
+    }
+}
+
+async function translateImageSentenceWithOpenAI(
+    request: TranslateImageSentenceRequest
+): Promise<TranslateImageSentenceResponse> {
+    const baseUrl = request.config.baseUrl || "https://api.openai.com/v1"
+    const model = request.config.model || "gpt-4o-mini"
+    const prompt = buildImageSentencePrompt(request.targetLanguage, {
+        sourceLanguageHint: request.sourceLanguageHint,
+        extraPrompt: request.extraPrompt,
+    })
+
+    try {
+        const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${request.config.apiKey}`,
+            },
+            body: JSON.stringify({
+                model,
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "image_url",
+                                image_url: { url: request.imageData },
+                            },
+                            {
+                                type: "text",
+                                text: prompt,
+                            },
+                        ],
+                    },
+                ],
+                temperature: 0.2,
+                max_tokens: 800,
+            }),
+        })
+
+        if (!response.ok) {
+            const apiError = await readApiError(response)
+            return {
+                success: false,
+                error: `OpenAI vision translate ${response.status}: ${apiError}`,
+            }
+        }
+
+        const data = await response.json()
+        const rawContent = data.choices?.[0]?.message?.content
+        const rawText = Array.isArray(rawContent)
+            ? rawContent.map((item: { text?: string }) => item?.text || "").join("\n")
+            : String(rawContent || "")
+        const translatedText = sanitizeModelText(extractVisionTranslatedText(rawText), { enabled: Boolean(request.stripReasoningContent) })
+        if (!translatedText) {
+            return {
+                success: false,
+                raw: rawText,
+                error: "未返回有效译文",
+            }
+        }
+
+        return {
+            success: true,
+            translatedText,
+            raw: rawText,
+        }
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : "未知错误",
+        }
+    }
+}
+
 type DetectCacheEntry = {
     expiresAt: number
     response: DetectTextResponse
@@ -1494,6 +1687,22 @@ export interface BatchProcessOptions {
     concurrency?: number
     isSerial?: boolean
     maxRetries?: number // 最大重试次数
+}
+
+export async function translateImageSentence(
+    request: TranslateImageSentenceRequest
+): Promise<TranslateImageSentenceResponse> {
+    const { config } = request
+    if (!config.apiKey) {
+        return {
+            success: false,
+            error: "请先配置 API Key",
+        }
+    }
+    if (config.provider === "gemini") {
+        return translateImageSentenceWithGemini(request)
+    }
+    return translateImageSentenceWithOpenAI(request)
 }
 
 // 带重试的生成函数

@@ -17,6 +17,8 @@ import {
     Layers2,
     Brush,
     Sparkles,
+    ChevronLeft,
+    ChevronRight,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import { toast } from "sonner"
@@ -56,6 +58,7 @@ import {
     createImageWithBrushMaskFilled,
     compositeMaskedPixelsFromFullImage,
     imageToDataUrl,
+    type ExportProgressState,
 } from "@/lib/utils/image-utils"
 import type { Selection } from "@/types/database"
 
@@ -88,6 +91,7 @@ export function EditorToolbar() {
         clearSelectionProgress,
         setDetectedTextBlocks,
         clearDetectedTextBlocks,
+        setCurrentImage,
         setProcessing,
         mergeResultIntoOriginal,
         clearRepairMask,
@@ -100,6 +104,10 @@ export function EditorToolbar() {
     const [progress, setProgress] = useState(0)
     const [progressText, setProgressText] = useState("")
     const [progressDetail, setProgressDetail] = useState("")
+    const [isExporting, setIsExporting] = useState(false)
+    const [exportProgress, setExportProgress] = useState(0)
+    const [exportProgressText, setExportProgressText] = useState("")
+    const [exportProgressDetail, setExportProgressDetail] = useState("")
     type PipelineStageKey = "ocr" | "translate" | "fillback"
     const [pipelineStageActive, setPipelineStageActive] = useState<PipelineStageKey | null>(null)
     const [pipelineStageDurations, setPipelineStageDurations] = useState<Partial<Record<PipelineStageKey, number>>>({})
@@ -154,6 +162,38 @@ export function EditorToolbar() {
         }
         setPipelineStageActive((prev) => (prev === stage ? null : prev))
     }
+
+    const beginExportProgress = useCallback(() => {
+        setIsExporting(true)
+        setExportProgress(0)
+        setExportProgressText(locale === "zh" ? "准备导出..." : "Preparing export...")
+        setExportProgressDetail("")
+    }, [locale])
+
+    const resetExportProgress = useCallback(() => {
+        setIsExporting(false)
+        setExportProgress(0)
+        setExportProgressText("")
+        setExportProgressDetail("")
+    }, [])
+
+    const handleExportProgress = useCallback((state: ExportProgressState) => {
+        const percent = Math.max(0, Math.min(100, Math.round(state.percent)))
+        setExportProgress(percent)
+
+        const phaseText = state.phase === "prepare"
+            ? (locale === "zh" ? "导出准备中" : "Preparing export")
+            : state.phase === "pack"
+                ? (locale === "zh" ? "打包中" : "Packaging")
+                : state.phase === "render"
+                    ? (locale === "zh" ? "渲染中" : "Rendering")
+                    : (locale === "zh" ? "保存文件中" : "Saving file")
+
+        setExportProgressText(`${phaseText} ${percent}%`)
+        const progressSummary = state.total > 1 ? `${Math.max(0, state.done)}/${state.total}` : ""
+        const label = state.label ? String(state.label) : ""
+        setExportProgressDetail([progressSummary, label].filter(Boolean).join(" · "))
+    }, [locale])
 
     const resolveRetryLimit = (extra: number = 0) =>
         Math.max(0, Math.min(8, (settings.maxRetries ?? 2) + extra))
@@ -418,6 +458,7 @@ export function EditorToolbar() {
                     items,
                     targetLanguage,
                     contextHint,
+                    stripReasoningContent: settings.stripReasoningContent ?? true,
                 }),
             })
             if (!res.ok) {
@@ -444,6 +485,7 @@ export function EditorToolbar() {
             items,
             targetLanguage,
             contextHint,
+            stripReasoningContent: settings.stripReasoningContent ?? true,
             config: {
                 provider: settings.provider,
                 apiKey: settings.apiKey,
@@ -3166,6 +3208,7 @@ export function EditorToolbar() {
             return
         }
 
+        beginExportProgress()
         try {
             const filesToDownload = await Promise.all(
                 completedImages.map(async (img, index) => ({
@@ -3174,7 +3217,11 @@ export function EditorToolbar() {
                 }))
             )
 
-            await downloadImagesAsZip(dedupeExportEntries(filesToDownload))
+            await downloadImagesAsZip(
+                dedupeExportEntries(filesToDownload),
+                `manga-lens-results-${Date.now()}.zip`,
+                handleExportProgress
+            )
             void logUsage("export", { type: "batch", count: completedImages.length, format: settings.exportFormat })
             toast.success(
                 locale === "zh"
@@ -3187,6 +3234,8 @@ export function EditorToolbar() {
                     ? `导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `Export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        } finally {
+            resetExportProgress()
         }
     }
 
@@ -3197,6 +3246,7 @@ export function EditorToolbar() {
             return
         }
 
+        beginExportProgress()
         try {
             const filesToExport = await Promise.all(
                 completedImages.map(async (img, index) => ({
@@ -3207,7 +3257,8 @@ export function EditorToolbar() {
 
             await downloadImagesAsPdf(
                 dedupeExportEntries(filesToExport),
-                `manga-lens-results-${Date.now()}.pdf`
+                `manga-lens-results-${Date.now()}.pdf`,
+                handleExportProgress
             )
             void logUsage("export", { type: "pdf", count: completedImages.length, format: settings.exportFormat })
             toast.success(
@@ -3221,6 +3272,8 @@ export function EditorToolbar() {
                     ? `PDF 导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `PDF export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        } finally {
+            resetExportProgress()
         }
     }
 
@@ -3231,6 +3284,7 @@ export function EditorToolbar() {
             return
         }
 
+        beginExportProgress()
         try {
             const filesToExport = await Promise.all(
                 completedImages.map(async (img, index) => ({
@@ -3238,7 +3292,11 @@ export function EditorToolbar() {
                     dataUrl: await toExportDataUrl(img.resultUrl!),
                 }))
             )
-            await downloadImagesAsCbz(dedupeExportEntries(filesToExport), `manga-lens-results-${Date.now()}.cbz`)
+            await downloadImagesAsCbz(
+                dedupeExportEntries(filesToExport),
+                `manga-lens-results-${Date.now()}.cbz`,
+                handleExportProgress
+            )
             void logUsage("export", { type: "cbz", count: completedImages.length, format: settings.exportFormat })
             toast.success(
                 locale === "zh"
@@ -3251,6 +3309,8 @@ export function EditorToolbar() {
                     ? `CBZ 导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `CBZ export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        } finally {
+            resetExportProgress()
         }
     }
 
@@ -3261,6 +3321,7 @@ export function EditorToolbar() {
             return
         }
 
+        beginExportProgress()
         try {
             const entries = await Promise.all(
                 completedImages.map(async (img, index) => {
@@ -3312,7 +3373,8 @@ export function EditorToolbar() {
 
             await downloadImagesWithSidecarZip(
                 uniqueEntries,
-                `manga-lens-ps-sidecar-${Date.now()}.zip`
+                `manga-lens-ps-sidecar-${Date.now()}.zip`,
+                handleExportProgress
             )
             void logUsage("export", { type: "zip_sidecar", count: completedImages.length, format: settings.exportFormat })
             toast.success(
@@ -3326,6 +3388,8 @@ export function EditorToolbar() {
                     ? `Sidecar 导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `Sidecar export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        } finally {
+            resetExportProgress()
         }
     }
 
@@ -3336,6 +3400,7 @@ export function EditorToolbar() {
             return
         }
 
+        beginExportProgress()
         try {
             await downloadImagesAsHtml(
                 completedImages.map((img, index) => ({
@@ -3345,7 +3410,8 @@ export function EditorToolbar() {
                     selectionCount: img.selections?.length || 0,
                     prompt: prompt || undefined,
                 })),
-                `manga-lens-results-${Date.now()}.html`
+                `manga-lens-results-${Date.now()}.html`,
+                handleExportProgress
             )
             void logUsage("export", { type: "html", count: completedImages.length })
             toast.success(
@@ -3359,6 +3425,8 @@ export function EditorToolbar() {
                     ? `HTML 导出失败：${error instanceof Error ? error.message : "未知错误"}`
                     : `HTML export failed: ${error instanceof Error ? error.message : "Unknown error"}`
             )
+        } finally {
+            resetExportProgress()
         }
     }
 
@@ -3371,6 +3439,9 @@ export function EditorToolbar() {
 
     const hasResult = currentImage?.resultUrl
     const hasCompletedImages = images.some((img) => img.resultUrl)
+    const currentImageIndex = currentImage ? images.findIndex((img) => img.id === currentImage.id) : -1
+    const canGoPrevImage = currentImageIndex > 0
+    const canGoNextImage = currentImageIndex >= 0 && currentImageIndex < images.length - 1
     const pipelineStages: PipelineStageKey[] = ["ocr", "translate", "fillback"]
     const hasPipelineStageStats = pipelineStageActive !== null || Object.keys(pipelineStageDurations).length > 0
     const getPipelineStageLabel = (stage: PipelineStageKey) => {
@@ -3381,6 +3452,20 @@ export function EditorToolbar() {
     const formatDuration = (ms?: number) => {
         if (typeof ms !== "number" || Number.isNaN(ms)) return ""
         return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
+    }
+    const handleGoPrevImage = () => {
+        if (!canGoPrevImage) return
+        const prevImage = images[currentImageIndex - 1]
+        if (prevImage) {
+            setCurrentImage(prevImage.id)
+        }
+    }
+    const handleGoNextImage = () => {
+        if (!canGoNextImage) return
+        const nextImage = images[currentImageIndex + 1]
+        if (nextImage) {
+            setCurrentImage(nextImage.id)
+        }
     }
 
     return (
@@ -3401,43 +3486,79 @@ export function EditorToolbar() {
                     </TabsList>
                 </Tabs>
 
+                <div className="flex items-center gap-1">
+                    <Button
+                        size="icon"
+                        variant="outline"
+                        onClick={handleGoPrevImage}
+                        disabled={!canGoPrevImage}
+                        aria-label={locale === "zh" ? "上一页" : "Previous image"}
+                    >
+                        <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                    <Button
+                        size="icon"
+                        variant="outline"
+                        onClick={handleGoNextImage}
+                        disabled={!canGoNextImage}
+                        aria-label={locale === "zh" ? "下一页" : "Next image"}
+                    >
+                        <ChevronRight className="h-4 w-4" />
+                    </Button>
+                </div>
+
                 {/* 进度条 */}
-                {isProcessing && progressText && (
-                    <div className="flex flex-col gap-1 min-w-[260px]">
-                        <div className="flex items-center gap-2">
-                            <Progress value={progress} className="h-2" />
-                            <span className="text-sm text-muted-foreground">{progressText}</span>
-                        </div>
-                        {progressDetail && (
-                            <span className="text-xs text-muted-foreground truncate">{progressDetail}</span>
+                {(isProcessing && progressText) || (isExporting && exportProgressText) ? (
+                    <div className="flex flex-col gap-2 min-w-[300px]">
+                        {isProcessing && progressText && (
+                            <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-2">
+                                    <Progress value={progress} className="h-2" />
+                                    <span className="text-sm text-muted-foreground">{progressText}</span>
+                                </div>
+                                {progressDetail && (
+                                    <span className="text-xs text-muted-foreground truncate">{progressDetail}</span>
+                                )}
+                                {hasPipelineStageStats && (
+                                    <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                                        {pipelineStages.map((stage) => {
+                                            const isActive = pipelineStageActive === stage
+                                            const duration = pipelineStageDurations[stage]
+                                            const isDone = typeof duration === "number"
+                                            return (
+                                                <span
+                                                    key={stage}
+                                                    className={
+                                                        isActive
+                                                            ? "rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-blue-500"
+                                                            : isDone
+                                                                ? "rounded border border-green-500/40 bg-green-500/10 px-1.5 py-0.5 text-green-600"
+                                                                : "rounded border border-border/60 bg-muted/30 px-1.5 py-0.5"
+                                                    }
+                                                >
+                                                    {getPipelineStageLabel(stage)}
+                                                    {isDone ? ` ${formatDuration(duration)}` : ""}
+                                                    {isActive ? ` · ${locale === "zh" ? "进行中" : "Running"}` : ""}
+                                                </span>
+                                            )
+                                        })}
+                                    </div>
+                                )}
+                            </div>
                         )}
-                        {hasPipelineStageStats && (
-                            <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                                {pipelineStages.map((stage) => {
-                                    const isActive = pipelineStageActive === stage
-                                    const duration = pipelineStageDurations[stage]
-                                    const isDone = typeof duration === "number"
-                                    return (
-                                        <span
-                                            key={stage}
-                                            className={
-                                                isActive
-                                                    ? "rounded border border-blue-500/40 bg-blue-500/10 px-1.5 py-0.5 text-blue-500"
-                                                    : isDone
-                                                        ? "rounded border border-green-500/40 bg-green-500/10 px-1.5 py-0.5 text-green-600"
-                                                        : "rounded border border-border/60 bg-muted/30 px-1.5 py-0.5"
-                                            }
-                                        >
-                                            {getPipelineStageLabel(stage)}
-                                            {isDone ? ` ${formatDuration(duration)}` : ""}
-                                            {isActive ? ` · ${locale === "zh" ? "进行中" : "Running"}` : ""}
-                                        </span>
-                                    )
-                                })}
+                        {isExporting && exportProgressText && (
+                            <div className="flex flex-col gap-1">
+                                <div className="flex items-center gap-2">
+                                    <Progress value={exportProgress} className="h-2" />
+                                    <span className="text-sm text-muted-foreground">{exportProgressText}</span>
+                                </div>
+                                {exportProgressDetail && (
+                                    <span className="text-xs text-muted-foreground truncate">{exportProgressDetail}</span>
+                                )}
                             </div>
                         )}
                     </div>
-                )}
+                ) : null}
             </div>
 
             {/* 右侧：操作按钮 */}
@@ -3538,7 +3659,7 @@ export function EditorToolbar() {
                 <Button
                     variant="outline"
                     onClick={handleDownloadAll}
-                    disabled={!hasCompletedImages}
+                    disabled={!hasCompletedImages || isExporting}
                 >
                     <Package className="h-4 w-4 mr-2" />
                     {t.editor.toolbar.downloadAll}
@@ -3547,7 +3668,7 @@ export function EditorToolbar() {
                 <Button
                     variant="outline"
                     onClick={handleDownloadPdf}
-                    disabled={!hasCompletedImages}
+                    disabled={!hasCompletedImages || isExporting}
                 >
                     <FileText className="h-4 w-4 mr-2" />
                     PDF
@@ -3556,7 +3677,7 @@ export function EditorToolbar() {
                 <Button
                     variant="outline"
                     onClick={handleDownloadCbz}
-                    disabled={!hasCompletedImages}
+                    disabled={!hasCompletedImages || isExporting}
                 >
                     <FileArchive className="h-4 w-4 mr-2" />
                     CBZ
@@ -3565,7 +3686,7 @@ export function EditorToolbar() {
                 <Button
                     variant="outline"
                     onClick={handleDownloadWithSidecar}
-                    disabled={!hasCompletedImages}
+                    disabled={!hasCompletedImages || isExporting}
                 >
                     <FileJson2 className="h-4 w-4 mr-2" />
                     {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
@@ -3574,7 +3695,7 @@ export function EditorToolbar() {
                 <Button
                     variant="outline"
                     onClick={handleDownloadHtml}
-                    disabled={!hasCompletedImages}
+                    disabled={!hasCompletedImages || isExporting}
                 >
                     <FileCode2 className="h-4 w-4 mr-2" />
                     HTML

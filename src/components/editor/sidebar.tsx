@@ -44,6 +44,7 @@ import {
     Loader2,
     Search,
     Trash2,
+    ImagePlus,
 } from "lucide-react"
 import { getMessages } from "@/lib/i18n"
 import {
@@ -55,6 +56,7 @@ import {
     getSourceLanguageLabel,
     getTranslationDirectionMeta,
     OPENAI_MODELS,
+    translateImageSentence,
     type DetectTextResponse,
     type SourceLanguageCode,
     type TextDetectionRegion,
@@ -63,6 +65,7 @@ import {
 import { translateTextBatch, type BatchTranslateItem } from "@/lib/ai/text-translate"
 import { imageToDataUrl, loadImage } from "@/lib/utils/image-utils"
 import { EDITOR_IMAGE_ACCEPT, expandEditorUploadFiles, normalizeEditorImageFiles } from "@/lib/utils/image-import"
+import { convertChineseText, type ChineseConvertMode } from "@/lib/utils/chinese-convert"
 import type { Selection } from "@/types/database"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -148,6 +151,7 @@ const SETTINGS_IMPORT_KEYS = [
     "suppressFurigana",
     "autoTextColorAdapt",
     "bulkTextTranslateOcr",
+    "stripReasoningContent",
     "singleRetranslateDeepMode",
     "singleRetranslateContextWindow",
     "detectionRegionMode",
@@ -210,6 +214,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const wordImportInputRef = useRef<HTMLInputElement>(null)
     const textLayerImportInputRef = useRef<HTMLInputElement>(null)
     const findInputRef = useRef<HTMLInputElement>(null)
+    const screenshotTranslateInputRef = useRef<HTMLInputElement>(null)
     const [isAutoDetecting, setIsAutoDetecting] = useState(false)
     const [rechargeDialogOpen, setRechargeDialogOpen] = useState(false)
     const [manualJsonOpen, setManualJsonOpen] = useState(false)
@@ -229,6 +234,13 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     const [sidecarPreviewKeyword, setSidecarPreviewKeyword] = useState("")
     const [sidecarPreviewMatchCursor, setSidecarPreviewMatchCursor] = useState(0)
     const [sidecarPreviewExpandedRows, setSidecarPreviewExpandedRows] = useState<number[]>([])
+    const [screenshotTranslateOpen, setScreenshotTranslateOpen] = useState(false)
+    const [screenshotTranslateBlockIndex, setScreenshotTranslateBlockIndex] = useState<number | null>(null)
+    const [screenshotTranslateImageData, setScreenshotTranslateImageData] = useState("")
+    const [screenshotTranslateImageName, setScreenshotTranslateImageName] = useState("")
+    const [screenshotTranslateExtraPrompt, setScreenshotTranslateExtraPrompt] = useState("")
+    const [isScreenshotTranslating, setIsScreenshotTranslating] = useState(false)
+    const [convertingBlockTextKey, setConvertingBlockTextKey] = useState<string | null>(null)
 
     const {
         images,
@@ -644,7 +656,10 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     // }, [handleFileUpload])
 
     const models = settings.provider === "gemini" ? GEMINI_MODELS : OPENAI_MODELS
-    const canRunAutoDetect = settings.useServerApi || Boolean(settings.apiKey)
+    const canRunAutoDetect =
+        settings.useServerApi ||
+        Boolean(settings.apiKey) ||
+        (ocrEngine !== "ai_vision")
     const detectedBlocks = useMemo(() => currentImage?.detectedTextBlocks || [], [currentImage?.detectedTextBlocks])
     const selectedBlockSet = useMemo(() => new Set(selectedBlockIndexes), [selectedBlockIndexes])
     const retranslatingBlockSet = useMemo(() => new Set(retranslatingBlockIndexes), [retranslatingBlockIndexes])
@@ -1831,6 +1846,202 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         setDetectedTextBlocks(currentImage.id, nextBlocks)
     }, [currentImage, setDetectedTextBlocks])
 
+    const convertDetectedBlockText = useCallback(async (
+        index: number,
+        field: "source" | "translated",
+        mode: ChineseConvertMode
+    ) => {
+        if (!currentImage) return
+        const blocks = [...(currentImage.detectedTextBlocks || [])]
+        const block = blocks[index]
+        if (!block) return
+
+        const currentText = field === "source"
+            ? (block.sourceText || "")
+            : richHtmlToPlainText(block.richTextHtml || block.translatedText || "")
+        if (!currentText.trim()) {
+            toast.warning(locale === "zh" ? "当前文本为空" : "Current text is empty")
+            return
+        }
+
+        const opKey = `${field}-${mode}-${index}`
+        setConvertingBlockTextKey(opKey)
+        try {
+            const converted = await convertChineseText(currentText, mode)
+            if (!converted.trim()) {
+                throw new Error(locale === "zh" ? "转换结果为空" : "Converted text is empty")
+            }
+            blocks[index] = field === "source"
+                ? {
+                    ...block,
+                    sourceText: converted,
+                }
+                : {
+                    ...block,
+                    translatedText: converted,
+                    richTextHtml: plainTextToRichHtml(converted),
+                }
+            setDetectedTextBlocks(currentImage.id, blocks)
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "繁简转换失败" : "Chinese conversion failed"))
+        } finally {
+            setConvertingBlockTextKey((prev) => (prev === opKey ? null : prev))
+        }
+    }, [currentImage, locale, setDetectedTextBlocks])
+
+    const closeScreenshotTranslateDialog = useCallback(() => {
+        setScreenshotTranslateOpen(false)
+        setScreenshotTranslateBlockIndex(null)
+        setScreenshotTranslateImageData("")
+        setScreenshotTranslateImageName("")
+        setScreenshotTranslateExtraPrompt("")
+        setIsScreenshotTranslating(false)
+    }, [])
+
+    const openScreenshotTranslateDialog = useCallback((index: number) => {
+        setScreenshotTranslateBlockIndex(index)
+        setScreenshotTranslateImageData("")
+        setScreenshotTranslateImageName("")
+        setScreenshotTranslateExtraPrompt("")
+        setScreenshotTranslateOpen(true)
+    }, [])
+
+    const handleScreenshotTranslateUpload = useCallback(async (file: File | null) => {
+        if (!file) return
+        try {
+            const normalized = await normalizeEditorImageFiles([file])
+            const imageFile = normalized.files[0]
+            if (!imageFile) {
+                throw new Error(locale === "zh" ? "未检测到可用图片文件" : "No valid image file detected")
+            }
+            const imageData = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader()
+                reader.onload = () => resolve(String(reader.result || ""))
+                reader.onerror = () => reject(new Error(locale === "zh" ? "读取截图失败" : "Failed to read image"))
+                reader.readAsDataURL(imageFile)
+            })
+            setScreenshotTranslateImageData(imageData)
+            setScreenshotTranslateImageName(imageFile.name)
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "截图加载失败" : "Failed to load screenshot"))
+        }
+    }, [locale])
+
+    const runScreenshotTranslateRequest = useCallback(async (
+        imageData: string,
+        targetLanguage: string,
+        sourceLanguageHint?: string,
+        extraPrompt?: string
+    ): Promise<string> => {
+        if (settings.useServerApi) {
+            const res = await fetch("/api/ai/translate-vision", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageData,
+                    targetLanguage,
+                    sourceLanguageHint,
+                    extraPrompt,
+                    stripReasoningContent: settings.stripReasoningContent ?? true,
+                }),
+            })
+            if (!res.ok) {
+                throw new Error(
+                    await parseApiError(
+                        res,
+                        locale === "zh" ? "网站 API 截图翻译失败" : "Server screenshot translation failed"
+                    )
+                )
+            }
+            const data = await res.json()
+            const translatedText = String(data?.translatedText || "").trim()
+            if (!translatedText) {
+                throw new Error(locale === "zh" ? "未返回有效译文" : "Empty translation result")
+            }
+            return translatedText
+        }
+
+        if (!settings.apiKey) {
+            throw new Error(locale === "zh" ? "缺少 API Key" : "Missing API key")
+        }
+        if (settings.provider !== "openai") {
+            throw new Error(locale === "zh" ? "截图单句翻译目前仅支持 OpenAI 模式" : "Screenshot sentence translation currently supports OpenAI mode only")
+        }
+
+        const result = await translateImageSentence({
+            imageData,
+            targetLanguage,
+            sourceLanguageHint,
+            extraPrompt,
+            stripReasoningContent: settings.stripReasoningContent ?? true,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
+        })
+
+        if (!result.success || !result.translatedText) {
+            throw new Error(result.error || (locale === "zh" ? "截图翻译失败" : "Screenshot translation failed"))
+        }
+        return result.translatedText.trim()
+    }, [
+        locale,
+        parseApiError,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.model,
+        settings.provider,
+        settings.stripReasoningContent,
+        settings.useServerApi,
+    ])
+
+    const handleApplyScreenshotTranslate = useCallback(async () => {
+        if (!currentImage) return
+        if (screenshotTranslateBlockIndex === null) return
+        if (!screenshotTranslateImageData) {
+            toast.warning(locale === "zh" ? "请先上传截图" : "Please upload a screenshot first")
+            return
+        }
+        const blocks = [...(currentImage.detectedTextBlocks || [])]
+        const targetBlock = blocks[screenshotTranslateBlockIndex]
+        if (!targetBlock) return
+
+        setIsScreenshotTranslating(true)
+        try {
+            const translatedText = await runScreenshotTranslateRequest(
+                screenshotTranslateImageData,
+                getTargetLanguageForDetection(),
+                getSourceLanguageHintForDetection(),
+                screenshotTranslateExtraPrompt
+            )
+            blocks[screenshotTranslateBlockIndex] = {
+                ...targetBlock,
+                translatedText,
+                richTextHtml: plainTextToRichHtml(translatedText),
+            }
+            setDetectedTextBlocks(currentImage.id, blocks)
+            toast.success(locale === "zh" ? "截图单句翻译已回填" : "Screenshot translation applied")
+            closeScreenshotTranslateDialog()
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "截图翻译失败" : "Screenshot translation failed"))
+        } finally {
+            setIsScreenshotTranslating(false)
+        }
+    }, [
+        closeScreenshotTranslateDialog,
+        currentImage,
+        getSourceLanguageHintForDetection,
+        getTargetLanguageForDetection,
+        locale,
+        runScreenshotTranslateRequest,
+        screenshotTranslateBlockIndex,
+        screenshotTranslateExtraPrompt,
+        screenshotTranslateImageData,
+        setDetectedTextBlocks,
+    ])
+
     const runBatchTextTranslateRequest = useCallback(async (
         items: BatchTranslateItem[],
         targetLanguage: string,
@@ -1846,6 +2057,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                     items,
                     targetLanguage,
                     contextHint,
+                    stripReasoningContent: settings.stripReasoningContent ?? true,
                 }),
             })
             if (!res.ok) {
@@ -1874,6 +2086,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             items,
             targetLanguage,
             contextHint,
+            stripReasoningContent: settings.stripReasoningContent ?? true,
             config: {
                 provider: settings.provider,
                 apiKey: settings.apiKey,
@@ -1892,6 +2105,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         settings.baseUrl,
         settings.model,
         settings.provider,
+        settings.stripReasoningContent,
         settings.useServerApi,
     ])
 
@@ -2409,6 +2623,46 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
     }, [currentImage, locale])
+
+    const handleExportSourceText = useCallback((scope: "current" | "all") => {
+        const targetImages = scope === "all"
+            ? images.filter((img) => (img.detectedTextBlocks || []).length > 0)
+            : currentImage
+                ? [currentImage]
+                : []
+
+        if (!targetImages.length) {
+            toast.warning(locale === "zh" ? "没有可导出的 OCR 原文" : "No OCR source text to export")
+            return
+        }
+
+        const chunks: string[] = [
+            "MangaLens OCR Source Export",
+            `${locale === "zh" ? "导出范围" : "Scope"}: ${scope === "all" ? (locale === "zh" ? "全部图片" : "All images") : (locale === "zh" ? "当前图片" : "Current image")}`,
+            `${locale === "zh" ? "导出时间" : "Exported at"}: ${new Date().toISOString()}`,
+            "",
+        ]
+
+        targetImages.forEach((img, imageIndex) => {
+            chunks.push(`[${imageIndex + 1}] ${img.file.name}`)
+            ;(img.detectedTextBlocks || []).forEach((block, blockIndex) => {
+                chunks.push(`#${blockIndex + 1}: ${(block.sourceText || "").trim()}`)
+            })
+            chunks.push("")
+        })
+
+        const blob = new Blob([chunks.join("\n")], { type: "text/plain;charset=utf-8" })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = scope === "all"
+            ? `manga-lens-ocr-source-all-${Date.now()}.txt`
+            : `${currentImage?.file.name.replace(/\.[^.]+$/, "") || "current"}-ocr-source.txt`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+    }, [currentImage, images, locale])
 
     const handleImportWord = useCallback(async (file: File) => {
         if (!currentImage) return
@@ -3054,6 +3308,23 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                         </div>
                         <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
                             <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="strip-reasoning-content" className="text-xs">
+                                    {locale === "zh" ? "剥离深度思考内容" : "Strip reasoning content"}
+                                </Label>
+                                <Switch
+                                    id="strip-reasoning-content"
+                                    checked={settings.stripReasoningContent ?? true}
+                                    onCheckedChange={(checked) => updateSettings({ stripReasoningContent: checked })}
+                                />
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                                {locale === "zh"
+                                    ? "自动移除模型输出中的 <think>/<analysis> 等推理片段，只保留最终译文。"
+                                    : "Removes model reasoning sections like <think>/<analysis> and keeps only final translation text."}
+                            </p>
+                        </div>
+                        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                            <div className="flex items-center justify-between gap-2">
                                 <Label htmlFor="single-retranslate-deep-mode" className="text-xs">
                                     {locale === "zh" ? "单句重翻译深度模式" : "Single-line retranslate deep mode"}
                                 </Label>
@@ -3408,6 +3679,26 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                             }}
                                         />
                                     </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={() => handleExportSourceText("current")}
+                                            disabled={!currentImage || detectedBlocks.length === 0}
+                                        >
+                                            {locale === "zh" ? "导出原文（当前）" : "Export Source (Current)"}
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            className="h-8 text-xs"
+                                            onClick={() => handleExportSourceText("all")}
+                                            disabled={!images.some((img) => (img.detectedTextBlocks || []).length > 0)}
+                                        >
+                                            {locale === "zh" ? "导出原文（全部）" : "Export Source (All)"}
+                                        </Button>
+                                    </div>
                                     <div className="rounded-md border border-border/60 bg-muted/30 p-2 space-y-2">
                                         <p className="text-[11px] font-medium">
                                             {locale === "zh"
@@ -3520,13 +3811,48 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                                     locale === "zh" ? "带上下文" : "With context"
                                                                 )}
                                                             </Button>
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                size="sm"
+                                                                className="h-7 px-2 text-[11px]"
+                                                                onClick={() => openScreenshotTranslateDialog(index)}
+                                                                title={locale === "zh" ? "上传句子截图，调用 OpenAI 视觉翻译并回填当前文本块" : "Upload sentence screenshot, run OpenAI vision translation and apply"}
+                                                            >
+                                                                <ImagePlus className="mr-1 h-3 w-3" />
+                                                                {locale === "zh" ? "截图句翻" : "Img sentence"}
+                                                            </Button>
                                                         </div>
                                                     </div>
                                                     <div className="grid gap-2 md:grid-cols-2">
                                                         <div className="space-y-1">
-                                                            <Label className="text-[10px] text-muted-foreground">
-                                                                {locale === "zh" ? "原文（可编辑）" : "Source (editable)"}
-                                                            </Label>
+                                                            <div className="flex items-center justify-between gap-2">
+                                                                <Label className="text-[10px] text-muted-foreground">
+                                                                    {locale === "zh" ? "原文（可编辑）" : "Source (editable)"}
+                                                                </Label>
+                                                                <div className="flex items-center gap-1">
+                                                                    <Button
+                                                                        type="button"
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        className="h-6 px-2 text-[10px]"
+                                                                        disabled={convertingBlockTextKey === `source-s2t-${index}`}
+                                                                        onClick={() => void convertDetectedBlockText(index, "source", "s2t")}
+                                                                    >
+                                                                        {locale === "zh" ? "简→繁" : "S→T"}
+                                                                    </Button>
+                                                                    <Button
+                                                                        type="button"
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        className="h-6 px-2 text-[10px]"
+                                                                        disabled={convertingBlockTextKey === `source-t2s-${index}`}
+                                                                        onClick={() => void convertDetectedBlockText(index, "source", "t2s")}
+                                                                    >
+                                                                        {locale === "zh" ? "繁→简" : "T→S"}
+                                                                    </Button>
+                                                                </div>
+                                                            </div>
                                                             <Textarea
                                                                 value={block.sourceText || ""}
                                                                 onChange={(e) => handleDetectedSourceEdit(index, e.target.value)}
@@ -3535,9 +3861,33 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                             />
                                                         </div>
                                                         <div className="space-y-1">
-                                                            <Label className="text-[10px] text-muted-foreground">
-                                                                {locale === "zh" ? "译文（富文本 WYSIWYG）" : "Translation (WYSIWYG)"}
-                                                            </Label>
+                                                            <div className="flex items-center justify-between gap-2">
+                                                                <Label className="text-[10px] text-muted-foreground">
+                                                                    {locale === "zh" ? "译文（富文本 WYSIWYG）" : "Translation (WYSIWYG)"}
+                                                                </Label>
+                                                                <div className="flex items-center gap-1">
+                                                                    <Button
+                                                                        type="button"
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        className="h-6 px-2 text-[10px]"
+                                                                        disabled={convertingBlockTextKey === `translated-s2t-${index}`}
+                                                                        onClick={() => void convertDetectedBlockText(index, "translated", "s2t")}
+                                                                    >
+                                                                        {locale === "zh" ? "简→繁" : "S→T"}
+                                                                    </Button>
+                                                                    <Button
+                                                                        type="button"
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        className="h-6 px-2 text-[10px]"
+                                                                        disabled={convertingBlockTextKey === `translated-t2s-${index}`}
+                                                                        onClick={() => void convertDetectedBlockText(index, "translated", "t2s")}
+                                                                    >
+                                                                        {locale === "zh" ? "繁→简" : "T→S"}
+                                                                    </Button>
+                                                                </div>
+                                                            </div>
                                                             <RichTextEditor
                                                                 value={block.richTextHtml || block.translatedText || ""}
                                                                 locale={locale}
@@ -4297,6 +4647,103 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                 </div>
             </ScrollArea>
             </div>
+
+            <Dialog
+                open={screenshotTranslateOpen}
+                onOpenChange={(open) => {
+                    if (open) {
+                        setScreenshotTranslateOpen(true)
+                        return
+                    }
+                    closeScreenshotTranslateDialog()
+                }}
+            >
+                <DialogContent className="sm:max-w-xl">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {locale === "zh" ? "截图单句翻译" : "Screenshot Sentence Translation"}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {locale === "zh"
+                                ? "上传包含完整句子的截图，使用视觉模型翻译并回填到当前文本块。"
+                                : "Upload a screenshot containing a full sentence, then translate and apply to current text block."}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-3">
+                        <input
+                            ref={screenshotTranslateInputRef}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            aria-label={locale === "zh" ? "上传截图" : "Upload screenshot"}
+                            onChange={(event) => {
+                                const file = event.target.files?.[0] || null
+                                void handleScreenshotTranslateUpload(file)
+                                event.currentTarget.value = ""
+                            }}
+                        />
+                        <Button
+                            type="button"
+                            variant="outline"
+                            className="w-full"
+                            onClick={() => screenshotTranslateInputRef.current?.click()}
+                        >
+                            <ImagePlus className="mr-2 h-4 w-4" />
+                            {screenshotTranslateImageData
+                                ? (locale === "zh" ? "更换截图" : "Replace screenshot")
+                                : (locale === "zh" ? "上传截图" : "Upload screenshot")}
+                        </Button>
+
+                        {screenshotTranslateImageData && (
+                            <div className="rounded-md border border-border/60 bg-muted/20 p-2">
+                                <p className="mb-2 text-xs text-muted-foreground truncate">
+                                    {screenshotTranslateImageName || (locale === "zh" ? "截图预览" : "Screenshot preview")}
+                                </p>
+                                <div className="overflow-hidden rounded border border-border/50 bg-background">
+                                    <Image
+                                        src={screenshotTranslateImageData}
+                                        alt={locale === "zh" ? "截图预览" : "Screenshot preview"}
+                                        width={960}
+                                        height={540}
+                                        className="h-auto max-h-60 w-full object-contain"
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="space-y-1.5">
+                            <Label htmlFor="screenshot-translate-extra-prompt" className="text-xs">
+                                {locale === "zh" ? "补充提示（可选）" : "Extra instruction (optional)"}
+                            </Label>
+                            <Textarea
+                                id="screenshot-translate-extra-prompt"
+                                value={screenshotTranslateExtraPrompt}
+                                onChange={(event) => setScreenshotTranslateExtraPrompt(event.target.value)}
+                                placeholder={locale === "zh" ? "例如：保留口语语气，避免过度书面化。" : "e.g. keep colloquial tone and avoid over-formal wording."}
+                                rows={3}
+                            />
+                        </div>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={closeScreenshotTranslateDialog}
+                            disabled={isScreenshotTranslating}
+                        >
+                            {locale === "zh" ? "取消" : "Cancel"}
+                        </Button>
+                        <Button
+                            type="button"
+                            onClick={() => void handleApplyScreenshotTranslate()}
+                            disabled={!screenshotTranslateImageData || isScreenshotTranslating || screenshotTranslateBlockIndex === null}
+                        >
+                            {isScreenshotTranslating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                            {locale === "zh" ? "翻译并回填" : "Translate & Apply"}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
 
             <Dialog open={sidecarPreviewOpen} onOpenChange={handleSidecarPreviewOpenChange}>
                 <DialogContent className="sm:max-w-lg">

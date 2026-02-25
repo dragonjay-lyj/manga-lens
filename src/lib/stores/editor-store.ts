@@ -109,6 +109,7 @@ export interface EditorSettings {
     suppressFurigana: boolean
     autoTextColorAdapt: boolean
     bulkTextTranslateOcr: boolean
+    stripReasoningContent: boolean
     singleRetranslateDeepMode: boolean
     singleRetranslateContextWindow: number
     detectionRegionMode: "full" | "selection_only" | "selection_ignore"
@@ -253,6 +254,7 @@ const defaultSettings: EditorSettings = {
     suppressFurigana: false,
     autoTextColorAdapt: true,
     bulkTextTranslateOcr: false,
+    stripReasoningContent: true,
     singleRetranslateDeepMode: false,
     singleRetranslateContextWindow: 2,
     detectionRegionMode: "full",

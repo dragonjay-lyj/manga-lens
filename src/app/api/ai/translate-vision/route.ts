@@ -2,12 +2,13 @@ import { NextResponse } from "next/server"
 import { auth } from "@clerk/nextjs/server"
 import { ensureUserRecord } from "@/lib/auth/ensure-user-record"
 import { getServerAiRuntimeConfig } from "@/lib/settings"
-import { translateTextBatch, type BatchTranslateItem } from "@/lib/ai/text-translate"
+import { translateImageSentence } from "@/lib/ai/ai-service"
 
-type TranslateTextBody = {
-    items?: BatchTranslateItem[]
+type TranslateVisionBody = {
+    imageData?: string
     targetLanguage?: string
-    contextHint?: string
+    sourceLanguageHint?: string
+    extraPrompt?: string
     stripReasoningContent?: boolean
 }
 
@@ -19,14 +20,15 @@ export async function POST(request: Request) {
         }
         await ensureUserRecord(userId)
 
-        const body = (await request.json()) as TranslateTextBody
-        const items = Array.isArray(body.items) ? body.items : []
-        const targetLanguage = body.targetLanguage?.trim() || "简体中文"
-        const contextHint = body.contextHint?.trim() || undefined
-        const stripReasoningContent = Boolean(body.stripReasoningContent)
-        if (!items.length) {
-            return NextResponse.json({ success: true, items: [] })
+        const body = (await request.json()) as TranslateVisionBody
+        const imageData = typeof body.imageData === "string" ? body.imageData.trim() : ""
+        if (!imageData) {
+            return NextResponse.json({ error: "缺少图片数据" }, { status: 400 })
         }
+        const targetLanguage = body.targetLanguage?.trim() || "简体中文"
+        const sourceLanguageHint = body.sourceLanguageHint?.trim() || undefined
+        const extraPrompt = body.extraPrompt?.trim() || undefined
+        const stripReasoningContent = Boolean(body.stripReasoningContent)
 
         const runtime = await getServerAiRuntimeConfig()
         if (!runtime.enabled) {
@@ -36,29 +38,31 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "网站 API 未完成配置，请联系管理员" }, { status: 503 })
         }
 
-        const result = await translateTextBatch({
-            items,
+        const result = await translateImageSentence({
+            imageData,
             targetLanguage,
-            contextHint,
+            sourceLanguageHint,
+            extraPrompt,
             stripReasoningContent,
             config: runtime.config,
         })
 
-        if (!result.success) {
+        if (!result.success || !result.translatedText) {
             return NextResponse.json(
-                { error: result.error || "批量翻译失败" },
+                { error: result.error || "截图翻译失败", raw: result.raw },
                 { status: 502 }
             )
         }
 
         return NextResponse.json({
             success: true,
-            items: result.items,
+            translatedText: result.translatedText,
+            raw: result.raw,
             provider: runtime.provider,
             model: runtime.config.model,
         })
     } catch (error) {
-        console.error("Server AI translate-text error:", error)
-        return NextResponse.json({ error: "批量翻译失败" }, { status: 500 })
+        console.error("Server AI translate-vision error:", error)
+        return NextResponse.json({ error: "截图翻译失败" }, { status: 500 })
     }
 }

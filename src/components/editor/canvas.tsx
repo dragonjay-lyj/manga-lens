@@ -46,6 +46,7 @@ import {
 } from "@/lib/ai/ai-service"
 import { cropSelection, loadImage } from "@/lib/utils/image-utils"
 import { EDITOR_IMAGE_ACCEPT, normalizeEditorImageFiles } from "@/lib/utils/image-import"
+import { convertChineseText, type ChineseConvertMode } from "@/lib/utils/chinese-convert"
 import { toast } from "sonner"
 
 interface Point {
@@ -135,6 +136,7 @@ export function EditorCanvas() {
     const [ocrDialogSelectionId, setOcrDialogSelectionId] = useState<string | null>(null)
     const [ocrDialogSourceText, setOcrDialogSourceText] = useState("")
     const [ocrDialogTranslatedText, setOcrDialogTranslatedText] = useState("")
+    const [ocrConvertLoadingKey, setOcrConvertLoadingKey] = useState<string | null>(null)
     const isComicModuleEnabled = settings.enableComicModule ?? true
     const isSelectionOcrEnabled = isComicModuleEnabled && (settings.enableSelectionOcr ?? true)
     const isPatchEditorEnabled = isComicModuleEnabled && (settings.enablePatchEditor ?? true)
@@ -709,6 +711,31 @@ export function EditorCanvas() {
         setOcrDialogTranslatedText(translatedText)
         setOcrDialogOpen(true)
     }, [currentImage, findBestBlockIndexForSelection, locale, selectionOcrMetaMap])
+
+    const handleConvertOcrDialogText = useCallback(async (
+        field: "source" | "translated",
+        mode: ChineseConvertMode
+    ) => {
+        const currentText = field === "source" ? ocrDialogSourceText : ocrDialogTranslatedText
+        if (!currentText.trim()) {
+            toast.warning(locale === "zh" ? "当前文本为空" : "Current text is empty")
+            return
+        }
+        const loadingKey = `${field}-${mode}`
+        setOcrConvertLoadingKey(loadingKey)
+        try {
+            const converted = await convertChineseText(currentText, mode)
+            if (field === "source") {
+                setOcrDialogSourceText(converted)
+            } else {
+                setOcrDialogTranslatedText(converted)
+            }
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : (locale === "zh" ? "繁简转换失败" : "Chinese conversion failed"))
+        } finally {
+            setOcrConvertLoadingKey((prev) => (prev === loadingKey ? null : prev))
+        }
+    }, [locale, ocrDialogSourceText, ocrDialogTranslatedText])
 
     const handleSaveSelectionOcrDialog = useCallback(() => {
         if (!currentImage || !ocrDialogSelectionId) return
@@ -2996,9 +3023,33 @@ export function EditorCanvas() {
                     </DialogHeader>
                     <div className="space-y-4">
                         <div className="space-y-2">
-                            <Label htmlFor="selection-ocr-source">
-                                {locale === "zh" ? "原文" : "Source Text"}
-                            </Label>
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="selection-ocr-source">
+                                    {locale === "zh" ? "原文" : "Source Text"}
+                                </Label>
+                                <div className="flex items-center gap-1">
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-[11px]"
+                                        disabled={ocrConvertLoadingKey === "source-s2t"}
+                                        onClick={() => void handleConvertOcrDialogText("source", "s2t")}
+                                    >
+                                        {locale === "zh" ? "简→繁" : "S→T"}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-[11px]"
+                                        disabled={ocrConvertLoadingKey === "source-t2s"}
+                                        onClick={() => void handleConvertOcrDialogText("source", "t2s")}
+                                    >
+                                        {locale === "zh" ? "繁→简" : "T→S"}
+                                    </Button>
+                                </div>
+                            </div>
                             <Textarea
                                 id="selection-ocr-source"
                                 value={ocrDialogSourceText}
@@ -3008,9 +3059,33 @@ export function EditorCanvas() {
                             />
                         </div>
                         <div className="space-y-2">
-                            <Label htmlFor="selection-ocr-translated">
-                                {locale === "zh" ? "译文" : "Translated Text"}
-                            </Label>
+                            <div className="flex items-center justify-between gap-2">
+                                <Label htmlFor="selection-ocr-translated">
+                                    {locale === "zh" ? "译文" : "Translated Text"}
+                                </Label>
+                                <div className="flex items-center gap-1">
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-[11px]"
+                                        disabled={ocrConvertLoadingKey === "translated-s2t"}
+                                        onClick={() => void handleConvertOcrDialogText("translated", "s2t")}
+                                    >
+                                        {locale === "zh" ? "简→繁" : "S→T"}
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-[11px]"
+                                        disabled={ocrConvertLoadingKey === "translated-t2s"}
+                                        onClick={() => void handleConvertOcrDialogText("translated", "t2s")}
+                                    >
+                                        {locale === "zh" ? "繁→简" : "T→S"}
+                                    </Button>
+                                </div>
+                            </div>
                             <Textarea
                                 id="selection-ocr-translated"
                                 value={ocrDialogTranslatedText}

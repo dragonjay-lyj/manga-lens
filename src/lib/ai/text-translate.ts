@@ -1,4 +1,5 @@
 import type { AIConfig } from "@/lib/ai/ai-service"
+import { sanitizeModelText } from "@/lib/utils/text-sanitizer"
 
 export type BatchTranslateItem = {
     id: string
@@ -10,6 +11,7 @@ export type BatchTranslateRequest = {
     targetLanguage: string
     config: AIConfig
     contextHint?: string
+    stripReasoningContent?: boolean
 }
 
 export type BatchTranslateResponse = {
@@ -77,13 +79,14 @@ function parseJsonFromText(raw: string): unknown {
     return null
 }
 
-function normalizeResultItems(parsed: unknown): BatchTranslateItem[] {
+function normalizeResultItems(parsed: unknown, stripReasoningContent?: boolean): BatchTranslateItem[] {
     if (!Array.isArray(parsed)) return []
     return parsed.flatMap((item) => {
         if (!item || typeof item !== "object") return []
         const source = item as Record<string, unknown>
         const id = String(source.id ?? source.index ?? "").trim()
-        const content = String(source.content ?? source.translatedText ?? source.translation ?? "").trim()
+        const rawContent = String(source.content ?? source.translatedText ?? source.translation ?? "").trim()
+        const content = sanitizeModelText(rawContent, { enabled: Boolean(stripReasoningContent) })
         if (!id || !content) return []
         return [{ id, content }]
     })
@@ -155,7 +158,7 @@ async function translateWithGemini(request: BatchTranslateRequest): Promise<Batc
 
         const data = await response.json()
         const rawText = String(data?.candidates?.[0]?.content?.parts?.[0]?.text || "")
-        const normalized = normalizeResultItems(parseJsonFromText(rawText))
+        const normalized = normalizeResultItems(parseJsonFromText(rawText), request.stripReasoningContent)
         if (!normalized.length) {
             return {
                 success: false,
@@ -217,7 +220,7 @@ async function translateWithOpenAI(request: BatchTranslateRequest): Promise<Batc
             : (parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).items)
                 ? (parsed as Record<string, unknown>).items
                 : [])
-        const normalized = normalizeResultItems(candidates)
+        const normalized = normalizeResultItems(candidates, request.stripReasoningContent)
         if (!normalized.length) {
             return {
                 success: false,
