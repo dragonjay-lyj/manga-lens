@@ -2350,6 +2350,9 @@ export function EditorToolbar() {
                     ? "保持字重接近原文，禁止整体加粗。"
                     : "Keep font weight close to source; avoid global boldening.",
                 locale === "zh"
+                    ? "必须先擦除原文，再以单层清晰文字重排；禁止重影、叠字、双层文字。"
+                    : "Erase source text first, then render a single clean text layer; no ghosting/duplicate layers.",
+                locale === "zh"
                     ? "字号必须接近原文（建议不超过原文字高的 105%），不要放大成更粗更满的版式。"
                     : "Keep font size close to source (prefer <=105% of source glyph height), avoid oversized heavier layout.",
                 locale === "zh"
@@ -2610,40 +2613,50 @@ export function EditorToolbar() {
                 edgeRise > (isLikelyVertical ? 0.09 : 0.07)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.028 &&
-                (densityRatio < 0.38 || densityRatio > 2.8) &&
-                edgeRise > 0.05
+                sourceInkDensity > 0.022 &&
+                (
+                    densityRatio < 0.42 ||
+                    densityRatio > 1.95 ||
+                    (densityRatio > 1.6 && edgeRise > 0.04)
+                )
 
             if (likelyClipped || likelyFontDrift) {
                 const severe =
                     (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
-                    edgeRise > 0.14
+                    edgeRise > 0.14 ||
+                    densityRatio > 2.25 ||
+                    densityRatio < 0.28
                 problematicSelections.push({ selection, severe })
             }
         }
 
         const problematicSelectionList = problematicSelections.map((item) => item.selection)
+        const severeSelectionList = problematicSelections
+            .filter((item) => item.severe)
+            .map((item) => item.selection)
         const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
+        const refineSelectionList = enableMaskPostRefine ? problematicSelectionList : severeSelectionList
         const shouldRunPatchRefine =
-            enableMaskPostRefine &&
+            refineSelectionList.length > 0 &&
             (
+                !enableMaskPostRefine ||
                 problematicSelections.length >= 2 ||
                 problematicSelections.some((item) => item.severe)
             )
 
-        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
+        if (refineSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${refineSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${refineSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
+                const problematicIds = new Set(refineSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2665,13 +2678,13 @@ export function EditorToolbar() {
                 const refineInputImageData = useReverseMaskMode
                     ? createInverseMaskedImage(
                         maskedAppliedBaseImage,
-                        problematicSelectionList,
+                        refineSelectionList,
                         "#ffffff",
                         MASK_CONTEXT_PADDING
                     )
                     : createMaskedImage(
                         maskedAppliedBaseImage,
-                        problematicSelectionList,
+                        refineSelectionList,
                         "#ffffff",
                         MASK_CONTEXT_PADDING
                     )
@@ -2684,6 +2697,9 @@ export function EditorToolbar() {
                     locale === "zh"
                         ? "禁止改变气泡底色和文字外的背景像素，不要额外加粗字体。"
                         : "Do not alter bubble/background pixels outside glyph strokes, and do not add extra bold weight.",
+                    locale === "zh"
+                        ? "必须先清除原文，再用单层文字回填；禁止重影、叠字、双层描边。"
+                        : "Erase source text first and render one clean text layer; no ghosting, duplicates, or doubled outlines.",
                     locale === "zh"
                         ? "若字重或字号明显大于原文，请减小字号并减轻描边。"
                         : "If weight/size is visibly larger than source, reduce font size and weaken stroke.",
@@ -2714,11 +2730,11 @@ export function EditorToolbar() {
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
                     refinedResult.imageData,
-                    problematicSelectionList,
+                    refineSelectionList,
                     MASK_BLEND_PADDING
                 )
                 if (trackSelectionProgress) {
-                    problematicSelectionList.forEach((selection) =>
+                    refineSelectionList.forEach((selection) =>
                         setSelectionProgress(imageId, selection.id, "completed")
                     )
                 }
@@ -2732,7 +2748,7 @@ export function EditorToolbar() {
                 )
             }
         } else if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
-            console.info("Mask post-refine disabled by settings.enableSlowGenerationFallbacks.")
+            console.info("Mask post-refine skipped (no severe anomalies).")
         } else if (problematicSelectionList.length === 1) {
             // Skip low-confidence single-selection refine to avoid over-correction artifacts.
             console.info("Mask post-refine skipped for low-confidence single selection.")
