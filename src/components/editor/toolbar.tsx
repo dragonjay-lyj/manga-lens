@@ -2242,21 +2242,41 @@ export function EditorToolbar() {
         if (sourceSelections.length > 0) {
             const originalDarkRatio = getSelectionDarkRatio(originalImg, sourceSelections)
             const resultDarkRatio = getSelectionDarkRatio(resultImage, sourceSelections)
+            const darkDrop = originalDarkRatio - resultDarkRatio
+            const totalSelectionArea = sourceSelections.reduce(
+                (sum, selection) => sum + Math.max(1, selection.width * selection.height),
+                0
+            )
+            const selectionAreaRatio = totalSelectionArea / Math.max(1, originalImg.width * originalImg.height)
             const severeBlank =
-                originalDarkRatio > 0.008 &&
-                resultDarkRatio < originalDarkRatio * 0.2
-            const openaiChannelLikelyBlank =
+                originalDarkRatio > 0.012 &&
+                resultDarkRatio < originalDarkRatio * 0.18 &&
+                darkDrop > 0.01
+            const allowOpenaiAggressiveBlankCheck =
                 settings.provider === "openai" &&
-                originalDarkRatio > 0.008 &&
-                resultDarkRatio < originalDarkRatio * 0.45
+                (sourceSelections.length >= 4 || selectionAreaRatio >= 0.03)
+            const openaiChannelLikelyBlank =
+                allowOpenaiAggressiveBlankCheck &&
+                originalDarkRatio > 0.012 &&
+                resultDarkRatio < originalDarkRatio * 0.38 &&
+                darkDrop > 0.006
             const suspiciousBlank = severeBlank || openaiChannelLikelyBlank
 
             if (suspiciousBlank) {
+                console.info("Mask white-pollution fallback triggered", {
+                    selectionCount: sourceSelections.length,
+                    selectionAreaRatio: Number(selectionAreaRatio.toFixed(4)),
+                    originalDarkRatio: Number(originalDarkRatio.toFixed(4)),
+                    resultDarkRatio: Number(resultDarkRatio.toFixed(4)),
+                    darkDrop: Number(darkDrop.toFixed(4)),
+                    severeBlank,
+                    openaiChannelLikelyBlank,
+                })
                 if (updateToolbarProgress) {
                     setProgressDetail(
                         locale === "zh"
-                            ? "检测到遮罩结果疑似白底污染，自动切换分片模式重试..."
-                            : "Mask result looks white-polluted, retrying in patch mode..."
+                            ? "检测到高置信遮罩白底污染，自动切换分片模式重试..."
+                            : "High-confidence mask white-pollution detected, retrying in patch mode..."
                     )
                 }
                 toast.warning(
@@ -2439,17 +2459,61 @@ export function EditorToolbar() {
                     MASK_BLEND_PADDING
                 )
                 const maskedAppliedBaseImage = await loadImage(maskedAppliedBaseData)
+                const refineInputImageData = useReverseMaskMode
+                    ? createInverseMaskedImage(
+                        maskedAppliedBaseImage,
+                        problematicSelectionList,
+                        "#ffffff",
+                        MASK_CONTEXT_PADDING
+                    )
+                    : createMaskedImage(
+                        maskedAppliedBaseImage,
+                        problematicSelectionList,
+                        "#ffffff",
+                        MASK_CONTEXT_PADDING
+                    )
+                const refinePrompt = [
+                    buildCenterFillFallbackPrompt(effectivePrompt),
+                    "",
+                    locale === "zh"
+                        ? "【遮罩后局部回补（单次请求）】只修复当前可见选区中的文字截断/字体漂移。"
+                        : "[Mask post-refine single pass] Only fix clipped/style-drifted texts in currently visible selections.",
+                    locale === "zh"
+                        ? "禁止修改选区外内容；若文本偏长，优先换行和缩小字号，确保完整显示。"
+                        : "Do not modify pixels outside selected areas; for long text, use line-wrap and smaller font to avoid clipping.",
+                ].join("\n")
 
-                return await processSelectionsPatchMode(
-                    imageId,
-                    originalImg,
-                    maskedAppliedBaseImage,
-                    problematicSelectionList,
-                    effectivePrompt,
-                    updateToolbarProgress,
-                    trackSelectionProgress,
-                    true
+                if (updateToolbarProgress) {
+                    setProgress(90)
+                    setProgressText("1/2")
+                    setProgressDetail(
+                        locale === "zh"
+                            ? "遮罩后局部回补（单次请求）处理中..."
+                            : "Mask post-refine single request in progress..."
+                    )
+                }
+
+                const refinedResult = await runGenerateRequestWithRetry(
+                    refineInputImageData,
+                    refinePrompt,
+                    1
                 )
+                if (!refinedResult.success || !refinedResult.imageData) {
+                    throw new Error(refinedResult.error || "Mask single-pass refine failed")
+                }
+
+                const refinedComposite = await compositeSelectionsFromFullImage(
+                    maskedAppliedBaseImage,
+                    refinedResult.imageData,
+                    problematicSelectionList,
+                    MASK_BLEND_PADDING
+                )
+                if (trackSelectionProgress) {
+                    problematicSelectionList.forEach((selection) =>
+                        setSelectionProgress(imageId, selection.id, "completed")
+                    )
+                }
+                return refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
                 toast.warning(

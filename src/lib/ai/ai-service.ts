@@ -584,12 +584,6 @@ function normalizeGeminiImageSize(input?: string): ImageSizeOption | undefined {
     return undefined
 }
 
-function mapGeminiImageSizeToOpenAISize(imageSize: ImageSizeOption): string {
-    if (imageSize === "1K") return "1024x1024"
-    if (imageSize === "2K") return "2048x2048"
-    return "4096x4096"
-}
-
 function parseJsonFromText(raw: string): unknown {
     const trimmed = raw.trim()
     if (!trimmed) return null
@@ -646,23 +640,12 @@ function normalizeDataImageUri(input: string): string | null {
     return `data:${mimeType};base64,${payload}`
 }
 
-function normalizeRawBase64ImagePayload(input: string, mimeType = "image/png"): string | null {
-    const text = String(input || "").trim().replace(/\s+/g, "")
-    if (!text || text.length < 128) return null
-    if (!/^[a-zA-Z0-9+/_-]+={0,2}$/.test(text)) return null
-    if (text.length % 4 !== 0) return null
-    return `data:${mimeType};base64,${text}`
-}
-
 function extractDataImageFromText(raw: string): string | null {
     const text = String(raw || '').trim()
     if (!text) return null
 
     const direct = normalizeDataImageUri(text)
     if (direct) return direct
-
-    const rawBase64 = normalizeRawBase64ImagePayload(text)
-    if (rawBase64) return rawBase64
 
     const markdownMatch = text.match(/!\[[^\]]*]\((data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+)\)/i)
     if (markdownMatch?.[1]) {
@@ -704,9 +687,6 @@ function extractDataImageFromUnknown(payload: unknown): string | null {
     const directKeyCandidates = [
         'image',
         'imageData',
-        'image_base64',
-        'imageBase64',
-        'base64',
         'b64_json',
         'b64Json',
         'url',
@@ -715,15 +695,7 @@ function extractDataImageFromUnknown(payload: unknown): string | null {
     ]
     for (const key of directKeyCandidates) {
         if (!(key in obj)) continue
-        const value = obj[key]
-        if (
-            typeof value === "string" &&
-            (key === "b64_json" || key === "b64Json" || key === "base64" || key === "image_base64" || key === "imageBase64")
-        ) {
-            const normalized = normalizeRawBase64ImagePayload(value)
-            if (normalized) return normalized
-        }
-        const found = extractDataImageFromUnknown(value)
+        const found = extractDataImageFromUnknown(obj[key])
         if (found) return found
     }
 
@@ -732,156 +704,6 @@ function extractDataImageFromUnknown(payload: unknown): string | null {
         if (found) return found
     }
     return null
-}
-
-function normalizeHttpImageUrl(input: string): string | null {
-    const text = String(input || "").trim()
-    if (!text) return null
-    try {
-        const url = new URL(text)
-        if (url.protocol === "http:" || url.protocol === "https:") {
-            return url.toString()
-        }
-    } catch {
-        return null
-    }
-    return null
-}
-
-function extractHttpImageUrlFromText(raw: string): string | null {
-    const text = String(raw || "").trim()
-    if (!text) return null
-
-    const direct = normalizeHttpImageUrl(text)
-    if (direct) return direct
-
-    const markdownMatch = text.match(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i)
-    if (markdownMatch?.[1]) {
-        const normalized = normalizeHttpImageUrl(markdownMatch[1])
-        if (normalized) return normalized
-    }
-
-    const htmlMatch = text.match(/src=["'](https?:\/\/[^"']+)["']/i)
-    if (htmlMatch?.[1]) {
-        const normalized = normalizeHttpImageUrl(htmlMatch[1])
-        if (normalized) return normalized
-    }
-
-    const embeddedMatch = text.match(/\b(https?:\/\/[^\s"')]+)\b/i)
-    if (embeddedMatch?.[1]) {
-        const normalized = normalizeHttpImageUrl(embeddedMatch[1])
-        if (normalized) return normalized
-    }
-
-    return null
-}
-
-function extractHttpImageUrlFromUnknown(payload: unknown): string | null {
-    if (typeof payload === "string") {
-        return extractHttpImageUrlFromText(payload)
-    }
-
-    if (Array.isArray(payload)) {
-        for (const item of payload) {
-            const found = extractHttpImageUrlFromUnknown(item)
-            if (found) return found
-        }
-        return null
-    }
-
-    if (!payload || typeof payload !== "object") return null
-    const obj = payload as Record<string, unknown>
-
-    const keyCandidates = [
-        "url",
-        "image_url",
-        "imageUrl",
-        "image",
-        "href",
-    ]
-    for (const key of keyCandidates) {
-        if (!(key in obj)) continue
-        const found = extractHttpImageUrlFromUnknown(obj[key])
-        if (found) return found
-    }
-
-    for (const value of Object.values(obj)) {
-        const found = extractHttpImageUrlFromUnknown(value)
-        if (found) return found
-    }
-
-    return null
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-    const maybeBuffer = (
-        globalThis as unknown as {
-            Buffer?: {
-                from: (input: ArrayBuffer) => { toString: (encoding: string) => string }
-            }
-        }
-    ).Buffer
-    if (maybeBuffer) {
-        return maybeBuffer.from(buffer).toString("base64")
-    }
-
-    const bytes = new Uint8Array(buffer)
-    let binary = ""
-    const chunkSize = 0x8000
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-        const chunk = bytes.subarray(i, i + chunkSize)
-        binary += String.fromCharCode(...chunk)
-    }
-
-    if (typeof btoa === "function") {
-        return btoa(binary)
-    }
-
-    throw new Error("No base64 encoder available in current runtime")
-}
-
-function guessImageMimeTypeFromUrl(url: string): string | null {
-    const pathname = (() => {
-        try {
-            return new URL(url).pathname.toLowerCase()
-        } catch {
-            return ""
-        }
-    })()
-    if (!pathname) return null
-    if (pathname.endsWith(".png")) return "image/png"
-    if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) return "image/jpeg"
-    if (pathname.endsWith(".webp")) return "image/webp"
-    if (pathname.endsWith(".gif")) return "image/gif"
-    if (pathname.endsWith(".bmp")) return "image/bmp"
-    if (pathname.endsWith(".avif")) return "image/avif"
-    return null
-}
-
-async function fetchRemoteImageAsDataUri(imageUrl: string): Promise<string | null> {
-    // Only resolve remote image URLs in the browser to avoid server-side SSRF risk.
-    if (typeof window === "undefined") return null
-    try {
-        const response = await fetchWithTimeout(
-            imageUrl,
-            {
-                method: "GET",
-            },
-            60_000
-        )
-        if (!response.ok) return null
-
-        const contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase()
-        const inferredMimeType = contentType.startsWith("image/")
-            ? contentType
-            : (guessImageMimeTypeFromUrl(imageUrl) || "image/png")
-        const raw = await response.arrayBuffer()
-        if (raw.byteLength <= 0) return null
-        const payload = arrayBufferToBase64(raw)
-        return `data:${inferredMimeType};base64,${payload}`
-    } catch {
-        return null
-    }
 }
 
 function toNumber(input: unknown): number | null {
@@ -1410,12 +1232,15 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
     const { imageData, prompt, config } = request
     const baseUrl = resolveOpenAIBaseUrl(config)
     const model = config.model || 'gpt-4o'
-    const imageSize = normalizeGeminiImageSize(config.imageSize)
-    const isGeminiModel = /^gemini-/i.test(model.trim())
 
     try {
-        const createRequestPayload = (enableGeminiHints: boolean) => {
-            const payload: Record<string, unknown> = {
+        const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`,
+            },
+            body: JSON.stringify({
                 model,
                 messages: [
                     {
@@ -1435,49 +1260,8 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
                     },
                 ],
                 max_tokens: 4096,
-            }
-
-            if (enableGeminiHints && isGeminiModel) {
-                payload.modalities = ['text', 'image']
-                payload.response_format = { type: 'b64_json' }
-                payload.generationConfig = {
-                    responseModalities: ['TEXT', 'IMAGE'],
-                }
-
-                if (imageSize) {
-                    payload.image_size = imageSize
-                    payload.imageSize = imageSize
-                    payload.size = mapGeminiImageSizeToOpenAISize(imageSize)
-                    ;(payload.generationConfig as Record<string, unknown>).imageConfig = {
-                        imageSize,
-                    }
-                }
-            }
-
-            return payload
-        }
-
-        const sendRequest = (enableGeminiHints: boolean) =>
-            fetchWithTimeout(`${baseUrl}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${config.apiKey}`,
-                },
-                body: JSON.stringify(createRequestPayload(enableGeminiHints)),
-            })
-
-        let response = await sendRequest(isGeminiModel)
-        if (!response.ok && isGeminiModel && response.status === 400) {
-            const apiError = await readApiError(response)
-            const shouldRetryWithoutHints =
-                /Unknown name|Invalid JSON payload|unsupported|unrecognized|extra inputs|additional properties|imageSize|image_size|responseModalities|generationConfig/i.test(apiError)
-            if (shouldRetryWithoutHints) {
-                response = await sendRequest(false)
-            } else {
-                throw new Error(`OpenAI API ${response.status}: ${apiError}`)
-            }
-        }
+            }),
+        })
 
         if (!response.ok) {
             const apiError = await readApiError(response)
@@ -1485,42 +1269,14 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
         }
 
         const data = await response.json()
-        const rawMessage = data.choices?.[0]?.message
-        const rawContent = rawMessage?.content
-        const extractionTargets: unknown[] = [
-            rawContent,
-            rawMessage,
-            data.choices?.[0],
-            data.output,
-            data.data,
-            data,
-        ]
-
-        for (const target of extractionTargets) {
-            const extracted = extractDataImageFromUnknown(target)
-            if (extracted) {
-                return {
-                    success: true,
-                    imageData: extracted,
-                }
+        const rawContent = data.choices?.[0]?.message?.content
+        const extractedFromRawContent = extractDataImageFromUnknown(rawContent)
+        if (extractedFromRawContent) {
+            return {
+                success: true,
+                imageData: extractedFromRawContent,
             }
         }
-
-        const visitedRemoteUrls = new Set<string>()
-        for (const target of extractionTargets) {
-            const remoteUrl = extractHttpImageUrlFromUnknown(target)
-            if (!remoteUrl || visitedRemoteUrls.has(remoteUrl)) continue
-            visitedRemoteUrls.add(remoteUrl)
-
-            const downloaded = await fetchRemoteImageAsDataUri(remoteUrl)
-            if (downloaded) {
-                return {
-                    success: true,
-                    imageData: downloaded,
-                }
-            }
-        }
-
         const content = Array.isArray(rawContent)
             ? rawContent.map((item: { text?: string }) => item?.text || '').join('\n')
             : rawContent
