@@ -2233,22 +2233,27 @@ export function EditorToolbar() {
         if (sourceSelections.length > 0) {
             const originalDarkRatio = getSelectionDarkRatio(originalImg, sourceSelections)
             const resultDarkRatio = getSelectionDarkRatio(resultImage, sourceSelections)
-            const suspiciousBlank =
+            const severeBlank =
                 originalDarkRatio > 0.008 &&
                 resultDarkRatio < originalDarkRatio * 0.2
+            const openaiChannelLikelyBlank =
+                settings.provider === "openai" &&
+                originalDarkRatio > 0.008 &&
+                resultDarkRatio < originalDarkRatio * 0.45
+            const suspiciousBlank = severeBlank || openaiChannelLikelyBlank
 
-            if (suspiciousBlank && (settings.enableSlowGenerationFallbacks ?? false)) {
+            if (suspiciousBlank) {
                 if (updateToolbarProgress) {
                     setProgressDetail(
                         locale === "zh"
-                            ? "检测到遮罩结果疑似留白，自动切换分片模式重试..."
-                            : "Detected likely blank mask result, retrying in patch mode..."
+                            ? "检测到遮罩结果疑似白底污染，自动切换分片模式重试..."
+                            : "Mask result looks white-polluted, retrying in patch mode..."
                     )
                 }
                 toast.warning(
                     locale === "zh"
-                        ? `${useReverseMaskMode ? "反向" : ""}遮罩模式疑似留白，已自动切换分片模式重试。`
-                        : `${useReverseMaskMode ? "Inverse-" : ""}mask mode looked blank; retried automatically with patch mode.`
+                        ? `${useReverseMaskMode ? "反向" : ""}遮罩模式疑似白底污染，已自动切换分片模式重试。`
+                        : `${useReverseMaskMode ? "Inverse-" : ""}mask mode looked white-polluted; retried automatically with patch mode.`
                 )
                 return processSelectionsPatchMode(
                     imageId,
