@@ -103,6 +103,43 @@ export interface TranslateImageSentenceResponse {
 }
 
 const REQUEST_TIMEOUT_MS = 90_000
+const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com'
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1'
+
+function trimTrailingSlashes(url: string): string {
+    return url.replace(/\/+$/, '')
+}
+
+function resolveOpenAIBaseUrl(config: AIConfig): string {
+    const raw = String(config.baseUrl || '').trim()
+    if (!raw) return DEFAULT_OPENAI_BASE_URL
+    // Migrate old persisted Gemini/OpenAI mixed defaults gracefully.
+    if (/generativelanguage\.googleapis\.com/i.test(raw)) {
+        return DEFAULT_OPENAI_BASE_URL
+    }
+    return trimTrailingSlashes(raw)
+}
+
+function buildGeminiGenerateContentApiUrl(config: AIConfig, model: string): string {
+    const rawBaseUrl = String(config.baseUrl || '').trim()
+    const shouldFallbackToDefault =
+        !rawBaseUrl || /(^https?:\/\/)?api\.openai\.com\/v1\/?$/i.test(rawBaseUrl)
+    let endpoint = shouldFallbackToDefault ? DEFAULT_GEMINI_BASE_URL : trimTrailingSlashes(rawBaseUrl)
+
+    // Already full endpoint (for relays that expect fixed model path).
+    if (!/:generateContent(?:\?|$)/i.test(endpoint)) {
+        if (/\/models\/?$/i.test(endpoint)) {
+            endpoint = `${endpoint}/${model}:generateContent`
+        } else if (/\/v\d+(?:beta\d*)?\/?$/i.test(endpoint)) {
+            endpoint = `${endpoint}/models/${model}:generateContent`
+        } else {
+            endpoint = `${endpoint}/v1beta/models/${model}:generateContent`
+        }
+    }
+
+    const separator = endpoint.includes('?') ? '&' : '?'
+    return `${endpoint}${separator}key=${encodeURIComponent(config.apiKey)}`
+}
 
 // Gemini 模型列表
 export const GEMINI_MODELS = [
@@ -1084,7 +1121,7 @@ async function generateWithGemini(request: GenerateImageRequest): Promise<Genera
     const model = config.model || 'gemini-2.5-flash-image'
     const imageSize = normalizeGeminiImageSize(config.imageSize)
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
+    const apiUrl = buildGeminiGenerateContentApiUrl(config, model)
     const baseGenerationConfig: Record<string, unknown> = {
         responseModalities: ['TEXT', 'IMAGE'],
     }
@@ -1189,7 +1226,7 @@ async function generateWithGemini(request: GenerateImageRequest): Promise<Genera
 // 使用 OpenAI 兼容接口生成图片
 async function generateWithOpenAI(request: GenerateImageRequest): Promise<GenerateImageResponse> {
     const { imageData, prompt, config } = request
-    const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
+    const baseUrl = resolveOpenAIBaseUrl(config)
     const model = config.model || 'gpt-4o'
 
     try {
@@ -1341,7 +1378,7 @@ async function detectWithGemini(request: DetectTextRequest): Promise<DetectTextR
         !/image/i.test(requestedModel)
             ? requestedModel
             : 'gemini-2.5-flash'
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
+    const apiUrl = buildGeminiGenerateContentApiUrl(config, model)
     const prompt = buildDetectionPrompt(targetLanguage, {
         sourceLanguageHint: request.sourceLanguageHint,
         sourceLanguageAllowlist: request.sourceLanguageAllowlist,
@@ -1423,7 +1460,7 @@ async function detectWithOpenAI(request: DetectTextRequest): Promise<DetectTextR
         includeRegions: request.includeRegions,
         excludeRegions: request.excludeRegions,
     })
-    const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
+    const baseUrl = resolveOpenAIBaseUrl(config)
 
     try {
         const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
@@ -1500,7 +1537,7 @@ async function translateImageSentenceWithGemini(
         sourceLanguageHint: request.sourceLanguageHint,
         extraPrompt: request.extraPrompt,
     })
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${request.config.apiKey}`
+    const apiUrl = buildGeminiGenerateContentApiUrl(request.config, model)
 
     try {
         const response = await fetchWithTimeout(apiUrl, {
@@ -1563,7 +1600,7 @@ async function translateImageSentenceWithGemini(
 async function translateImageSentenceWithOpenAI(
     request: TranslateImageSentenceRequest
 ): Promise<TranslateImageSentenceResponse> {
-    const baseUrl = request.config.baseUrl || "https://api.openai.com/v1"
+    const baseUrl = resolveOpenAIBaseUrl(request.config)
     const model = request.config.model || "gpt-4o-mini"
     const prompt = buildImageSentencePrompt(request.targetLanguage, {
         sourceLanguageHint: request.sourceLanguageHint,

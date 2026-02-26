@@ -65,7 +65,7 @@ const DEFAULT_SYSTEM_SETTINGS: DefaultSystemSetting[] = [
     {
         key: "server_api_base_url",
         value: "https://api.openai.com/v1",
-        description: "网站统一 OpenAI 兼容接口 Base URL",
+        description: "网站统一 AI Base URL（OpenAI 兼容 / Gemini 中转）",
         is_encrypted: false,
     },
     {
@@ -308,9 +308,7 @@ export async function getServerAiRuntimeConfig(): Promise<ServerAiRuntimeConfig>
         apiKey,
         model,
         imageSize,
-        baseUrl: provider === "openai"
-            ? (settings.server_api_base_url || "https://api.openai.com/v1")
-            : undefined,
+        baseUrl: settings.server_api_base_url || undefined,
     }
 
     return {

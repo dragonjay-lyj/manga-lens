@@ -4956,8 +4956,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         />
                                     </div>
 
-                                    {/* Base URL (仅 OpenAI) */}
-                                    {settings.provider === "openai" && (
+                                    {/* Base URL */}
+                                    {settings.provider === "openai" ? (
                                         <>
                                             <div className="space-y-2">
                                                 <Label htmlFor="editor-provider-preset">
@@ -5014,6 +5014,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                 />
                                             </div>
                                         </>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            <Label htmlFor="editor-base-url">{t.editor.settings.baseUrl}</Label>
+                                            <Input
+                                                id="editor-base-url"
+                                                value={settings.baseUrl}
+                                                onChange={(e) => updateSettings({ baseUrl: e.target.value })}
+                                                placeholder="https://generativelanguage.googleapis.com"
+                                            />
+                                            <p className="text-xs text-muted-foreground">
+                                                {locale === "zh"
+                                                    ? "可选：填写支持 Gemini 官方格式的中转地址；留空将使用官方默认地址。"
+                                                    : "Optional: set a Gemini-official-format relay base URL. Leave empty to use the official default endpoint."}
+                                            </p>
+                                        </div>
                                     )}
 
                                     {/* 模型选择 */}

@@ -242,7 +242,7 @@ interface EditorState {
 const defaultSettings: EditorSettings = {
     provider: 'gemini',
     apiKey: '',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: '',
     model: 'gemini-2.5-flash-image',
     imageSize: '2K',
     concurrency: 3,
