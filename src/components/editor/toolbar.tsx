@@ -2407,10 +2407,21 @@ export function EditorToolbar() {
             }
 
             try {
+                // Important: refine on top of a safely composited base, not on the raw
+                // mask output image. Some OpenAI-compatible relays may keep non-selected
+                // areas white in mask mode responses.
+                const maskedAppliedBaseData = await compositeSelectionsFromFullImage(
+                    composeBaseImg,
+                    colorAdjustedResultData,
+                    sourceSelections,
+                    MASK_BLEND_PADDING
+                )
+                const maskedAppliedBaseImage = await loadImage(maskedAppliedBaseData)
+
                 return await processSelectionsPatchMode(
                     imageId,
                     originalImg,
-                    colorAdjustedResultImage,
+                    maskedAppliedBaseImage,
                     problematicSelections,
                     effectivePrompt,
                     updateToolbarProgress,
