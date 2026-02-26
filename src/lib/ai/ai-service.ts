@@ -126,10 +126,6 @@ function buildGeminiGenerateContentApiUrl(config: AIConfig, model: string): stri
         !rawBaseUrl || /(^https?:\/\/)?api\.openai\.com\/v1\/?$/i.test(rawBaseUrl)
     let endpoint = shouldFallbackToDefault ? DEFAULT_GEMINI_BASE_URL : trimTrailingSlashes(rawBaseUrl)
 
-    // Gemini official generateContent path uses /v1beta. If user provides /v1,
-    // normalize it to /v1beta to avoid 404/unsupported endpoint issues.
-    endpoint = endpoint.replace(/\/v1(?=\/|$)/i, '/v1beta')
-
     // Already full endpoint (for relays that expect fixed model path).
     if (!/:generateContent(?:\?|$)/i.test(endpoint)) {
         if (/\/models\/?$/i.test(endpoint)) {

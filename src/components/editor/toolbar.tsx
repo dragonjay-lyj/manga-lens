@@ -262,23 +262,6 @@ export function EditorToolbar() {
         return getTranslationDirectionMeta(direction).sourceLangLabel
     }
 
-    const aiVisionOcrUseCustomConfig = Boolean(settings.aiVisionOcrUseCustomConfig)
-    const aiVisionOcrRuntimeConfig = {
-        provider: aiVisionOcrUseCustomConfig
-            ? (settings.aiVisionOcrProvider ?? "openai")
-            : settings.provider,
-        apiKey: aiVisionOcrUseCustomConfig
-            ? (settings.aiVisionOcrApiKey || "")
-            : settings.apiKey,
-        baseUrl: aiVisionOcrUseCustomConfig
-            ? (settings.aiVisionOcrBaseUrl || "")
-            : settings.baseUrl,
-        model: aiVisionOcrUseCustomConfig
-            ? (settings.aiVisionOcrModel || "")
-            : settings.model,
-        imageSize: settings.imageSize || "2K",
-    } as const
-
     const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) => {
         const filteredByFurigana = filterLikelyFuriganaBlocks(
             blocks,
@@ -523,8 +506,6 @@ export function EditorToolbar() {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
-        const forceLocalAiVisionOcr = ocrEngine === "ai_vision" && aiVisionOcrUseCustomConfig
-        const shouldUseServerDetection = settings.useServerApi && !forceLocalAiVisionOcr
         const useServerDetectionPipeline = ocrEngine !== "ai_vision"
         const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
         const webtoonRatio = imageWidth && imageHeight
@@ -538,7 +519,7 @@ export function EditorToolbar() {
             imageWidth && imageHeight
                 ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
                 : {}
-        const detectCandidates = shouldUseServerDetection || useServerDetectionPipeline
+        const detectCandidates = settings.useServerApi || useServerDetectionPipeline
             ? await buildDetectPayloadCandidates(imageData, [
                 { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
                 { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
@@ -549,10 +530,15 @@ export function EditorToolbar() {
             ])
             : [imageData]
 
-        if (!shouldUseServerDetection && !useServerDetectionPipeline) {
+        if (!settings.useServerApi && !useServerDetectionPipeline) {
             return detectTextBlocks({
                 imageData: detectCandidates[0],
-                config: aiVisionOcrRuntimeConfig,
+                config: {
+                    provider: settings.provider,
+                    apiKey: settings.apiKey,
+                    baseUrl: settings.baseUrl,
+                    model: settings.model,
+                },
                 targetLanguage,
                 sourceLanguageHint: getSourceLanguageHintForDetection(),
                 sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -594,7 +580,7 @@ export function EditorToolbar() {
                     if (canRetryWithSmallerPayload) {
                         continue
                     }
-                    if (strictServerDetectionEngine || shouldUseServerDetection) {
+                    if (strictServerDetectionEngine || settings.useServerApi) {
                         return {
                             success: false,
                             blocks: [],
@@ -653,13 +639,13 @@ export function EditorToolbar() {
                 lastError = error instanceof Error
                     ? error.message
                     : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed")
-                if (strictServerDetectionEngine || shouldUseServerDetection || i >= detectCandidates.length - 1) {
+                if (strictServerDetectionEngine || settings.useServerApi || i >= detectCandidates.length - 1) {
                     break
                 }
             }
         }
 
-        if (strictServerDetectionEngine || shouldUseServerDetection) {
+        if (strictServerDetectionEngine || settings.useServerApi) {
             return {
                 success: false,
                 blocks: [],
@@ -675,7 +661,12 @@ export function EditorToolbar() {
 
         return detectTextBlocks({
             imageData: imageData,
-            config: aiVisionOcrRuntimeConfig,
+            config: {
+                provider: settings.provider,
+                apiKey: settings.apiKey,
+                baseUrl: settings.baseUrl,
+                model: settings.model,
+            },
             targetLanguage,
             sourceLanguageHint: getSourceLanguageHintForDetection(),
             sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -2168,7 +2159,7 @@ export function EditorToolbar() {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
                     const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const isLikelyVertical = selection.height > selection.width * 1.2
-                        const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+                    const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
                     if (likelyOverflow) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
@@ -2374,7 +2365,7 @@ export function EditorToolbar() {
                         : `${idx + 1}. Selection #${idx + 1} dominant color≈${color}`
                 }),
             ].join("\n")
-                    : effectivePrompt
+            : effectivePrompt
 
         const inputImageData = sourceSelections.length
             ? (
@@ -2595,68 +2586,50 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
+        const problematicSelections: Selection[] = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [sourceEdgeInkRatio, edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
-                computeEdgeInkRatio(sourcePatch),
+            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
                 computeEdgeInkRatio(generatedPatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
-            const edgeRise = edgeInkRatio - sourceEdgeInkRatio
-            const likelyClipped =
-                edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5) &&
-                edgeRise > (isLikelyVertical ? 0.09 : 0.07)
+            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.022 &&
-                (
-                    densityRatio < 0.42 ||
-                    densityRatio > 1.95 ||
-                    (densityRatio > 1.6 && edgeRise > 0.04)
-                )
+                sourceInkDensity > 0.028 &&
+                (densityRatio < 0.38 || densityRatio > 2.8) &&
+                edgeRise > 0.05
 
             if (likelyClipped || likelyFontDrift) {
                 const severe =
                     (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
-                    edgeRise > 0.14 ||
-                    densityRatio > 2.25 ||
-                    densityRatio < 0.28
+                    edgeRise > 0.14
                 problematicSelections.push({ selection, severe })
             }
         }
 
         const problematicSelectionList = problematicSelections.map((item) => item.selection)
-        const severeSelectionList = problematicSelections
-            .filter((item) => item.severe)
-            .map((item) => item.selection)
-        const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
-        const refineSelectionList = enableMaskPostRefine ? problematicSelectionList : severeSelectionList
         const shouldRunPatchRefine =
-            refineSelectionList.length > 0 &&
-            (
-                !enableMaskPostRefine ||
-                problematicSelections.length >= 2 ||
-                problematicSelections.some((item) => item.severe)
-            )
+            problematicSelections.length >= 2 ||
+            problematicSelections.some((item) => item.severe)
 
-        if (refineSelectionList.length > 0 && shouldRunPatchRefine) {
+        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${refineSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${refineSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(refineSelectionList.map((selection) => selection.id))
+                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2729,16 +2702,12 @@ export function EditorToolbar() {
 
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
-                    refinedResult.imageData,
-                    refineSelectionList,
-                    MASK_BLEND_PADDING
+                    problematicSelectionList,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress,
+                    true
                 )
-                if (trackSelectionProgress) {
-                    refineSelectionList.forEach((selection) =>
-                        setSelectionProgress(imageId, selection.id, "completed")
-                    )
-                }
-                return refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
                 toast.warning(
@@ -2747,8 +2716,6 @@ export function EditorToolbar() {
                         : "Patch refinement failed. Keeping mask-mode output."
                 )
             }
-        } else if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
-            console.info("Mask post-refine skipped (no severe anomalies).")
         } else if (problematicSelectionList.length === 1) {
             // Skip low-confidence single-selection refine to avoid over-correction artifacts.
             console.info("Mask post-refine skipped for low-confidence single selection.")
@@ -4141,160 +4108,160 @@ export function EditorToolbar() {
             {/* 右侧：操作按钮 */}
             <div className="ml-auto min-w-0 flex-1 overflow-x-auto [scrollbar-width:thin]">
                 <div className="flex w-max items-center gap-2 pl-2 pb-1 [&>*]:shrink-0">
-                <Button
-                    onClick={handleGenerate}
-                    disabled={isProcessing || !currentImage}
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <Play className="h-4 w-4 mr-2" />
-                    )}
-                    {t.editor.toolbar.generate}
-                </Button>
-
-                <Button
-                    variant="secondary"
-                    onClick={handleGenerateFromEditedOcr}
-                    disabled={isProcessing || !currentImage || !hasEditedOcrBlocks}
-                    title={
-                        locale === "zh"
-                            ? "只使用当前已编辑的 OCR 文本回填生成，不会重新检测。"
-                            : "Generate using current edited OCR texts only, without re-detection."
-                    }
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <FileText className="h-4 w-4 mr-2" />
-                    )}
-                    {locale === "zh" ? "按已编辑OCR回填生成" : "Generate from edited OCR"}
-                </Button>
-
-                <Button
-                    variant="secondary"
-                    onClick={handleOneClickMachineTranslate}
-                    disabled={isProcessing || !currentImage}
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <Play className="h-4 w-4 mr-2" />
-                    )}
-                    {locale === "zh" ? "一键机翻" : "One-click MT"}
-                </Button>
-
-                <Button
-                    variant="secondary"
-                    onClick={handleUpscaleOnly}
-                    disabled={isProcessing || !currentImage}
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <Sparkles className="h-4 w-4 mr-2" />
-                    )}
-                    {locale === "zh" ? "仅超分增强" : "Upscale only"}
-                </Button>
-
-                {isPatchEditorEnabled && (
                     <Button
-                        variant="secondary"
-                        onClick={handleRepairBrushGenerate}
-                        disabled={isProcessing || !currentImage?.repairMaskUrl}
+                        onClick={handleGenerate}
+                        disabled={isProcessing || !currentImage}
                     >
                         {isProcessing ? (
                             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                         ) : (
-                            <Brush className="h-4 w-4 mr-2" />
+                            <Play className="h-4 w-4 mr-2" />
                         )}
-                        {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
+                        {t.editor.toolbar.generate}
                     </Button>
-                )}
 
-                <Button
-                    variant="secondary"
-                    onClick={handleBatchGenerate}
-                    disabled={isProcessing || images.length === 0}
-                >
-                    {isProcessing ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    ) : (
-                        <Play className="h-4 w-4 mr-2" />
+                    <Button
+                        variant="secondary"
+                        onClick={handleGenerateFromEditedOcr}
+                        disabled={isProcessing || !currentImage || !hasEditedOcrBlocks}
+                        title={
+                            locale === "zh"
+                                ? "只使用当前已编辑的 OCR 文本回填生成，不会重新检测。"
+                                : "Generate using current edited OCR texts only, without re-detection."
+                        }
+                    >
+                        {isProcessing ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                            <FileText className="h-4 w-4 mr-2" />
+                        )}
+                        {locale === "zh" ? "按已编辑OCR回填生成" : "Generate from edited OCR"}
+                    </Button>
+
+                    <Button
+                        variant="secondary"
+                        onClick={handleOneClickMachineTranslate}
+                        disabled={isProcessing || !currentImage}
+                    >
+                        {isProcessing ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                            <Play className="h-4 w-4 mr-2" />
+                        )}
+                        {locale === "zh" ? "一键机翻" : "One-click MT"}
+                    </Button>
+
+                    <Button
+                        variant="secondary"
+                        onClick={handleUpscaleOnly}
+                        disabled={isProcessing || !currentImage}
+                    >
+                        {isProcessing ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                            <Sparkles className="h-4 w-4 mr-2" />
+                        )}
+                        {locale === "zh" ? "仅超分增强" : "Upscale only"}
+                    </Button>
+
+                    {isPatchEditorEnabled && (
+                        <Button
+                            variant="secondary"
+                            onClick={handleRepairBrushGenerate}
+                            disabled={isProcessing || !currentImage?.repairMaskUrl}
+                        >
+                            {isProcessing ? (
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            ) : (
+                                <Brush className="h-4 w-4 mr-2" />
+                            )}
+                            {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
+                        </Button>
                     )}
-                    {t.editor.toolbar.batchGenerate}
-                </Button>
 
-                <Button
-                    variant="secondary"
-                    onClick={handleStopBatch}
-                    disabled={!isProcessing}
-                >
-                    {locale === "zh" ? "停止" : "Stop"}
-                </Button>
+                    <Button
+                        variant="secondary"
+                        onClick={handleBatchGenerate}
+                        disabled={isProcessing || images.length === 0}
+                    >
+                        {isProcessing ? (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                            <Play className="h-4 w-4 mr-2" />
+                        )}
+                        {t.editor.toolbar.batchGenerate}
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleMergeLayers}
-                    disabled={!hasResult || isProcessing}
-                >
-                    <Layers2 className="h-4 w-4 mr-2" />
-                    {locale === "zh" ? "应用为原图" : "Apply as original"}
-                </Button>
+                    <Button
+                        variant="secondary"
+                        onClick={handleStopBatch}
+                        disabled={!isProcessing}
+                    >
+                        {locale === "zh" ? "停止" : "Stop"}
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadResult}
-                    disabled={!hasResult}
-                >
-                    <Download className="h-4 w-4 mr-2" />
-                    {t.editor.toolbar.downloadResult}
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleMergeLayers}
+                        disabled={!hasResult || isProcessing}
+                    >
+                        <Layers2 className="h-4 w-4 mr-2" />
+                        {locale === "zh" ? "应用为原图" : "Apply as original"}
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadAll}
-                    disabled={!hasCompletedImages || isExporting}
-                >
-                    <Package className="h-4 w-4 mr-2" />
-                    {t.editor.toolbar.downloadAll}
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadResult}
+                        disabled={!hasResult}
+                    >
+                        <Download className="h-4 w-4 mr-2" />
+                        {t.editor.toolbar.downloadResult}
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadPdf}
-                    disabled={!hasCompletedImages || isExporting}
-                >
-                    <FileText className="h-4 w-4 mr-2" />
-                    PDF
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadAll}
+                        disabled={!hasCompletedImages || isExporting}
+                    >
+                        <Package className="h-4 w-4 mr-2" />
+                        {t.editor.toolbar.downloadAll}
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadCbz}
-                    disabled={!hasCompletedImages || isExporting}
-                >
-                    <FileArchive className="h-4 w-4 mr-2" />
-                    CBZ
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadPdf}
+                        disabled={!hasCompletedImages || isExporting}
+                    >
+                        <FileText className="h-4 w-4 mr-2" />
+                        PDF
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadWithSidecar}
-                    disabled={!hasCompletedImages || isExporting}
-                >
-                    <FileJson2 className="h-4 w-4 mr-2" />
-                    {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadCbz}
+                        disabled={!hasCompletedImages || isExporting}
+                    >
+                        <FileArchive className="h-4 w-4 mr-2" />
+                        CBZ
+                    </Button>
 
-                <Button
-                    variant="outline"
-                    onClick={handleDownloadHtml}
-                    disabled={!hasCompletedImages || isExporting}
-                >
-                    <FileCode2 className="h-4 w-4 mr-2" />
-                    HTML
-                </Button>
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadWithSidecar}
+                        disabled={!hasCompletedImages || isExporting}
+                    >
+                        <FileJson2 className="h-4 w-4 mr-2" />
+                        {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
+                    </Button>
+
+                    <Button
+                        variant="outline"
+                        onClick={handleDownloadHtml}
+                        disabled={!hasCompletedImages || isExporting}
+                    >
+                        <FileCode2 className="h-4 w-4 mr-2" />
+                        HTML
+                    </Button>
                 </div>
             </div>
         </div>

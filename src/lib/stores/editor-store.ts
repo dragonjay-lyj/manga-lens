@@ -102,11 +102,6 @@ export interface EditorSettings {
     isSerial: boolean
     maxRetries: number
     ocrEngine: "auto" | "comic_text_detector" | "manga_ocr" | "paddle_ocr" | "baidu_ocr" | "ai_vision"
-    aiVisionOcrUseCustomConfig: boolean
-    aiVisionOcrProvider: AIProvider
-    aiVisionOcrApiKey: string
-    aiVisionOcrBaseUrl: string
-    aiVisionOcrModel: string
     translationDirection: TranslationDirection
     sourceLanguageAllowlist: SourceLanguageCode[]
     enableAngleFilter: boolean
@@ -254,11 +249,6 @@ const defaultSettings: EditorSettings = {
     isSerial: false,
     maxRetries: 2,
     ocrEngine: "auto",
-    aiVisionOcrUseCustomConfig: false,
-    aiVisionOcrProvider: "openai",
-    aiVisionOcrApiKey: "",
-    aiVisionOcrBaseUrl: "",
-    aiVisionOcrModel: "",
     translationDirection: "ja2zh",
     sourceLanguageAllowlist: [],
     enableAngleFilter: false,
