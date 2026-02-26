@@ -995,11 +995,42 @@ export function EditorToolbar() {
             const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
             const data = ctx.getImageData(x, y, w, h).data
 
-            const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+            const strictBuckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+            const relaxedBuckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+            const centerInsetX = Math.max(1, Math.floor(w * 0.08))
+            const centerInsetY = Math.max(1, Math.floor(h * 0.08))
+            const hasCenterRegion = (w - centerInsetX * 2) >= 6 && (h - centerInsetY * 2) >= 6
+
+            const addToBuckets = (
+                bucketMap: Map<string, { count: number; r: number; g: number; b: number }>,
+                r: number,
+                g: number,
+                b: number
+            ) => {
+                const key = `${Math.round(r / 20)}-${Math.round(g / 20)}-${Math.round(b / 20)}`
+                const bucket = bucketMap.get(key)
+                if (bucket) {
+                    bucket.count += 1
+                    bucket.r += r
+                    bucket.g += g
+                    bucket.b += b
+                } else {
+                    bucketMap.set(key, { count: 1, r, g, b })
+                }
+            }
 
             for (let i = 0; i < data.length; i += 4) {
                 const alpha = data[i + 3]
                 if (alpha < 200) continue
+                const pixelIndex = i / 4
+                const px = pixelIndex % w
+                const py = Math.floor(pixelIndex / w)
+                if (
+                    hasCenterRegion &&
+                    (px < centerInsetX || px >= (w - centerInsetX) || py < centerInsetY || py >= (h - centerInsetY))
+                ) {
+                    continue
+                }
 
                 const r = data[i]
                 const g = data[i + 1]
@@ -1010,21 +1041,27 @@ export function EditorToolbar() {
                 const saturation = max === 0 ? 0 : delta / max
                 const luminance = r * 0.299 + g * 0.587 + b * 0.114
 
-                if (luminance > 205 || luminance < 20) continue
-                if (saturation < 0.1) continue
-
-                const key = `${Math.round(r / 24)}-${Math.round(g / 24)}-${Math.round(b / 24)}`
-                const bucket = buckets.get(key)
-                if (bucket) {
-                    bucket.count += 1
-                    bucket.r += r
-                    bucket.g += g
-                    bucket.b += b
-                } else {
-                    buckets.set(key, { count: 1, r, g, b })
+                // Relaxed path first: chromatic + not too bright.
+                if (luminance <= 158 && luminance >= 18 && saturation >= 0.11) {
+                    addToBuckets(relaxedBuckets, r, g, b)
                 }
+
+                // Strict path: darker + stronger chroma + likely edge (ink stroke-like).
+                if (luminance > 138 || luminance < 18 || saturation < 0.16) continue
+                const leftDiff = px > 0
+                    ? Math.abs(r - data[i - 4]) + Math.abs(g - data[i - 3]) + Math.abs(b - data[i - 2])
+                    : 0
+                const upDiff = py > 0
+                    ? Math.abs(r - data[i - (w * 4)]) +
+                    Math.abs(g - data[i - (w * 4) + 1]) +
+                    Math.abs(b - data[i - (w * 4) + 2])
+                    : 0
+                if (Math.max(leftDiff, upDiff) < 22) continue
+
+                addToBuckets(strictBuckets, r, g, b)
             }
 
+            const buckets = strictBuckets.size ? strictBuckets : relaxedBuckets
             if (!buckets.size) return null
 
             let best: { count: number; r: number; g: number; b: number } | null = null
@@ -1036,14 +1073,17 @@ export function EditorToolbar() {
 
             if (!best) return null
 
-            const minCount = Math.max(8, Math.floor((w * h) * 0.0018))
+            const minCount = strictBuckets.size
+                ? Math.max(10, Math.floor((w * h) * 0.0012))
+                : Math.max(12, Math.floor((w * h) * 0.0018))
             if (best.count < minCount) return null
 
             const avgR = best.r / best.count
             const avgG = best.g / best.count
             const avgB = best.b / best.count
+            const avgLum = avgR * 0.299 + avgG * 0.587 + avgB * 0.114
             const chroma = Math.max(avgR, avgG, avgB) - Math.min(avgR, avgG, avgB)
-            if (chroma < 18) return null
+            if (chroma < 18 || avgLum > 148) return null
 
             return `#${toHexColor(avgR)}${toHexColor(avgG)}${toHexColor(avgB)}`
         }
@@ -1121,19 +1161,37 @@ export function EditorToolbar() {
                 const sr = sourceData[i]
                 const sg = sourceData[i + 1]
                 const sb = sourceData[i + 2]
+                const sourceMax = Math.max(sr, sg, sb)
+                const sourceMin = Math.min(sr, sg, sb)
+                const sourceChroma = sourceMax - sourceMin
+                const sourceLuminance = sr * 0.299 + sg * 0.587 + sb * 0.114
+                const sourceDistanceToTarget = Math.sqrt(
+                    (sr - targetRgb.r) * (sr - targetRgb.r) +
+                    (sg - targetRgb.g) * (sg - targetRgb.g) +
+                    (sb - targetRgb.b) * (sb - targetRgb.b)
+                )
+
+                const sourceLikelyText =
+                    (sourceLuminance < 112 && sourceChroma < 72) ||
+                    (sourceLuminance < 168 && sourceChroma >= 24 && sourceDistanceToTarget < 105)
+
+                if (!sourceLikelyText) continue
+                // Do not tint light source pixels (bubble/background). This prevents
+                // rectangular yellow/colored stains around text.
+                if (sourceLuminance > 176 && sourceDistanceToTarget > 88) continue
                 const changedAmount =
                     Math.abs(r - sr) +
                     Math.abs(g - sg) +
                     Math.abs(b - sb)
 
-                if (changedAmount < 42) continue
+                if (changedAmount < 50) continue
 
                 const normalizedLum = Math.max(0, Math.min(1, luminance / 120))
-                const tintFactor = 0.35 + normalizedLum * 0.65
-
-                outputData[i] = clampRgb(targetRgb.r * tintFactor)
-                outputData[i + 1] = clampRgb(targetRgb.g * tintFactor)
-                outputData[i + 2] = clampRgb(targetRgb.b * tintFactor)
+                const tintFactor = 0.42 + normalizedLum * 0.5
+                const mix = 0.78
+                outputData[i] = clampRgb(outputData[i] * (1 - mix) + (targetRgb.r * tintFactor) * mix)
+                outputData[i + 1] = clampRgb(outputData[i + 1] * (1 - mix) + (targetRgb.g * tintFactor) * mix)
+                outputData[i + 2] = clampRgb(outputData[i + 2] * (1 - mix) + (targetRgb.b * tintFactor) * mix)
                 recoloredPixels += 1
             }
 
@@ -2173,6 +2231,12 @@ export function EditorToolbar() {
                     ? "【遮罩模式一致性约束】保持每个气泡与原文相近的字体风格（字重/描边/朝向），不要统一成另一种字体。"
                     : "[Mask-mode consistency] Keep each bubble close to original font style (weight/stroke/orientation), avoid global font unification.",
                 locale === "zh"
+                    ? "仅修改文字笔画，禁止改变气泡底色、禁止新增背景色块/发光描边。"
+                    : "Modify glyph strokes only; do not tint bubble background or add background blocks/glow.",
+                locale === "zh"
+                    ? "保持字重接近原文，禁止整体加粗。"
+                    : "Keep font weight close to source; avoid global boldening.",
+                locale === "zh"
                     ? "若译文较长，请优先换行与缩小字号，禁止截断文字。"
                     : "If translation is longer, prioritize line-wrap and font-size reduction. Never clip text.",
                 "",
@@ -2431,9 +2495,13 @@ export function EditorToolbar() {
         }
 
         const problematicSelectionList = problematicSelections.map((item) => item.selection)
+        const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
         const shouldRunPatchRefine =
-            problematicSelections.length >= 2 ||
-            problematicSelections.some((item) => item.severe)
+            enableMaskPostRefine &&
+            (
+                problematicSelections.length >= 2 ||
+                problematicSelections.some((item) => item.severe)
+            )
 
         if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
@@ -2486,6 +2554,9 @@ export function EditorToolbar() {
                         ? "【遮罩后局部回补（单次请求）】只修复当前可见选区中的文字截断/字体漂移。"
                         : "[Mask post-refine single pass] Only fix clipped/style-drifted texts in currently visible selections.",
                     locale === "zh"
+                        ? "禁止改变气泡底色和文字外的背景像素，不要额外加粗字体。"
+                        : "Do not alter bubble/background pixels outside glyph strokes, and do not add extra bold weight.",
+                    locale === "zh"
                         ? "禁止修改选区外内容；若文本偏长，优先换行和缩小字号，确保完整显示。"
                         : "Do not modify pixels outside selected areas; for long text, use line-wrap and smaller font to avoid clipping.",
                 ].join("\n")
@@ -2529,6 +2600,8 @@ export function EditorToolbar() {
                         : "Patch refinement failed. Keeping mask-mode output."
                 )
             }
+        } else if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
+            console.info("Mask post-refine disabled by settings.enableSlowGenerationFallbacks.")
         } else if (problematicSelectionList.length === 1) {
             // Skip low-confidence single-selection refine to avoid over-correction artifacts.
             console.info("Mask post-refine skipped for low-confidence single selection.")
