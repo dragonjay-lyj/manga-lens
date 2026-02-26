@@ -113,7 +113,6 @@ export function EditorToolbar() {
     const [pipelineStageDurations, setPipelineStageDurations] = useState<Partial<Record<PipelineStageKey, number>>>({})
     const pipelineStageStartRef = useRef<{ stage: PipelineStageKey; startedAt: number } | null>(null)
     const stopBatchRequestedRef = useRef(false)
-    const stableFallbackNoticeShownRef = useRef(false)
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
@@ -121,15 +120,12 @@ export function EditorToolbar() {
     const PATCH_DIFF_RETRY_THRESHOLD = 0.014
     const useMaskMode = settings.useMaskMode
     const useReverseMaskMode = settings.useReverseMaskMode ?? false
-    const prioritizeStabilityOverCost = true
-    const effectiveUseMaskMode = useMaskMode && !prioritizeStabilityOverCost
-    const stableFirstPatchMode = useMaskMode && !effectiveUseMaskMode
     const enablePretranslate = settings.enablePretranslate
     const ocrEngine = settings.ocrEngine ?? "auto"
     const repairEngine = settings.repairEngine ?? "ai"
-    const activeMaskMode = effectiveUseMaskMode
+    const activeMaskMode = useMaskMode
         ? (useReverseMaskMode ? "inverse-mask" : "mask")
-        : (stableFirstPatchMode ? "patch-stable" : "patch")
+        : "patch"
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
     const FOUR_K_LONG_EDGE = 3840
     const isPatchEditorEnabled = (settings.enableComicModule ?? true) && (settings.enablePatchEditor ?? true)
@@ -144,16 +140,6 @@ export function EditorToolbar() {
         setPipelineStageActive(null)
         setPipelineStageDurations({})
     }
-
-    const maybeNotifyStablePatchFallback = useCallback(() => {
-        if (!stableFirstPatchMode || stableFallbackNoticeShownRef.current) return
-        stableFallbackNoticeShownRef.current = true
-        toast.info(
-            locale === "zh"
-                ? "已启用稳定优先策略：当前遮罩模式自动降级为分片模式执行。"
-                : "Stability-first is enabled: mask mode is currently executed via patch mode."
-        )
-    }, [locale, stableFirstPatchMode])
 
     const beginPipelineStage = (stage: PipelineStageKey) => {
         const now = performance.now()
@@ -275,6 +261,23 @@ export function EditorToolbar() {
         const direction = settings.translationDirection ?? "ja2zh"
         return getTranslationDirectionMeta(direction).sourceLangLabel
     }
+
+    const aiVisionOcrUseCustomConfig = Boolean(settings.aiVisionOcrUseCustomConfig)
+    const aiVisionOcrRuntimeConfig = {
+        provider: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrProvider ?? "openai")
+            : settings.provider,
+        apiKey: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrApiKey || "")
+            : settings.apiKey,
+        baseUrl: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrBaseUrl || "")
+            : settings.baseUrl,
+        model: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrModel || "")
+            : settings.model,
+        imageSize: settings.imageSize || "2K",
+    } as const
 
     const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) => {
         const filteredByFurigana = filterLikelyFuriganaBlocks(
@@ -520,6 +523,8 @@ export function EditorToolbar() {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const forceLocalAiVisionOcr = ocrEngine === "ai_vision" && aiVisionOcrUseCustomConfig
+        const shouldUseServerDetection = settings.useServerApi && !forceLocalAiVisionOcr
         const useServerDetectionPipeline = ocrEngine !== "ai_vision"
         const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
         const webtoonRatio = imageWidth && imageHeight
@@ -533,7 +538,7 @@ export function EditorToolbar() {
             imageWidth && imageHeight
                 ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
                 : {}
-        const detectCandidates = settings.useServerApi || useServerDetectionPipeline
+        const detectCandidates = shouldUseServerDetection || useServerDetectionPipeline
             ? await buildDetectPayloadCandidates(imageData, [
                 { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
                 { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
@@ -544,15 +549,10 @@ export function EditorToolbar() {
             ])
             : [imageData]
 
-        if (!settings.useServerApi && !useServerDetectionPipeline) {
+        if (!shouldUseServerDetection && !useServerDetectionPipeline) {
             return detectTextBlocks({
                 imageData: detectCandidates[0],
-                config: {
-                    provider: settings.provider,
-                    apiKey: settings.apiKey,
-                    baseUrl: settings.baseUrl,
-                    model: settings.model,
-                },
+                config: aiVisionOcrRuntimeConfig,
                 targetLanguage,
                 sourceLanguageHint: getSourceLanguageHintForDetection(),
                 sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -594,7 +594,7 @@ export function EditorToolbar() {
                     if (canRetryWithSmallerPayload) {
                         continue
                     }
-                    if (strictServerDetectionEngine || settings.useServerApi) {
+                    if (strictServerDetectionEngine || shouldUseServerDetection) {
                         return {
                             success: false,
                             blocks: [],
@@ -653,13 +653,13 @@ export function EditorToolbar() {
                 lastError = error instanceof Error
                     ? error.message
                     : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed")
-                if (strictServerDetectionEngine || settings.useServerApi || i >= detectCandidates.length - 1) {
+                if (strictServerDetectionEngine || shouldUseServerDetection || i >= detectCandidates.length - 1) {
                     break
                 }
             }
         }
 
-        if (strictServerDetectionEngine || settings.useServerApi) {
+        if (strictServerDetectionEngine || shouldUseServerDetection) {
             return {
                 success: false,
                 blocks: [],
@@ -675,12 +675,7 @@ export function EditorToolbar() {
 
         return detectTextBlocks({
             imageData: imageData,
-            config: {
-                provider: settings.provider,
-                apiKey: settings.apiKey,
-                baseUrl: settings.baseUrl,
-                model: settings.model,
-            },
+            config: aiVisionOcrRuntimeConfig,
             targetLanguage,
             sourceLanguageHint: getSourceLanguageHintForDetection(),
             sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -712,14 +707,6 @@ export function EditorToolbar() {
     type PretranslatePromptResult = {
         prompt: string
     }
-
-    const autoFallbackBasePrompt = buildMangaEditPrompt("", {
-        direction: settings.translationDirection ?? "ja2zh",
-        sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
-        comicType: settings.comicType ?? "auto",
-        textStylePreset: settings.textStylePreset ?? "match-original",
-        preferredFontFamily: settings.preferredOutputFontFamily || "",
-    })
 
     const buildHardTextFallbackPrompt = (basePrompt: string) => [
         basePrompt,
@@ -1000,42 +987,11 @@ export function EditorToolbar() {
             const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
             const data = ctx.getImageData(x, y, w, h).data
 
-            const strictBuckets = new Map<string, { count: number; r: number; g: number; b: number }>()
-            const relaxedBuckets = new Map<string, { count: number; r: number; g: number; b: number }>()
-            const centerInsetX = Math.max(1, Math.floor(w * 0.08))
-            const centerInsetY = Math.max(1, Math.floor(h * 0.08))
-            const hasCenterRegion = (w - centerInsetX * 2) >= 6 && (h - centerInsetY * 2) >= 6
-
-            const addToBuckets = (
-                bucketMap: Map<string, { count: number; r: number; g: number; b: number }>,
-                r: number,
-                g: number,
-                b: number
-            ) => {
-                const key = `${Math.round(r / 20)}-${Math.round(g / 20)}-${Math.round(b / 20)}`
-                const bucket = bucketMap.get(key)
-                if (bucket) {
-                    bucket.count += 1
-                    bucket.r += r
-                    bucket.g += g
-                    bucket.b += b
-                } else {
-                    bucketMap.set(key, { count: 1, r, g, b })
-                }
-            }
+            const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
 
             for (let i = 0; i < data.length; i += 4) {
                 const alpha = data[i + 3]
                 if (alpha < 200) continue
-                const pixelIndex = i / 4
-                const px = pixelIndex % w
-                const py = Math.floor(pixelIndex / w)
-                if (
-                    hasCenterRegion &&
-                    (px < centerInsetX || px >= (w - centerInsetX) || py < centerInsetY || py >= (h - centerInsetY))
-                ) {
-                    continue
-                }
 
                 const r = data[i]
                 const g = data[i + 1]
@@ -1046,85 +1002,9 @@ export function EditorToolbar() {
                 const saturation = max === 0 ? 0 : delta / max
                 const luminance = r * 0.299 + g * 0.587 + b * 0.114
 
-                // Relaxed path first: chromatic + not too bright.
-                if (luminance <= 158 && luminance >= 18 && saturation >= 0.11) {
-                    addToBuckets(relaxedBuckets, r, g, b)
-                }
+                if (luminance > 205 || luminance < 20) continue
+                if (saturation < 0.1) continue
 
-                // Strict path: darker + stronger chroma + likely edge (ink stroke-like).
-                if (luminance > 138 || luminance < 18 || saturation < 0.16) continue
-                const leftDiff = px > 0
-                    ? Math.abs(r - data[i - 4]) + Math.abs(g - data[i - 3]) + Math.abs(b - data[i - 2])
-                    : 0
-                const upDiff = py > 0
-                    ? Math.abs(r - data[i - (w * 4)]) +
-                    Math.abs(g - data[i - (w * 4) + 1]) +
-                    Math.abs(b - data[i - (w * 4) + 2])
-                    : 0
-                if (Math.max(leftDiff, upDiff) < 22) continue
-
-                addToBuckets(strictBuckets, r, g, b)
-            }
-
-            const buckets = strictBuckets.size ? strictBuckets : relaxedBuckets
-            if (!buckets.size) return null
-
-            let best: { count: number; r: number; g: number; b: number } | null = null
-            for (const bucket of buckets.values()) {
-                if (!best || bucket.count > best.count) {
-                    best = bucket
-                }
-            }
-
-            if (!best) return null
-
-            const minCount = strictBuckets.size
-                ? Math.max(10, Math.floor((w * h) * 0.0012))
-                : Math.max(12, Math.floor((w * h) * 0.0018))
-            if (best.count < minCount) return null
-
-            const avgR = best.r / best.count
-            const avgG = best.g / best.count
-            const avgB = best.b / best.count
-            const avgLum = avgR * 0.299 + avgG * 0.587 + avgB * 0.114
-            const chroma = Math.max(avgR, avgG, avgB) - Math.min(avgR, avgG, avgB)
-            if (chroma < 18 || avgLum > 148) return null
-
-            return `#${toHexColor(avgR)}${toHexColor(avgG)}${toHexColor(avgB)}`
-        }
-    }
-
-    const createSelectionRelaxedInkColorSampler = (image: HTMLImageElement) => {
-        const canvas = document.createElement("canvas")
-        const ctx = canvas.getContext("2d", { willReadFrequently: true })
-        if (!ctx) return () => null
-
-        canvas.width = image.width
-        canvas.height = image.height
-        ctx.drawImage(image, 0, 0)
-
-        return (selection: Selection): string | null => {
-            const x = Math.max(0, Math.min(image.width - 1, Math.floor(selection.x)))
-            const y = Math.max(0, Math.min(image.height - 1, Math.floor(selection.y)))
-            const maxW = Math.max(1, image.width - x)
-            const maxH = Math.max(1, image.height - y)
-            const w = Math.max(1, Math.min(maxW, Math.floor(selection.width)))
-            const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
-            const data = ctx.getImageData(x, y, w, h).data
-
-            const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
-            for (let i = 0; i < data.length; i += 4) {
-                const a = data[i + 3]
-                if (a < 180) continue
-                const r = data[i]
-                const g = data[i + 1]
-                const b = data[i + 2]
-                const max = Math.max(r, g, b)
-                const min = Math.min(r, g, b)
-                const lum = r * 0.299 + g * 0.587 + b * 0.114
-                const chroma = max - min
-                if (lum < 16 || lum > 170) continue
-                if (chroma < 14) continue
                 const key = `${Math.round(r / 24)}-${Math.round(g / 24)}-${Math.round(b / 24)}`
                 const bucket = buckets.get(key)
                 if (bucket) {
@@ -1136,73 +1016,28 @@ export function EditorToolbar() {
                     buckets.set(key, { count: 1, r, g, b })
                 }
             }
+
             if (!buckets.size) return null
 
             let best: { count: number; r: number; g: number; b: number } | null = null
             for (const bucket of buckets.values()) {
-                if (!best || bucket.count > best.count) best = bucket
+                if (!best || bucket.count > best.count) {
+                    best = bucket
+                }
             }
+
             if (!best) return null
 
-            const minCount = Math.max(6, Math.floor((w * h) * 0.0008))
+            const minCount = Math.max(8, Math.floor((w * h) * 0.0018))
             if (best.count < minCount) return null
+
             const avgR = best.r / best.count
             const avgG = best.g / best.count
             const avgB = best.b / best.count
-            const rgb = { r: avgR, g: avgG, b: avgB }
-            if (!isRgbChromatic({ r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b) })) return null
+            const chroma = Math.max(avgR, avgG, avgB) - Math.min(avgR, avgG, avgB)
+            if (chroma < 18) return null
+
             return `#${toHexColor(avgR)}${toHexColor(avgG)}${toHexColor(avgB)}`
-        }
-    }
-
-    const backfillMissingSelectionColors = (
-        selections: Selection[],
-        colorMap: Map<string, string>,
-        relaxedSampler: ((selection: Selection) => string | null) | null
-    ) => {
-        if (!selections.length) return
-
-        if (relaxedSampler) {
-            for (const selection of selections) {
-                if (colorMap.has(selection.id)) continue
-                const fallbackColor = relaxedSampler(selection)
-                if (!fallbackColor) continue
-                const fallbackRgb = hexToRgb(fallbackColor)
-                if (!fallbackRgb || !isRgbChromatic(fallbackRgb)) continue
-                colorMap.set(selection.id, fallbackColor)
-            }
-        }
-
-        if (colorMap.size === 0) return
-        if (colorMap.size >= selections.length) return
-        if (colorMap.size < Math.ceil(selections.length * 0.5)) return
-
-        const bucketCounter = new Map<string, { count: number; color: string }>()
-        for (const color of colorMap.values()) {
-            const rgb = hexToRgb(color)
-            if (!rgb || !isRgbChromatic(rgb)) continue
-            const key = `${Math.round(rgb.r / 20)}-${Math.round(rgb.g / 20)}-${Math.round(rgb.b / 20)}`
-            const bucket = bucketCounter.get(key)
-            if (bucket) {
-                bucket.count += 1
-            } else {
-                bucketCounter.set(key, { count: 1, color })
-            }
-        }
-
-        let dominant: { count: number; color: string } | null = null
-        for (const bucket of bucketCounter.values()) {
-            if (!dominant || bucket.count > dominant.count) dominant = bucket
-        }
-        if (!dominant || dominant.count < 2) return
-
-        const dominantRgb = hexToRgb(dominant.color)
-        if (!dominantRgb || !isRgbChromatic(dominantRgb) || isRgbNearBlack(dominantRgb)) return
-
-        for (const selection of selections) {
-            if (!colorMap.has(selection.id)) {
-                colorMap.set(selection.id, dominant.color)
-            }
         }
     }
 
@@ -1278,37 +1113,19 @@ export function EditorToolbar() {
                 const sr = sourceData[i]
                 const sg = sourceData[i + 1]
                 const sb = sourceData[i + 2]
-                const sourceMax = Math.max(sr, sg, sb)
-                const sourceMin = Math.min(sr, sg, sb)
-                const sourceChroma = sourceMax - sourceMin
-                const sourceLuminance = sr * 0.299 + sg * 0.587 + sb * 0.114
-                const sourceDistanceToTarget = Math.sqrt(
-                    (sr - targetRgb.r) * (sr - targetRgb.r) +
-                    (sg - targetRgb.g) * (sg - targetRgb.g) +
-                    (sb - targetRgb.b) * (sb - targetRgb.b)
-                )
-
-                const sourceLikelyText =
-                    (sourceLuminance < 112 && sourceChroma < 72) ||
-                    (sourceLuminance < 168 && sourceChroma >= 24 && sourceDistanceToTarget < 105)
-
-                if (!sourceLikelyText) continue
-                // Do not tint light source pixels (bubble/background). This prevents
-                // rectangular yellow/colored stains around text.
-                if (sourceLuminance > 176 && sourceDistanceToTarget > 88) continue
                 const changedAmount =
                     Math.abs(r - sr) +
                     Math.abs(g - sg) +
                     Math.abs(b - sb)
 
-                if (changedAmount < 50) continue
+                if (changedAmount < 42) continue
 
                 const normalizedLum = Math.max(0, Math.min(1, luminance / 120))
-                const tintFactor = 0.42 + normalizedLum * 0.5
-                const mix = 0.78
-                outputData[i] = clampRgb(outputData[i] * (1 - mix) + (targetRgb.r * tintFactor) * mix)
-                outputData[i + 1] = clampRgb(outputData[i + 1] * (1 - mix) + (targetRgb.g * tintFactor) * mix)
-                outputData[i + 2] = clampRgb(outputData[i + 2] * (1 - mix) + (targetRgb.b * tintFactor) * mix)
+                const tintFactor = 0.35 + normalizedLum * 0.65
+
+                outputData[i] = clampRgb(targetRgb.r * tintFactor)
+                outputData[i + 1] = clampRgb(targetRgb.g * tintFactor)
+                outputData[i + 2] = clampRgb(targetRgb.b * tintFactor)
                 recoloredPixels += 1
             }
 
@@ -1318,109 +1135,6 @@ export function EditorToolbar() {
 
             outputCtx.putImageData(outputImageData, 0, 0)
             return outputCanvas.toDataURL("image/png")
-        } catch {
-            return null
-        }
-    }
-
-    const removeArtificialWhiteHalo = async (
-        sourcePatchDataUrl: string,
-        generatedPatchDataUrl: string
-    ): Promise<string | null> => {
-        try {
-            const [sourceImg, generatedImg] = await Promise.all([
-                loadImage(sourcePatchDataUrl),
-                loadImage(generatedPatchDataUrl),
-            ])
-
-            const width = Math.max(1, generatedImg.width)
-            const height = Math.max(1, generatedImg.height)
-            const srcCanvas = document.createElement("canvas")
-            const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true })
-            const outCanvas = document.createElement("canvas")
-            const outCtx = outCanvas.getContext("2d", { willReadFrequently: true })
-            if (!srcCtx || !outCtx) return null
-
-            srcCanvas.width = width
-            srcCanvas.height = height
-            outCanvas.width = width
-            outCanvas.height = height
-            srcCtx.drawImage(sourceImg, 0, 0, width, height)
-            outCtx.drawImage(generatedImg, 0, 0, width, height)
-
-            const srcData = srcCtx.getImageData(0, 0, width, height).data
-            const outImageData = outCtx.getImageData(0, 0, width, height)
-            const outData = outImageData.data
-
-            const isNearWhiteNeutral = (r: number, g: number, b: number) => {
-                const max = Math.max(r, g, b)
-                const min = Math.min(r, g, b)
-                const lum = r * 0.299 + g * 0.587 + b * 0.114
-                return lum > 170 && (max - min) < 30
-            }
-            const isLikelyTextInk = (r: number, g: number, b: number) => {
-                const max = Math.max(r, g, b)
-                const min = Math.min(r, g, b)
-                const lum = r * 0.299 + g * 0.587 + b * 0.114
-                const chroma = max - min
-                return lum < 150 && chroma > 18
-            }
-
-            let changedPixels = 0
-            const minChangedPixels = Math.max(8, Math.floor(width * height * 0.0007))
-            const stride = width * 4
-
-            for (let y = 1; y < height - 1; y++) {
-                for (let x = 1; x < width - 1; x++) {
-                    const i = (y * width + x) * 4
-                    const a = outData[i + 3]
-                    if (a < 140) continue
-
-                    const r = outData[i]
-                    const g = outData[i + 1]
-                    const b = outData[i + 2]
-                    if (!isNearWhiteNeutral(r, g, b)) continue
-
-                    const sr = srcData[i]
-                    const sg = srcData[i + 1]
-                    const sb = srcData[i + 2]
-
-                    const neighborOffsets = [
-                        -4, 4, -stride, stride,
-                        -stride - 4, -stride + 4, stride - 4, stride + 4,
-                    ]
-                    let hasTextNeighbor = false
-                    for (const offset of neighborOffsets) {
-                        const ni = i + offset
-                        if (ni < 0 || ni + 2 >= outData.length) continue
-                        const nr = outData[ni]
-                        const ng = outData[ni + 1]
-                        const nb = outData[ni + 2]
-                        if (isLikelyTextInk(nr, ng, nb)) {
-                            hasTextNeighbor = true
-                            break
-                        }
-                    }
-                    if (!hasTextNeighbor) continue
-
-                    const nextR = clampRgb(sr * 0.9 + r * 0.1)
-                    const nextG = clampRgb(sg * 0.9 + g * 0.1)
-                    const nextB = clampRgb(sb * 0.9 + b * 0.1)
-                    const delta =
-                        Math.abs(nextR - r) +
-                        Math.abs(nextG - g) +
-                        Math.abs(nextB - b)
-                    if (delta < 2) continue
-                    outData[i] = nextR
-                    outData[i + 1] = nextG
-                    outData[i + 2] = nextB
-                    changedPixels += 1
-                }
-            }
-
-            if (changedPixels < minChangedPixels) return null
-            outCtx.putImageData(outImageData, 0, 0)
-            return outCanvas.toDataURL("image/png")
         } catch {
             return null
         }
@@ -1886,18 +1600,11 @@ export function EditorToolbar() {
         const englishTarget = directionMeta.targetLangCode === "en"
         const total = selections.length
         const hasManySelections = total >= 10
-        const stableGenerationMode = prioritizeStabilityOverCost
-        const enableSlowGenerationFallbacks =
-            stableGenerationMode
-                ? false
-                : (forceSlowFallbacks || (settings.enableSlowGenerationFallbacks ?? false))
+        const enableSlowGenerationFallbacks = forceSlowFallbacks || (settings.enableSlowGenerationFallbacks ?? false)
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
         const useColorAnchors = trackSelectionProgress && (settings.autoTextColorAdapt ?? true)
         const sampleDominantTextColor = useColorAnchors
             ? createSelectionDominantTextColorSampler(originalImg)
-            : null
-        const sampleRelaxedInkColor = useColorAnchors
-            ? createSelectionRelaxedInkColorSampler(originalImg)
             : null
         const selectionDominantColorMap = new Map<string, string>(
             useColorAnchors
@@ -1906,19 +1613,14 @@ export function EditorToolbar() {
                     .filter((entry): entry is [string, string] => Boolean(entry[1]))
                 : []
         )
-        if (useColorAnchors) {
-            backfillMissingSelectionColors(selections, selectionDominantColorMap, sampleRelaxedInkColor)
-        }
         const selectionDarkRatioMap = new Map<string, number>(
             selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
         )
-        const layoutSelections = stableGenerationMode
-            ? selections.map((selection) => clampSelectionToImageBounds(selection, originalImg))
-            : selections.map((selection) =>
-                englishTarget
-                    ? expandSelectionForEnglishLayout(selection, originalImg, layoutExpandIntensity)
-                    : expandSelectionForTranslatedLayout(selection, originalImg, layoutExpandIntensity)
-            )
+        const layoutSelections = selections.map((selection) =>
+            englishTarget
+                ? expandSelectionForEnglishLayout(selection, originalImg, layoutExpandIntensity)
+                : expandSelectionForTranslatedLayout(selection, originalImg, layoutExpandIntensity)
+        )
 
         const indexedSelections = layoutSelections.map((selection, index) => ({
             selection,
@@ -1968,19 +1670,6 @@ export function EditorToolbar() {
             const styleConsistencyHint = locale === "zh"
                 ? "同一页面多个对白框风格一致时，当前选区需保持相同字体家族与字重，不要突然切换字体风格。"
                 : "When nearby bubbles share a style on the same page, keep the same font family and weight for this selection."
-            const stableModeHints = stableGenerationMode
-                ? [
-                    locale === "zh"
-                        ? "稳定优先：禁止扩写内容，禁止把其他选区文本写入当前选区。"
-                        : "Stability-first: do not expand content and do not inject text from other selections.",
-                    locale === "zh"
-                        ? "必须先完全擦除当前选区原文，再回填单层清晰文字；禁止重影、叠字、双层描边。"
-                        : "Erase source text in this selection first, then render one clean text layer; no ghosting/duplicates/double-outline.",
-                    locale === "zh"
-                        ? "字号与字重需接近原文，不得明显放大或加粗。"
-                        : "Keep font size and weight close to source; no obvious upscaling or boldening.",
-                ]
-                : []
             const englishLayoutHints = englishTarget
                 ? [
                     "目标语言为英文：请按气泡空间重排断行，避免文字溢出或贴边。",
@@ -2009,7 +1698,6 @@ export function EditorToolbar() {
                 layoutHint,
                 universalColorHint,
                 styleConsistencyHint,
-                ...stableModeHints,
                 ...(explicitColorAnchorHint ? [explicitColorAnchorHint] : []),
                 ...englishLayoutHints,
                 ...hardHints,
@@ -2180,6 +1868,7 @@ export function EditorToolbar() {
             if (result?.success && result.imageData) {
                 const sourcePatch = inputPatchBySelection.get(selection.id)
                 const isHard = hardSelectionIds.has(selection.id)
+                const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
                 if (sourcePatch) {
                     let bestImageData = result.imageData
                     const shouldRunDiffRetry = enableSlowGenerationFallbacks && (isHard || !hasManySelections)
@@ -2197,7 +1886,7 @@ export function EditorToolbar() {
                                     : `Selection #${index} changed too little, retrying with stronger prompt...`
                             )
                         }
-                        const hardPrompt = buildHardTextFallbackPrompt(autoFallbackBasePrompt)
+                        const hardPrompt = buildHardTextFallbackPrompt(selectionPrompt)
 
                         const retryWithPrompt = await runGenerateRequestWithRetry(
                             sourcePatch,
@@ -2286,7 +1975,7 @@ export function EditorToolbar() {
 
                         const useWhiteOutline = (selectionDarkRatioMap.get(selection.id) ?? 0) >= 0.18
                         const overflowSelection = expandSelectionForEnglishLayout(selection, originalImg, 1.28)
-                        const overflowPrompt = buildEnglishOverflowFallbackPrompt(autoFallbackBasePrompt, useWhiteOutline)
+                        const overflowPrompt = buildEnglishOverflowFallbackPrompt(selectionPrompt, useWhiteOutline)
                         const overflowPatch = cropSelection(
                             originalImg,
                             overflowSelection,
@@ -2312,7 +2001,7 @@ export function EditorToolbar() {
                     const edgeInkRatio = await computeEdgeInkRatio(finalImageData)
                     const baseInkDensity = await computePatchInkDensity(finalImageData)
                     const isLikelyVertical = selection.height > selection.width * 1.2
-                    const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+                        const likelyOverflow = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
                     if (likelyOverflow) {
                         if (updateToolbarProgress) {
                             setProgressDetail(
@@ -2324,7 +2013,7 @@ export function EditorToolbar() {
                         const overflowSelection = isLikelyVertical
                             ? expandSelectionFromCenter(selection, originalImg, 1.42, 1.24)
                             : expandSelectionFromCenter(selection, originalImg, 1.28, 1.2)
-                        const overflowPrompt = buildCenterFillFallbackPrompt(autoFallbackBasePrompt)
+                        const overflowPrompt = buildCenterFillFallbackPrompt(selectionPrompt)
                         const overflowPatch = cropSelection(
                             originalImg,
                             overflowSelection,
@@ -2385,17 +2074,6 @@ export function EditorToolbar() {
                                 }
                             }
                         }
-                    }
-                }
-                if (sourcePatch || inputPatchForFinalCheck) {
-                    const haloRemovalSource = inputPatchForFinalCheck || sourcePatch || cropSelection(
-                        originalImg,
-                        finalSelection,
-                        PATCH_CONTEXT_PADDING + 4
-                    )
-                    const dehaloImageData = await removeArtificialWhiteHalo(haloRemovalSource, finalImageData)
-                    if (dehaloImageData) {
-                        finalImageData = dehaloImageData
                     }
                 }
 
@@ -2473,7 +2151,6 @@ export function EditorToolbar() {
 
         const useColorAnchors = settings.autoTextColorAdapt ?? true
         const sourceColorSampler = useColorAnchors ? createSelectionDominantTextColorSampler(originalImg) : null
-        const relaxedSourceColorSampler = useColorAnchors ? createSelectionRelaxedInkColorSampler(originalImg) : null
         const selectionDominantColorMap = new Map<string, string>(
             useColorAnchors
                 ? sourceSelections
@@ -2481,9 +2158,6 @@ export function EditorToolbar() {
                     .filter((entry): entry is [string, string] => Boolean(entry[1]))
                 : []
         )
-        if (useColorAnchors) {
-            backfillMissingSelectionColors(sourceSelections, selectionDominantColorMap, relaxedSourceColorSampler)
-        }
         const maskPromptWithColorHints = selectionDominantColorMap.size
             ? [
                 effectivePrompt,
@@ -2491,18 +2165,6 @@ export function EditorToolbar() {
                 locale === "zh"
                     ? "【遮罩模式一致性约束】保持每个气泡与原文相近的字体风格（字重/描边/朝向），不要统一成另一种字体。"
                     : "[Mask-mode consistency] Keep each bubble close to original font style (weight/stroke/orientation), avoid global font unification.",
-                locale === "zh"
-                    ? "仅修改文字笔画，禁止改变气泡底色、禁止新增背景色块/发光描边。"
-                    : "Modify glyph strokes only; do not tint bubble background or add background blocks/glow.",
-                locale === "zh"
-                    ? "保持字重接近原文，禁止整体加粗。"
-                    : "Keep font weight close to source; avoid global boldening.",
-                locale === "zh"
-                    ? "必须先擦除原文，再以单层清晰文字重排；禁止重影、叠字、双层文字。"
-                    : "Erase source text first, then render a single clean text layer; no ghosting/duplicate layers.",
-                locale === "zh"
-                    ? "字号必须接近原文（建议不超过原文字高的 105%），不要放大成更粗更满的版式。"
-                    : "Keep font size close to source (prefer <=105% of source glyph height), avoid oversized heavier layout.",
                 locale === "zh"
                     ? "若译文较长，请优先换行与缩小字号，禁止截断文字。"
                     : "If translation is longer, prioritize line-wrap and font-size reduction. Never clip text.",
@@ -2522,7 +2184,7 @@ export function EditorToolbar() {
                         : `${idx + 1}. Selection #${idx + 1} dominant color≈${color}`
                 }),
             ].join("\n")
-            : effectivePrompt
+                    : effectivePrompt
 
         const inputImageData = sourceSelections.length
             ? (
@@ -2580,41 +2242,21 @@ export function EditorToolbar() {
         if (sourceSelections.length > 0) {
             const originalDarkRatio = getSelectionDarkRatio(originalImg, sourceSelections)
             const resultDarkRatio = getSelectionDarkRatio(resultImage, sourceSelections)
-            const darkDrop = originalDarkRatio - resultDarkRatio
-            const totalSelectionArea = sourceSelections.reduce(
-                (sum, selection) => sum + Math.max(1, selection.width * selection.height),
-                0
-            )
-            const selectionAreaRatio = totalSelectionArea / Math.max(1, originalImg.width * originalImg.height)
             const severeBlank =
-                originalDarkRatio > 0.012 &&
-                resultDarkRatio < originalDarkRatio * 0.18 &&
-                darkDrop > 0.01
-            const allowOpenaiAggressiveBlankCheck =
-                settings.provider === "openai" &&
-                (sourceSelections.length >= 4 || selectionAreaRatio >= 0.03)
+                originalDarkRatio > 0.008 &&
+                resultDarkRatio < originalDarkRatio * 0.2
             const openaiChannelLikelyBlank =
-                allowOpenaiAggressiveBlankCheck &&
-                originalDarkRatio > 0.012 &&
-                resultDarkRatio < originalDarkRatio * 0.38 &&
-                darkDrop > 0.006
+                settings.provider === "openai" &&
+                originalDarkRatio > 0.008 &&
+                resultDarkRatio < originalDarkRatio * 0.45
             const suspiciousBlank = severeBlank || openaiChannelLikelyBlank
 
             if (suspiciousBlank) {
-                console.info("Mask white-pollution fallback triggered", {
-                    selectionCount: sourceSelections.length,
-                    selectionAreaRatio: Number(selectionAreaRatio.toFixed(4)),
-                    originalDarkRatio: Number(originalDarkRatio.toFixed(4)),
-                    resultDarkRatio: Number(resultDarkRatio.toFixed(4)),
-                    darkDrop: Number(darkDrop.toFixed(4)),
-                    severeBlank,
-                    openaiChannelLikelyBlank,
-                })
                 if (updateToolbarProgress) {
                     setProgressDetail(
                         locale === "zh"
-                            ? "检测到高置信遮罩白底污染，自动切换分片模式重试..."
-                            : "High-confidence mask white-pollution detected, retrying in patch mode..."
+                            ? "检测到遮罩结果疑似白底污染，自动切换分片模式重试..."
+                            : "Mask result looks white-polluted, retrying in patch mode..."
                     )
                 }
                 toast.warning(
@@ -2670,41 +2312,29 @@ export function EditorToolbar() {
                         isRgbNearBlack(generatedDominantRgb) ||
                         currentDistance > 120
 
-                    let patchedSelectionData = generatedPatch
+                    if (!needColorCorrection) continue
 
-                    if (needColorCorrection) {
-                        const correctedPatch = await tintChangedDarkTextToColor(
-                            sourcePatch,
-                            generatedPatch,
-                            sourceDominantColor
-                        )
+                    const correctedPatch = await tintChangedDarkTextToColor(
+                        sourcePatch,
+                        generatedPatch,
+                        sourceDominantColor
+                    )
+                    if (!correctedPatch) continue
 
-                        if (correctedPatch) {
-                            const correctedDominantColor = await getDominantTextColorFromPatch(correctedPatch)
-                            const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
-                            if (correctedDominantRgb && !isRgbNearBlack(correctedDominantRgb)) {
-                                const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
-                                if (!generatedDominantRgb || correctedDistance + 6 < currentDistance) {
-                                    patchedSelectionData = correctedPatch
-                                }
-                            }
-                        }
-                    }
+                    const correctedDominantColor = await getDominantTextColorFromPatch(correctedPatch)
+                    const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
+                    if (!correctedDominantRgb || isRgbNearBlack(correctedDominantRgb)) continue
 
-                    const dehaloPatch = await removeArtificialWhiteHalo(sourcePatch, patchedSelectionData)
-                    if (dehaloPatch) {
-                        patchedSelectionData = dehaloPatch
-                    }
+                    const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
+                    if (generatedDominantRgb && correctedDistance + 6 >= currentDistance) continue
 
-                    if (!isExactlySameImageData(generatedPatch, patchedSelectionData)) {
-                        colorAdjustedResultData = await compositeImage(
-                            currentFullResultImage,
-                            patchedSelectionData,
-                            selection,
-                            PATCH_CONTEXT_PADDING,
-                            PATCH_BLEND_PADDING
-                        )
-                    }
+                    colorAdjustedResultData = await compositeImage(
+                        currentFullResultImage,
+                        correctedPatch,
+                        selection,
+                        PATCH_CONTEXT_PADDING,
+                        PATCH_BLEND_PADDING
+                    )
 
                     if (updateToolbarProgress) {
                         const progressBase = 72
@@ -2743,42 +2373,54 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Selection[] = []
+        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
-                computeEdgeInkRatio(generatedPatch),
+            const [sourceEdgeInkRatio, edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
                 computeEdgeInkRatio(sourcePatch),
+                computeEdgeInkRatio(generatedPatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
-            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+            const edgeRise = edgeInkRatio - sourceEdgeInkRatio
+            const likelyClipped =
+                edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5) &&
+                edgeRise > (isLikelyVertical ? 0.09 : 0.07)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.02 &&
-                (densityRatio < 0.48 || densityRatio > 2.2)
+                sourceInkDensity > 0.028 &&
+                (densityRatio < 0.38 || densityRatio > 2.8) &&
+                edgeRise > 0.05
 
             if (likelyClipped || likelyFontDrift) {
-                problematicSelections.push(selection)
+                const severe =
+                    (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
+                    edgeRise > 0.14
+                problematicSelections.push({ selection, severe })
             }
         }
 
-        if (problematicSelections.length > 0) {
+        const problematicSelectionList = problematicSelections.map((item) => item.selection)
+        const shouldRunPatchRefine =
+            problematicSelections.length >= 2 ||
+            problematicSelections.some((item) => item.severe)
+
+        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${problematicSelections.length} 个选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${problematicSelections.length} selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(problematicSelections.map((selection) => selection.id))
+                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2797,82 +2439,28 @@ export function EditorToolbar() {
                     MASK_BLEND_PADDING
                 )
                 const maskedAppliedBaseImage = await loadImage(maskedAppliedBaseData)
-                const refineInputImageData = useReverseMaskMode
-                    ? createInverseMaskedImage(
-                        maskedAppliedBaseImage,
-                        problematicSelectionList,
-                        "#ffffff",
-                        MASK_CONTEXT_PADDING
-                    )
-                    : createMaskedImage(
-                        maskedAppliedBaseImage,
-                        problematicSelectionList,
-                        "#ffffff",
-                        MASK_CONTEXT_PADDING
-                    )
-                const refinePrompt = [
-                    buildCenterFillFallbackPrompt(autoFallbackBasePrompt),
-                    "",
-                    locale === "zh"
-                        ? "【遮罩后局部回补（单次请求）】只修复当前可见选区中的文字截断/字体漂移。"
-                        : "[Mask post-refine single pass] Only fix clipped/style-drifted texts in currently visible selections.",
-                    locale === "zh"
-                        ? "禁止改变气泡底色和文字外的背景像素，不要额外加粗字体。"
-                        : "Do not alter bubble/background pixels outside glyph strokes, and do not add extra bold weight.",
-                    locale === "zh"
-                        ? "必须先清除原文，再用单层文字回填；禁止重影、叠字、双层描边。"
-                        : "Erase source text first and render one clean text layer; no ghosting, duplicates, or doubled outlines.",
-                    locale === "zh"
-                        ? "若字重或字号明显大于原文，请减小字号并减轻描边。"
-                        : "If weight/size is visibly larger than source, reduce font size and weaken stroke.",
-                    locale === "zh"
-                        ? "禁止修改选区外内容；若文本偏长，优先换行和缩小字号，确保完整显示。"
-                        : "Do not modify pixels outside selected areas; for long text, use line-wrap and smaller font to avoid clipping.",
-                ].join("\n")
 
-                if (updateToolbarProgress) {
-                    setProgress(90)
-                    setProgressText("1/2")
-                    setProgressDetail(
-                        locale === "zh"
-                            ? "遮罩后局部回补（单次请求）处理中..."
-                            : "Mask post-refine single request in progress..."
-                    )
-                }
-
-                const refinedResult = await runGenerateRequestWithRetry(
-                    refineInputImageData,
-                    refinePrompt,
-                    1
-                )
-                if (!refinedResult.success || !refinedResult.imageData) {
-                    throw new Error(refinedResult.error || "Mask single-pass refine failed")
-                }
-
-                const refinedComposite = await compositeSelectionsFromFullImage(
+                return await processSelectionsPatchMode(
+                    imageId,
+                    originalImg,
                     maskedAppliedBaseImage,
-                    problematicSelections,
+                    problematicSelectionList,
                     effectivePrompt,
                     updateToolbarProgress,
                     trackSelectionProgress,
                     true
                 )
-                colorAdjustedResultData = refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
-                if (updateToolbarProgress) {
-                    setProgressDetail(
-                        locale === "zh"
-                            ? "遮罩回补失败，自动切换分片模式重试..."
-                            : "Mask refine failed, retrying with patch mode..."
-                    )
-                }
                 toast.warning(
                     locale === "zh"
-                        ? "遮罩回补失败，已自动切换分片模式重试。"
-                        : "Mask refine failed; automatically retried with patch mode."
+                        ? "局部回补失败，已保留遮罩结果。"
+                        : "Patch refinement failed. Keeping mask-mode output."
                 )
             }
+        } else if (problematicSelectionList.length === 1) {
+            // Skip low-confidence single-selection refine to avoid over-correction artifacts.
+            console.info("Mask post-refine skipped for low-confidence single selection.")
         }
 
         if (trackSelectionProgress) {
@@ -2905,8 +2493,7 @@ export function EditorToolbar() {
         existingDetectedBlocks: DetectedTextBlock[],
         basePrompt: string,
         updateToolbarProgress: boolean,
-        showPretranslateFailureToast: boolean,
-        forceUseProvidedBlocks: boolean = false
+        showPretranslateFailureToast: boolean
     ) => {
         const originalImg = await loadImage(imageUrl)
         let composeBaseImg = originalImg
@@ -2951,27 +2538,17 @@ export function EditorToolbar() {
             )
         }
 
-        const bypassPretranslateForStability = prioritizeStabilityOverCost && !forceUseProvidedBlocks
-        if (bypassPretranslateForStability && updateToolbarProgress) {
-            setProgressDetail(
-                locale === "zh"
-                    ? "稳定优先：跳过多阶段预翻译上下文，按选区直接生成..."
-                    : "Stability-first: bypassing multi-stage pretranslate context and generating per selection..."
-            )
-        }
-        const pretranslateContext = bypassPretranslateForStability
-            ? { prompt: promptWithEnglishAssist }
-            : await buildPretranslateContextPrompt(
-                imageId,
-                originalImg,
-                hasUserSelections ? sourceSelections : [],
-                promptWithEnglishAssist,
-                updateToolbarProgress,
-                showPretranslateFailureToast,
-                existingDetectedBlocks
-            )
+        const pretranslateContext = await buildPretranslateContextPrompt(
+            imageId,
+            originalImg,
+            hasUserSelections ? sourceSelections : [],
+            promptWithEnglishAssist,
+            updateToolbarProgress,
+            showPretranslateFailureToast,
+            existingDetectedBlocks
+        )
 
-        if (effectiveUseMaskMode) {
+        if (useMaskMode) {
             return processSelectionsMaskMode(
                 imageId,
                 originalImg,
@@ -3109,12 +2686,11 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
-        maybeNotifyStablePatchFallback()
 
         // 检查 API 配置
         if (settings.useServerApi) {
             const COST_PER_GENERATION = 10
-            const generationUnits = effectiveUseMaskMode
+            const generationUnits = useMaskMode
                 ? 1
                 : Math.max(1, currentImage.selections.length || 0)
             const totalCost = COST_PER_GENERATION * generationUnits
@@ -3186,7 +2762,6 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
-        maybeNotifyStablePatchFallback()
 
         const editedBlocks = (currentImage.detectedTextBlocks || []).filter((block) => {
             const source = (block.sourceText || "").trim()
@@ -3211,7 +2786,7 @@ export function EditorToolbar() {
                 ? existingSelections
                 : blocksToSelections(editedBlocks, originalImg.width, originalImg.height, "ocr-fillback")
             const COST_PER_GENERATION = 10
-            const generationUnits = effectiveUseMaskMode
+            const generationUnits = useMaskMode
                 ? 1
                 : Math.max(1, effectiveSelections.length || 0)
             const totalCost = COST_PER_GENERATION * generationUnits
@@ -3264,8 +2839,7 @@ export function EditorToolbar() {
                 editedBlocks,
                 basePrompt,
                 true,
-                false,
-                true
+                false
             )
 
             setImageStatus(currentImage.id, "completed", resultUrl)
@@ -3379,7 +2953,6 @@ export function EditorToolbar() {
             toast.warning(locale === "zh" ? "没有需要处理的图片" : "No images to process")
             return
         }
-        maybeNotifyStablePatchFallback()
 
         const templateSelections = applyToAll
             ? (currentImage?.selections || images.find((img) => img.selections?.length)?.selections || [])
@@ -3389,7 +2962,7 @@ export function EditorToolbar() {
             const COST_PER_GENERATION = 10
             const totalUnits = imagesToProcess.reduce((acc, img) => {
                 const selections = applyToAll ? templateSelections : (img.selections || [])
-                const units = effectiveUseMaskMode ? 1 : Math.max(1, selections.length || 0)
+                const units = useMaskMode ? 1 : Math.max(1, selections.length || 0)
                 return acc + units
             }, 0)
             const totalCost = COST_PER_GENERATION * Math.max(1, totalUnits)
@@ -3724,7 +3297,6 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
-        maybeNotifyStablePatchFallback()
 
         if (!settings.useServerApi && !settings.apiKey) {
             toast.error(t.errors.apiKeyRequired)
@@ -3773,7 +3345,7 @@ export function EditorToolbar() {
 
             if (settings.useServerApi) {
                 const COST_PER_GENERATION = 10
-                const generationUnits = effectiveUseMaskMode ? 1 : Math.max(1, detectedSelections.length || 0)
+                const generationUnits = useMaskMode ? 1 : Math.max(1, detectedSelections.length || 0)
                 const totalCost = COST_PER_GENERATION * generationUnits
                 const deducted = await deductCoins(totalCost)
                 if (!deducted) {
@@ -4278,160 +3850,160 @@ export function EditorToolbar() {
             {/* 右侧：操作按钮 */}
             <div className="ml-auto min-w-0 flex-1 overflow-x-auto [scrollbar-width:thin]">
                 <div className="flex w-max items-center gap-2 pl-2 pb-1 [&>*]:shrink-0">
-                    <Button
-                        onClick={handleGenerate}
-                        disabled={isProcessing || !currentImage}
-                    >
-                        {isProcessing ? (
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        ) : (
-                            <Play className="h-4 w-4 mr-2" />
-                        )}
-                        {t.editor.toolbar.generate}
-                    </Button>
-
-                    <Button
-                        variant="secondary"
-                        onClick={handleGenerateFromEditedOcr}
-                        disabled={isProcessing || !currentImage || !hasEditedOcrBlocks}
-                        title={
-                            locale === "zh"
-                                ? "只使用当前已编辑的 OCR 文本回填生成，不会重新检测。"
-                                : "Generate using current edited OCR texts only, without re-detection."
-                        }
-                    >
-                        {isProcessing ? (
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        ) : (
-                            <FileText className="h-4 w-4 mr-2" />
-                        )}
-                        {locale === "zh" ? "按已编辑OCR回填生成" : "Generate from edited OCR"}
-                    </Button>
-
-                    <Button
-                        variant="secondary"
-                        onClick={handleOneClickMachineTranslate}
-                        disabled={isProcessing || !currentImage}
-                    >
-                        {isProcessing ? (
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        ) : (
-                            <Play className="h-4 w-4 mr-2" />
-                        )}
-                        {locale === "zh" ? "一键机翻" : "One-click MT"}
-                    </Button>
-
-                    <Button
-                        variant="secondary"
-                        onClick={handleUpscaleOnly}
-                        disabled={isProcessing || !currentImage}
-                    >
-                        {isProcessing ? (
-                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        ) : (
-                            <Sparkles className="h-4 w-4 mr-2" />
-                        )}
-                        {locale === "zh" ? "仅超分增强" : "Upscale only"}
-                    </Button>
-
-                    {isPatchEditorEnabled && (
-                        <Button
-                            variant="secondary"
-                            onClick={handleRepairBrushGenerate}
-                            disabled={isProcessing || !currentImage?.repairMaskUrl}
-                        >
-                            {isProcessing ? (
-                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                            ) : (
-                                <Brush className="h-4 w-4 mr-2" />
-                            )}
-                            {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
-                        </Button>
+                <Button
+                    onClick={handleGenerate}
+                    disabled={isProcessing || !currentImage}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Play className="h-4 w-4 mr-2" />
                     )}
+                    {t.editor.toolbar.generate}
+                </Button>
 
+                <Button
+                    variant="secondary"
+                    onClick={handleGenerateFromEditedOcr}
+                    disabled={isProcessing || !currentImage || !hasEditedOcrBlocks}
+                    title={
+                        locale === "zh"
+                            ? "只使用当前已编辑的 OCR 文本回填生成，不会重新检测。"
+                            : "Generate using current edited OCR texts only, without re-detection."
+                    }
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <FileText className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "按已编辑OCR回填生成" : "Generate from edited OCR"}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleOneClickMachineTranslate}
+                    disabled={isProcessing || !currentImage}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Play className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "一键机翻" : "One-click MT"}
+                </Button>
+
+                <Button
+                    variant="secondary"
+                    onClick={handleUpscaleOnly}
+                    disabled={isProcessing || !currentImage}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Sparkles className="h-4 w-4 mr-2" />
+                    )}
+                    {locale === "zh" ? "仅超分增强" : "Upscale only"}
+                </Button>
+
+                {isPatchEditorEnabled && (
                     <Button
                         variant="secondary"
-                        onClick={handleBatchGenerate}
-                        disabled={isProcessing || images.length === 0}
+                        onClick={handleRepairBrushGenerate}
+                        disabled={isProcessing || !currentImage?.repairMaskUrl}
                     >
                         {isProcessing ? (
                             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                         ) : (
-                            <Play className="h-4 w-4 mr-2" />
+                            <Brush className="h-4 w-4 mr-2" />
                         )}
-                        {t.editor.toolbar.batchGenerate}
+                        {locale === "zh" ? "修复画笔生成" : "Repair Brush"}
                     </Button>
+                )}
 
-                    <Button
-                        variant="secondary"
-                        onClick={handleStopBatch}
-                        disabled={!isProcessing}
-                    >
-                        {locale === "zh" ? "停止" : "Stop"}
-                    </Button>
+                <Button
+                    variant="secondary"
+                    onClick={handleBatchGenerate}
+                    disabled={isProcessing || images.length === 0}
+                >
+                    {isProcessing ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                        <Play className="h-4 w-4 mr-2" />
+                    )}
+                    {t.editor.toolbar.batchGenerate}
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleMergeLayers}
-                        disabled={!hasResult || isProcessing}
-                    >
-                        <Layers2 className="h-4 w-4 mr-2" />
-                        {locale === "zh" ? "应用为原图" : "Apply as original"}
-                    </Button>
+                <Button
+                    variant="secondary"
+                    onClick={handleStopBatch}
+                    disabled={!isProcessing}
+                >
+                    {locale === "zh" ? "停止" : "Stop"}
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadResult}
-                        disabled={!hasResult}
-                    >
-                        <Download className="h-4 w-4 mr-2" />
-                        {t.editor.toolbar.downloadResult}
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleMergeLayers}
+                    disabled={!hasResult || isProcessing}
+                >
+                    <Layers2 className="h-4 w-4 mr-2" />
+                    {locale === "zh" ? "应用为原图" : "Apply as original"}
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadAll}
-                        disabled={!hasCompletedImages || isExporting}
-                    >
-                        <Package className="h-4 w-4 mr-2" />
-                        {t.editor.toolbar.downloadAll}
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadResult}
+                    disabled={!hasResult}
+                >
+                    <Download className="h-4 w-4 mr-2" />
+                    {t.editor.toolbar.downloadResult}
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadPdf}
-                        disabled={!hasCompletedImages || isExporting}
-                    >
-                        <FileText className="h-4 w-4 mr-2" />
-                        PDF
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadAll}
+                    disabled={!hasCompletedImages || isExporting}
+                >
+                    <Package className="h-4 w-4 mr-2" />
+                    {t.editor.toolbar.downloadAll}
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadCbz}
-                        disabled={!hasCompletedImages || isExporting}
-                    >
-                        <FileArchive className="h-4 w-4 mr-2" />
-                        CBZ
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadPdf}
+                    disabled={!hasCompletedImages || isExporting}
+                >
+                    <FileText className="h-4 w-4 mr-2" />
+                    PDF
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadWithSidecar}
-                        disabled={!hasCompletedImages || isExporting}
-                    >
-                        <FileJson2 className="h-4 w-4 mr-2" />
-                        {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadCbz}
+                    disabled={!hasCompletedImages || isExporting}
+                >
+                    <FileArchive className="h-4 w-4 mr-2" />
+                    CBZ
+                </Button>
 
-                    <Button
-                        variant="outline"
-                        onClick={handleDownloadHtml}
-                        disabled={!hasCompletedImages || isExporting}
-                    >
-                        <FileCode2 className="h-4 w-4 mr-2" />
-                        HTML
-                    </Button>
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadWithSidecar}
+                    disabled={!hasCompletedImages || isExporting}
+                >
+                    <FileJson2 className="h-4 w-4 mr-2" />
+                    {locale === "zh" ? "PS Sidecar" : "PS Sidecar"}
+                </Button>
+
+                <Button
+                    variant="outline"
+                    onClick={handleDownloadHtml}
+                    disabled={!hasCompletedImages || isExporting}
+                >
+                    <FileCode2 className="h-4 w-4 mr-2" />
+                    HTML
+                </Button>
                 </div>
             </div>
         </div>

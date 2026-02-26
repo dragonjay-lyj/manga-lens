@@ -144,6 +144,11 @@ const SETTINGS_IMPORT_KEYS = [
     "isSerial",
     "maxRetries",
     "ocrEngine",
+    "aiVisionOcrUseCustomConfig",
+    "aiVisionOcrProvider",
+    "aiVisionOcrApiKey",
+    "aiVisionOcrBaseUrl",
+    "aiVisionOcrModel",
     "translationDirection",
     "sourceLanguageAllowlist",
     "enableAngleFilter",
@@ -299,6 +304,11 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         if (settings.provider !== "openai") return "openai"
         return guessOpenAICompatibleProviderPresetId(settings.baseUrl || "")
     }, [settings.baseUrl, settings.provider])
+    const aiVisionOcrProvider = settings.aiVisionOcrProvider ?? "openai"
+    const aiVisionOcrOpenaiPresetId = useMemo(() => {
+        if (aiVisionOcrProvider !== "openai") return "openai"
+        return guessOpenAICompatibleProviderPresetId(settings.aiVisionOcrBaseUrl || settings.baseUrl || "")
+    }, [aiVisionOcrProvider, settings.aiVisionOcrBaseUrl, settings.baseUrl])
 
     const applyDefaultOrientationToBlocks = useCallback((
         blocks: Array<{
@@ -662,9 +672,34 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
     // }, [handleFileUpload])
 
     const models = settings.provider === "gemini" ? GEMINI_MODELS : OPENAI_MODELS
+    const aiVisionOcrUseCustomConfig = Boolean(settings.aiVisionOcrUseCustomConfig)
+    const forceLocalAiVisionOcr = ocrEngine === "ai_vision" && aiVisionOcrUseCustomConfig
+    const aiVisionOcrRuntimeConfig = useMemo(() => {
+        const provider = aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrProvider ?? "openai")
+            : settings.provider
+        return {
+            provider,
+            apiKey: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrApiKey || "") : settings.apiKey,
+            baseUrl: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrBaseUrl || "") : settings.baseUrl,
+            model: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrModel || "") : settings.model,
+            imageSize: settings.imageSize || "2K",
+        }
+    }, [
+        aiVisionOcrUseCustomConfig,
+        settings.aiVisionOcrApiKey,
+        settings.aiVisionOcrBaseUrl,
+        settings.aiVisionOcrModel,
+        settings.aiVisionOcrProvider,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.imageSize,
+        settings.model,
+        settings.provider,
+    ])
     const canRunAutoDetect =
-        settings.useServerApi ||
-        Boolean(settings.apiKey) ||
+        (settings.useServerApi && !forceLocalAiVisionOcr) ||
+        Boolean(ocrEngine === "ai_vision" ? aiVisionOcrRuntimeConfig.apiKey : settings.apiKey) ||
         (ocrEngine !== "ai_vision")
     const detectedBlocks = useMemo(() => currentImage?.detectedTextBlocks || [], [currentImage?.detectedTextBlocks])
     const selectedBlockSet = useMemo(() => new Set(selectedBlockIndexes), [selectedBlockIndexes])
@@ -906,7 +941,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
             )
         }
 
-        if (settings.useServerApi) {
+        if (settings.useServerApi && !forceLocalAiVisionOcr) {
             return tryServerDetect()
         }
 
@@ -935,13 +970,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
 
         return detectTextBlocks({
                 imageData,
-                config: {
-                provider: settings.provider,
-                apiKey: settings.apiKey,
-                baseUrl: settings.baseUrl,
-                model: settings.model,
-                imageSize: settings.imageSize || "2K",
-                },
+                config: aiVisionOcrRuntimeConfig,
                 targetLanguage: getTargetLanguageForDetection(),
                 sourceLanguageHint: getSourceLanguageHintForDetection(),
                 sourceLanguageAllowlist: getSourceLanguageAllowlist(),
@@ -960,11 +989,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         locale,
         ocrEngine,
         parseApiError,
-        settings.apiKey,
-        settings.baseUrl,
-        settings.imageSize,
-        settings.model,
-        settings.provider,
+        aiVisionOcrRuntimeConfig,
+        forceLocalAiVisionOcr,
         settings.useServerApi,
     ])
 
@@ -3602,6 +3628,133 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                 </SelectContent>
                             </Select>
                         </div>
+                        {ocrEngine === "ai_vision" && (
+                            <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <Label htmlFor="ocr-custom-config" className="text-xs">
+                                        {locale === "zh" ? "独立 OCR 模型配置" : "Separate OCR model config"}
+                                    </Label>
+                                    <Switch
+                                        id="ocr-custom-config"
+                                        checked={aiVisionOcrUseCustomConfig}
+                                        onCheckedChange={(checked) => updateSettings({ aiVisionOcrUseCustomConfig: checked })}
+                                    />
+                                </div>
+                                {!aiVisionOcrUseCustomConfig && (
+                                    <p className="text-[11px] text-muted-foreground">
+                                        {locale === "zh"
+                                            ? "当前复用主设置中的 Provider / API Key / Base URL / 模型。"
+                                            : "Currently reuses main Provider / API key / Base URL / model settings."}
+                                    </p>
+                                )}
+                                {aiVisionOcrUseCustomConfig && (
+                                    <>
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="ocr-provider-select" className="text-xs">
+                                                {locale === "zh" ? "OCR Provider" : "OCR provider"}
+                                            </Label>
+                                            <Select
+                                                value={aiVisionOcrProvider}
+                                                onValueChange={(value: "gemini" | "openai") =>
+                                                    updateSettings({ aiVisionOcrProvider: value })
+                                                }
+                                            >
+                                                <SelectTrigger id="ocr-provider-select" className="h-8">
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="gemini">Google Gemini</SelectItem>
+                                                    <SelectItem value="openai">OpenAI / 兼容接口</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        {aiVisionOcrProvider === "openai" && (
+                                            <div className="space-y-1.5">
+                                                <Label htmlFor="ocr-provider-preset" className="text-xs">
+                                                    {locale === "zh" ? "OCR 兼容服务商预设" : "OCR provider preset"}
+                                                </Label>
+                                                <Select
+                                                    value={aiVisionOcrOpenaiPresetId}
+                                                    onValueChange={(value) => {
+                                                        if (value === "custom") {
+                                                            return
+                                                        }
+                                                        const preset = getOpenAICompatibleProviderPreset(value)
+                                                        if (!preset) {
+                                                            return
+                                                        }
+                                                        updateSettings({
+                                                            aiVisionOcrBaseUrl: preset.baseUrl,
+                                                            aiVisionOcrModel: (settings.aiVisionOcrModel || "").trim() || preset.modelHint,
+                                                        })
+                                                    }}
+                                                >
+                                                    <SelectTrigger id="ocr-provider-preset" className="h-8">
+                                                        <SelectValue />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        {OPENAI_COMPATIBLE_PROVIDER_PRESETS.map((preset) => (
+                                                            <SelectItem key={preset.id} value={preset.id}>
+                                                                {preset.label}
+                                                            </SelectItem>
+                                                        ))}
+                                                        <SelectItem value="custom">
+                                                            {locale === "zh" ? "自定义" : "Custom"}
+                                                        </SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        )}
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="ocr-base-url" className="text-xs">Base URL</Label>
+                                            <Input
+                                                id="ocr-base-url"
+                                                value={settings.aiVisionOcrBaseUrl || ""}
+                                                onChange={(e) => updateSettings({ aiVisionOcrBaseUrl: e.target.value })}
+                                                placeholder={
+                                                    aiVisionOcrProvider === "openai"
+                                                        ? "https://api.openai.com/v1"
+                                                        : "https://generativelanguage.googleapis.com"
+                                                }
+                                                className="h-8 text-xs"
+                                            />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="ocr-api-key" className="text-xs">OCR API Key</Label>
+                                            <Input
+                                                id="ocr-api-key"
+                                                type="password"
+                                                value={settings.aiVisionOcrApiKey || ""}
+                                                onChange={(e) => updateSettings({ aiVisionOcrApiKey: e.target.value })}
+                                                placeholder={locale === "zh" ? "输入 OCR 专用 API Key" : "Enter OCR API key"}
+                                                className="h-8 text-xs"
+                                            />
+                                        </div>
+                                        <div className="space-y-1.5">
+                                            <Label htmlFor="ocr-model" className="text-xs">
+                                                {locale === "zh" ? "OCR 模型" : "OCR model"}
+                                            </Label>
+                                            <Input
+                                                id="ocr-model"
+                                                value={settings.aiVisionOcrModel || ""}
+                                                onChange={(e) => updateSettings({ aiVisionOcrModel: e.target.value })}
+                                                placeholder={
+                                                    aiVisionOcrProvider === "openai"
+                                                        ? "claude-3.5-sonnet / gpt-4o-mini / ... "
+                                                        : "gemini-2.5-flash / ..."
+                                                }
+                                                className="h-8 text-xs"
+                                            />
+                                        </div>
+                                        <p className="text-[11px] text-muted-foreground">
+                                            {locale === "zh"
+                                                ? "用于 AI 视觉 OCR（文本识别）；生图仍使用主模型设置。"
+                                                : "Used for AI vision OCR only; image generation still uses main model settings."}
+                                        </p>
+                                    </>
+                                )}
+                            </div>
+                        )}
                         <div className="space-y-2">
                             <div className="flex items-center justify-between gap-2">
                                 <Label className="text-xs">
@@ -4956,8 +5109,8 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                         />
                                     </div>
 
-                                    {/* Base URL (仅 OpenAI) */}
-                                    {settings.provider === "openai" && (
+                                    {/* Base URL */}
+                                    {settings.provider === "openai" ? (
                                         <>
                                             <div className="space-y-2">
                                                 <Label htmlFor="editor-provider-preset">
@@ -5014,6 +5167,21 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                                 />
                                             </div>
                                         </>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            <Label htmlFor="editor-base-url">{t.editor.settings.baseUrl}</Label>
+                                            <Input
+                                                id="editor-base-url"
+                                                value={settings.baseUrl}
+                                                onChange={(e) => updateSettings({ baseUrl: e.target.value })}
+                                                placeholder="https://generativelanguage.googleapis.com"
+                                            />
+                                            <p className="text-xs text-muted-foreground">
+                                                {locale === "zh"
+                                                    ? "可选：填写支持 Gemini 官方格式的中转地址；留空将使用官方默认地址。"
+                                                    : "Optional: set a Gemini-official-format relay base URL. Leave empty to use the official default endpoint."}
+                                            </p>
+                                        </div>
                                     )}
 
                                     {/* 模型选择 */}
