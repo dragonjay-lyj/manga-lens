@@ -2743,94 +2743,50 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
+        const problematicSelections: Selection[] = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [sourceEdgeInkRatio, edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
-                computeEdgeInkRatio(sourcePatch),
+            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
                 computeEdgeInkRatio(generatedPatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
-            const edgeRise = edgeInkRatio - sourceEdgeInkRatio
-            const likelyClipped =
-                edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5) &&
-                edgeRise > (isLikelyVertical ? 0.09 : 0.07)
+            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.022 &&
-                (
-                    densityRatio < 0.42 ||
-                    densityRatio > 1.95 ||
-                    (densityRatio > 1.6 && edgeRise > 0.04)
-                )
+                sourceInkDensity > 0.028 &&
+                (densityRatio < 0.38 || densityRatio > 2.8) &&
+                edgeRise > 0.05
 
             if (likelyClipped || likelyFontDrift) {
                 const severe =
                     (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
-                    edgeRise > 0.14 ||
-                    densityRatio > 2.25 ||
-                    densityRatio < 0.28
+                    edgeRise > 0.14
                 problematicSelections.push({ selection, severe })
             }
         }
 
         const problematicSelectionList = problematicSelections.map((item) => item.selection)
-        const severeSelectionList = problematicSelections
-            .filter((item) => item.severe)
-            .map((item) => item.selection)
-        const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
-        const refineSelectionList = enableMaskPostRefine ? problematicSelectionList : severeSelectionList
-
-        if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
-            if (updateToolbarProgress) {
-                setProgressDetail(
-                    locale === "zh"
-                        ? "遮罩结果出现字体/排版异常，自动切换分片模式重试..."
-                        : "Mask output looks style/layout-drifted, retrying with patch mode..."
-                )
-            }
-            toast.warning(
-                locale === "zh"
-                    ? "检测到遮罩结果异常，已自动切换分片模式重试。"
-                    : "Mask output looked unstable; automatically retried with patch mode."
-            )
-            return processSelectionsPatchMode(
-                imageId,
-                originalImg,
-                composeBaseImg,
-                sourceSelections,
-                effectivePrompt,
-                updateToolbarProgress,
-                trackSelectionProgress,
-                true
-            )
-        }
-
         const shouldRunPatchRefine =
-            refineSelectionList.length > 0 &&
-            (
-                !enableMaskPostRefine ||
-                problematicSelections.length >= 2 ||
-                problematicSelections.some((item) => item.severe)
-            )
+            problematicSelections.length >= 2 ||
+            problematicSelections.some((item) => item.severe)
 
-        if (refineSelectionList.length > 0 && shouldRunPatchRefine) {
+        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${refineSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${refineSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(refineSelectionList.map((selection) => selection.id))
+                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2903,16 +2859,12 @@ export function EditorToolbar() {
 
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
-                    refinedResult.imageData,
-                    refineSelectionList,
-                    MASK_BLEND_PADDING
+                    problematicSelectionList,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress,
+                    true
                 )
-                if (trackSelectionProgress) {
-                    refineSelectionList.forEach((selection) =>
-                        setSelectionProgress(imageId, selection.id, "completed")
-                    )
-                }
-                return refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
                 if (updateToolbarProgress) {
@@ -2938,9 +2890,6 @@ export function EditorToolbar() {
                     true
                 )
             }
-        } else if (problematicSelectionList.length === 1) {
-            // Skip low-confidence single-selection refine to avoid over-correction artifacts.
-            console.info("Mask post-refine skipped for low-confidence single selection.")
         }
 
         if (trackSelectionProgress) {
