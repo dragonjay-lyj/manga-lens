@@ -298,7 +298,7 @@ export default function AdminAiSettingsPage() {
                         )}
                     </div>
 
-                    {provider === "openai" ? (
+                    {provider === "openai" && (
                         <>
                             <div className="space-y-2">
                                 <Label htmlFor="server-api-provider-preset">兼容服务商预设</Label>
@@ -341,19 +341,6 @@ export default function AdminAiSettingsPage() {
                                 />
                             </div>
                         </>
-                    ) : (
-                        <div className="space-y-2">
-                            <Label htmlFor="server-api-base-url">Gemini Base URL（可选）</Label>
-                            <Input
-                                id="server-api-base-url"
-                                value={getValue("server_api_base_url")}
-                                onChange={(e) => updateSetting("server_api_base_url", e.target.value)}
-                                placeholder="https://generativelanguage.googleapis.com"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                                支持填写 Gemini 官方格式中转站地址；留空默认走 Google 官方地址。
-                            </p>
-                        </div>
                     )}
 
                     <div className="space-y-2">
