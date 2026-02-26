@@ -1080,6 +1080,118 @@ export function EditorToolbar() {
         }
     }
 
+    const createSelectionRelaxedInkColorSampler = (image: HTMLImageElement) => {
+        const canvas = document.createElement("canvas")
+        const ctx = canvas.getContext("2d", { willReadFrequently: true })
+        if (!ctx) return () => null
+
+        canvas.width = image.width
+        canvas.height = image.height
+        ctx.drawImage(image, 0, 0)
+
+        return (selection: Selection): string | null => {
+            const x = Math.max(0, Math.min(image.width - 1, Math.floor(selection.x)))
+            const y = Math.max(0, Math.min(image.height - 1, Math.floor(selection.y)))
+            const maxW = Math.max(1, image.width - x)
+            const maxH = Math.max(1, image.height - y)
+            const w = Math.max(1, Math.min(maxW, Math.floor(selection.width)))
+            const h = Math.max(1, Math.min(maxH, Math.floor(selection.height)))
+            const data = ctx.getImageData(x, y, w, h).data
+
+            const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+            for (let i = 0; i < data.length; i += 4) {
+                const a = data[i + 3]
+                if (a < 180) continue
+                const r = data[i]
+                const g = data[i + 1]
+                const b = data[i + 2]
+                const max = Math.max(r, g, b)
+                const min = Math.min(r, g, b)
+                const lum = r * 0.299 + g * 0.587 + b * 0.114
+                const chroma = max - min
+                if (lum < 16 || lum > 170) continue
+                if (chroma < 14) continue
+                const key = `${Math.round(r / 24)}-${Math.round(g / 24)}-${Math.round(b / 24)}`
+                const bucket = buckets.get(key)
+                if (bucket) {
+                    bucket.count += 1
+                    bucket.r += r
+                    bucket.g += g
+                    bucket.b += b
+                } else {
+                    buckets.set(key, { count: 1, r, g, b })
+                }
+            }
+            if (!buckets.size) return null
+
+            let best: { count: number; r: number; g: number; b: number } | null = null
+            for (const bucket of buckets.values()) {
+                if (!best || bucket.count > best.count) best = bucket
+            }
+            if (!best) return null
+
+            const minCount = Math.max(6, Math.floor((w * h) * 0.0008))
+            if (best.count < minCount) return null
+            const avgR = best.r / best.count
+            const avgG = best.g / best.count
+            const avgB = best.b / best.count
+            const rgb = { r: avgR, g: avgG, b: avgB }
+            if (!isRgbChromatic({ r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b) })) return null
+            return `#${toHexColor(avgR)}${toHexColor(avgG)}${toHexColor(avgB)}`
+        }
+    }
+
+    const backfillMissingSelectionColors = (
+        selections: Selection[],
+        colorMap: Map<string, string>,
+        relaxedSampler: ((selection: Selection) => string | null) | null
+    ) => {
+        if (!selections.length) return
+
+        if (relaxedSampler) {
+            for (const selection of selections) {
+                if (colorMap.has(selection.id)) continue
+                const fallbackColor = relaxedSampler(selection)
+                if (!fallbackColor) continue
+                const fallbackRgb = hexToRgb(fallbackColor)
+                if (!fallbackRgb || !isRgbChromatic(fallbackRgb)) continue
+                colorMap.set(selection.id, fallbackColor)
+            }
+        }
+
+        if (colorMap.size === 0) return
+        if (colorMap.size >= selections.length) return
+        if (colorMap.size < Math.ceil(selections.length * 0.5)) return
+
+        const bucketCounter = new Map<string, { count: number; color: string }>()
+        for (const color of colorMap.values()) {
+            const rgb = hexToRgb(color)
+            if (!rgb || !isRgbChromatic(rgb)) continue
+            const key = `${Math.round(rgb.r / 20)}-${Math.round(rgb.g / 20)}-${Math.round(rgb.b / 20)}`
+            const bucket = bucketCounter.get(key)
+            if (bucket) {
+                bucket.count += 1
+            } else {
+                bucketCounter.set(key, { count: 1, color })
+            }
+        }
+
+        let dominant: { count: number; color: string } | null = null
+        for (const bucket of bucketCounter.values()) {
+            if (!dominant || bucket.count > dominant.count) dominant = bucket
+        }
+        if (!dominant || dominant.count < 2) return
+
+        const dominantRgb = hexToRgb(dominant.color)
+        if (!dominantRgb || !isRgbChromatic(dominantRgb) || isRgbNearBlack(dominantRgb)) return
+
+        for (const selection of selections) {
+            if (!colorMap.has(selection.id)) {
+                colorMap.set(selection.id, dominant.color)
+            }
+        }
+    }
+
     const getDominantTextColorFromPatch = async (imageDataUrl: string): Promise<string | null> => {
         try {
             const patchImage = await loadImage(imageDataUrl)
@@ -1230,7 +1342,7 @@ export function EditorToolbar() {
                 const max = Math.max(r, g, b)
                 const min = Math.min(r, g, b)
                 const lum = r * 0.299 + g * 0.587 + b * 0.114
-                return lum > 198 && (max - min) < 24
+                return lum > 170 && (max - min) < 30
             }
             const isLikelyTextInk = (r: number, g: number, b: number) => {
                 const max = Math.max(r, g, b)
@@ -1258,9 +1370,6 @@ export function EditorToolbar() {
                     const sr = srcData[i]
                     const sg = srcData[i + 1]
                     const sb = srcData[i + 2]
-                    const sourceNearWhite = isNearWhiteNeutral(sr, sg, sb)
-                    const diff = Math.abs(r - sr) + Math.abs(g - sg) + Math.abs(b - sb)
-                    if (sourceNearWhite && diff < 26) continue
 
                     const neighborOffsets = [
                         -4, 4, -stride, stride,
@@ -1273,20 +1382,24 @@ export function EditorToolbar() {
                         const nr = outData[ni]
                         const ng = outData[ni + 1]
                         const nb = outData[ni + 2]
-                        if (!isLikelyTextInk(nr, ng, nb)) continue
-                        const snr = srcData[ni]
-                        const sng = srcData[ni + 1]
-                        const snb = srcData[ni + 2]
-                        if (isLikelyTextInk(snr, sng, snb) || !isNearWhiteNeutral(snr, sng, snb)) {
+                        if (isLikelyTextInk(nr, ng, nb)) {
                             hasTextNeighbor = true
                             break
                         }
                     }
                     if (!hasTextNeighbor) continue
 
-                    outData[i] = clampRgb(sr * 0.85 + r * 0.15)
-                    outData[i + 1] = clampRgb(sg * 0.85 + g * 0.15)
-                    outData[i + 2] = clampRgb(sb * 0.85 + b * 0.15)
+                    const nextR = clampRgb(sr * 0.9 + r * 0.1)
+                    const nextG = clampRgb(sg * 0.9 + g * 0.1)
+                    const nextB = clampRgb(sb * 0.9 + b * 0.1)
+                    const delta =
+                        Math.abs(nextR - r) +
+                        Math.abs(nextG - g) +
+                        Math.abs(nextB - b)
+                    if (delta < 2) continue
+                    outData[i] = nextR
+                    outData[i + 1] = nextG
+                    outData[i + 2] = nextB
                     changedPixels += 1
                 }
             }
@@ -1765,6 +1878,9 @@ export function EditorToolbar() {
         const sampleDominantTextColor = useColorAnchors
             ? createSelectionDominantTextColorSampler(originalImg)
             : null
+        const sampleRelaxedInkColor = useColorAnchors
+            ? createSelectionRelaxedInkColorSampler(originalImg)
+            : null
         const selectionDominantColorMap = new Map<string, string>(
             useColorAnchors
                 ? selections
@@ -1772,6 +1888,9 @@ export function EditorToolbar() {
                     .filter((entry): entry is [string, string] => Boolean(entry[1]))
                 : []
         )
+        if (useColorAnchors) {
+            backfillMissingSelectionColors(selections, selectionDominantColorMap, sampleRelaxedInkColor)
+        }
         const selectionDarkRatioMap = new Map<string, number>(
             selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
         )
@@ -2320,6 +2439,7 @@ export function EditorToolbar() {
 
         const useColorAnchors = settings.autoTextColorAdapt ?? true
         const sourceColorSampler = useColorAnchors ? createSelectionDominantTextColorSampler(originalImg) : null
+        const relaxedSourceColorSampler = useColorAnchors ? createSelectionRelaxedInkColorSampler(originalImg) : null
         const selectionDominantColorMap = new Map<string, string>(
             useColorAnchors
                 ? sourceSelections
@@ -2327,6 +2447,9 @@ export function EditorToolbar() {
                     .filter((entry): entry is [string, string] => Boolean(entry[1]))
                 : []
         )
+        if (useColorAnchors) {
+            backfillMissingSelectionColors(sourceSelections, selectionDominantColorMap, relaxedSourceColorSampler)
+        }
         const maskPromptWithColorHints = selectionDominantColorMap.size
             ? [
                 effectivePrompt,
@@ -2586,50 +2709,68 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Selection[] = []
+        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+            const [sourceEdgeInkRatio, edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+                computeEdgeInkRatio(sourcePatch),
                 computeEdgeInkRatio(generatedPatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
-            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+            const edgeRise = edgeInkRatio - sourceEdgeInkRatio
+            const likelyClipped =
+                edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5) &&
+                edgeRise > (isLikelyVertical ? 0.09 : 0.07)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.028 &&
-                (densityRatio < 0.38 || densityRatio > 2.8) &&
-                edgeRise > 0.05
+                sourceInkDensity > 0.022 &&
+                (
+                    densityRatio < 0.42 ||
+                    densityRatio > 1.95 ||
+                    (densityRatio > 1.6 && edgeRise > 0.04)
+                )
 
             if (likelyClipped || likelyFontDrift) {
                 const severe =
                     (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
-                    edgeRise > 0.14
+                    edgeRise > 0.14 ||
+                    densityRatio > 2.25 ||
+                    densityRatio < 0.28
                 problematicSelections.push({ selection, severe })
             }
         }
 
         const problematicSelectionList = problematicSelections.map((item) => item.selection)
+        const severeSelectionList = problematicSelections
+            .filter((item) => item.severe)
+            .map((item) => item.selection)
+        const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
+        const refineSelectionList = enableMaskPostRefine ? problematicSelectionList : severeSelectionList
         const shouldRunPatchRefine =
-            problematicSelections.length >= 2 ||
-            problematicSelections.some((item) => item.severe)
+            refineSelectionList.length > 0 &&
+            (
+                !enableMaskPostRefine ||
+                problematicSelections.length >= 2 ||
+                problematicSelections.some((item) => item.severe)
+            )
 
-        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
+        if (refineSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${refineSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${refineSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
+                const problematicIds = new Set(refineSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2702,12 +2843,16 @@ export function EditorToolbar() {
 
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
-                    problematicSelectionList,
-                    effectivePrompt,
-                    updateToolbarProgress,
-                    trackSelectionProgress,
-                    true
+                    refinedResult.imageData,
+                    refineSelectionList,
+                    MASK_BLEND_PADDING
                 )
+                if (trackSelectionProgress) {
+                    refineSelectionList.forEach((selection) =>
+                        setSelectionProgress(imageId, selection.id, "completed")
+                    )
+                }
+                return refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
                 toast.warning(
@@ -2716,6 +2861,8 @@ export function EditorToolbar() {
                         : "Patch refinement failed. Keeping mask-mode output."
                 )
             }
+        } else if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
+            console.info("Mask post-refine skipped (no severe anomalies).")
         } else if (problematicSelectionList.length === 1) {
             // Skip low-confidence single-selection refine to avoid over-correction artifacts.
             console.info("Mask post-refine skipped for low-confidence single selection.")
