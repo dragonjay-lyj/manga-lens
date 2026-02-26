@@ -2743,12 +2743,12 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
+        const problematicSelections: Selection[] = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [edgeInkRatio, sourceEdgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
                 computeEdgeInkRatio(generatedPatch),
                 computeEdgeInkRatio(sourcePatch),
                 computePatchInkDensity(sourcePatch),
@@ -2756,39 +2756,29 @@ export function EditorToolbar() {
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
             const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
-            const edgeRise = Math.max(0, edgeInkRatio - sourceEdgeInkRatio)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.028 &&
-                (densityRatio < 0.38 || densityRatio > 2.8) &&
-                edgeRise > 0.05
+                sourceInkDensity > 0.02 &&
+                (densityRatio < 0.48 || densityRatio > 2.2)
 
             if (likelyClipped || likelyFontDrift) {
-                const severe =
-                    (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
-                    edgeRise > 0.14
-                problematicSelections.push({ selection, severe })
+                problematicSelections.push(selection)
             }
         }
 
-        const problematicSelectionList = problematicSelections.map((item) => item.selection)
-        const shouldRunPatchRefine =
-            problematicSelections.length >= 2 ||
-            problematicSelections.some((item) => item.severe)
-
-        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
+        if (problematicSelections.length > 0) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${problematicSelections.length} 个选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelections.length} selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
+                const problematicIds = new Set(problematicSelections.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2861,9 +2851,11 @@ export function EditorToolbar() {
 
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
-                    refinedResult.imageData,
-                    problematicSelectionList,
-                    MASK_BLEND_PADDING
+                    problematicSelections,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress,
+                    true
                 )
                 colorAdjustedResultData = refinedComposite
             } catch (error) {
@@ -2879,16 +2871,6 @@ export function EditorToolbar() {
                     locale === "zh"
                         ? "遮罩回补失败，已自动切换分片模式重试。"
                         : "Mask refine failed; automatically retried with patch mode."
-                )
-                return processSelectionsPatchMode(
-                    imageId,
-                    originalImg,
-                    composeBaseImg,
-                    sourceSelections,
-                    effectivePrompt,
-                    updateToolbarProgress,
-                    trackSelectionProgress,
-                    true
                 )
             }
         }
