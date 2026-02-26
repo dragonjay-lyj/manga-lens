@@ -1886,7 +1886,11 @@ export function EditorToolbar() {
         const englishTarget = directionMeta.targetLangCode === "en"
         const total = selections.length
         const hasManySelections = total >= 10
-        const enableSlowGenerationFallbacks = forceSlowFallbacks || (settings.enableSlowGenerationFallbacks ?? false)
+        const stableGenerationMode = prioritizeStabilityOverCost
+        const enableSlowGenerationFallbacks =
+            stableGenerationMode
+                ? false
+                : (forceSlowFallbacks || (settings.enableSlowGenerationFallbacks ?? false))
         const layoutExpandIntensity = hasManySelections ? 0.82 : 1
         const useColorAnchors = trackSelectionProgress && (settings.autoTextColorAdapt ?? true)
         const sampleDominantTextColor = useColorAnchors
@@ -1908,11 +1912,13 @@ export function EditorToolbar() {
         const selectionDarkRatioMap = new Map<string, number>(
             selections.map((selection) => [selection.id, getSelectionDarkRatio(originalImg, [selection])])
         )
-        const layoutSelections = selections.map((selection) =>
-            englishTarget
-                ? expandSelectionForEnglishLayout(selection, originalImg, layoutExpandIntensity)
-                : expandSelectionForTranslatedLayout(selection, originalImg, layoutExpandIntensity)
-        )
+        const layoutSelections = stableGenerationMode
+            ? selections.map((selection) => clampSelectionToImageBounds(selection, originalImg))
+            : selections.map((selection) =>
+                englishTarget
+                    ? expandSelectionForEnglishLayout(selection, originalImg, layoutExpandIntensity)
+                    : expandSelectionForTranslatedLayout(selection, originalImg, layoutExpandIntensity)
+            )
 
         const indexedSelections = layoutSelections.map((selection, index) => ({
             selection,
@@ -1962,6 +1968,19 @@ export function EditorToolbar() {
             const styleConsistencyHint = locale === "zh"
                 ? "同一页面多个对白框风格一致时，当前选区需保持相同字体家族与字重，不要突然切换字体风格。"
                 : "When nearby bubbles share a style on the same page, keep the same font family and weight for this selection."
+            const stableModeHints = stableGenerationMode
+                ? [
+                    locale === "zh"
+                        ? "稳定优先：禁止扩写内容，禁止把其他选区文本写入当前选区。"
+                        : "Stability-first: do not expand content and do not inject text from other selections.",
+                    locale === "zh"
+                        ? "必须先完全擦除当前选区原文，再回填单层清晰文字；禁止重影、叠字、双层描边。"
+                        : "Erase source text in this selection first, then render one clean text layer; no ghosting/duplicates/double-outline.",
+                    locale === "zh"
+                        ? "字号与字重需接近原文，不得明显放大或加粗。"
+                        : "Keep font size and weight close to source; no obvious upscaling or boldening.",
+                ]
+                : []
             const englishLayoutHints = englishTarget
                 ? [
                     "目标语言为英文：请按气泡空间重排断行，避免文字溢出或贴边。",
@@ -1990,6 +2009,7 @@ export function EditorToolbar() {
                 layoutHint,
                 universalColorHint,
                 styleConsistencyHint,
+                ...stableModeHints,
                 ...(explicitColorAnchorHint ? [explicitColorAnchorHint] : []),
                 ...englishLayoutHints,
                 ...hardHints,
@@ -2953,7 +2973,8 @@ export function EditorToolbar() {
         existingDetectedBlocks: DetectedTextBlock[],
         basePrompt: string,
         updateToolbarProgress: boolean,
-        showPretranslateFailureToast: boolean
+        showPretranslateFailureToast: boolean,
+        forceUseProvidedBlocks: boolean = false
     ) => {
         const originalImg = await loadImage(imageUrl)
         let composeBaseImg = originalImg
@@ -2998,15 +3019,25 @@ export function EditorToolbar() {
             )
         }
 
-        const pretranslateContext = await buildPretranslateContextPrompt(
-            imageId,
-            originalImg,
-            hasUserSelections ? sourceSelections : [],
-            promptWithEnglishAssist,
-            updateToolbarProgress,
-            showPretranslateFailureToast,
-            existingDetectedBlocks
-        )
+        const bypassPretranslateForStability = prioritizeStabilityOverCost && !forceUseProvidedBlocks
+        if (bypassPretranslateForStability && updateToolbarProgress) {
+            setProgressDetail(
+                locale === "zh"
+                    ? "稳定优先：跳过多阶段预翻译上下文，按选区直接生成..."
+                    : "Stability-first: bypassing multi-stage pretranslate context and generating per selection..."
+            )
+        }
+        const pretranslateContext = bypassPretranslateForStability
+            ? { prompt: promptWithEnglishAssist }
+            : await buildPretranslateContextPrompt(
+                imageId,
+                originalImg,
+                hasUserSelections ? sourceSelections : [],
+                promptWithEnglishAssist,
+                updateToolbarProgress,
+                showPretranslateFailureToast,
+                existingDetectedBlocks
+            )
 
         if (effectiveUseMaskMode) {
             return processSelectionsMaskMode(
@@ -3301,7 +3332,8 @@ export function EditorToolbar() {
                 editedBlocks,
                 basePrompt,
                 true,
-                false
+                false,
+                true
             )
 
             setImageStatus(currentImage.id, "completed", resultUrl)
