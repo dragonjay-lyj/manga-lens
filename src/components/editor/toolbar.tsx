@@ -708,6 +708,14 @@ export function EditorToolbar() {
         prompt: string
     }
 
+    const autoFallbackBasePrompt = buildMangaEditPrompt("", {
+        direction: settings.translationDirection ?? "ja2zh",
+        sourceLanguageAllowlist: settings.sourceLanguageAllowlist,
+        comicType: settings.comicType ?? "auto",
+        textStylePreset: settings.textStylePreset ?? "match-original",
+        preferredFontFamily: settings.preferredOutputFontFamily || "",
+    })
+
     const buildHardTextFallbackPrompt = (basePrompt: string) => [
         basePrompt,
         "",
@@ -1868,7 +1876,6 @@ export function EditorToolbar() {
             if (result?.success && result.imageData) {
                 const sourcePatch = inputPatchBySelection.get(selection.id)
                 const isHard = hardSelectionIds.has(selection.id)
-                const selectionPrompt = promptBySelection.get(selection.id) || effectivePrompt
                 if (sourcePatch) {
                     let bestImageData = result.imageData
                     const shouldRunDiffRetry = enableSlowGenerationFallbacks && (isHard || !hasManySelections)
@@ -1886,7 +1893,7 @@ export function EditorToolbar() {
                                     : `Selection #${index} changed too little, retrying with stronger prompt...`
                             )
                         }
-                        const hardPrompt = buildHardTextFallbackPrompt(selectionPrompt)
+                        const hardPrompt = buildHardTextFallbackPrompt(autoFallbackBasePrompt)
 
                         const retryWithPrompt = await runGenerateRequestWithRetry(
                             sourcePatch,
@@ -1975,7 +1982,7 @@ export function EditorToolbar() {
 
                         const useWhiteOutline = (selectionDarkRatioMap.get(selection.id) ?? 0) >= 0.18
                         const overflowSelection = expandSelectionForEnglishLayout(selection, originalImg, 1.28)
-                        const overflowPrompt = buildEnglishOverflowFallbackPrompt(selectionPrompt, useWhiteOutline)
+                        const overflowPrompt = buildEnglishOverflowFallbackPrompt(autoFallbackBasePrompt, useWhiteOutline)
                         const overflowPatch = cropSelection(
                             originalImg,
                             overflowSelection,
@@ -2013,7 +2020,7 @@ export function EditorToolbar() {
                         const overflowSelection = isLikelyVertical
                             ? expandSelectionFromCenter(selection, originalImg, 1.42, 1.24)
                             : expandSelectionFromCenter(selection, originalImg, 1.28, 1.2)
-                        const overflowPrompt = buildCenterFillFallbackPrompt(selectionPrompt)
+                        const overflowPrompt = buildCenterFillFallbackPrompt(autoFallbackBasePrompt)
                         const overflowPatch = cropSelection(
                             originalImg,
                             overflowSelection,
@@ -2473,7 +2480,7 @@ export function EditorToolbar() {
                         MASK_CONTEXT_PADDING
                     )
                 const refinePrompt = [
-                    buildCenterFillFallbackPrompt(effectivePrompt),
+                    buildCenterFillFallbackPrompt(autoFallbackBasePrompt),
                     "",
                     locale === "zh"
                         ? "【遮罩后局部回补（单次请求）】只修复当前可见选区中的文字截断/字体漂移。"
