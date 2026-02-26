@@ -113,6 +113,7 @@ export function EditorToolbar() {
     const [pipelineStageDurations, setPipelineStageDurations] = useState<Partial<Record<PipelineStageKey, number>>>({})
     const pipelineStageStartRef = useRef<{ stage: PipelineStageKey; startedAt: number } | null>(null)
     const stopBatchRequestedRef = useRef(false)
+    const stableFallbackNoticeShownRef = useRef(false)
     const PATCH_CONTEXT_PADDING = 24
     const PATCH_BLEND_PADDING = 0
     const MASK_CONTEXT_PADDING = 40
@@ -120,12 +121,15 @@ export function EditorToolbar() {
     const PATCH_DIFF_RETRY_THRESHOLD = 0.014
     const useMaskMode = settings.useMaskMode
     const useReverseMaskMode = settings.useReverseMaskMode ?? false
+    const prioritizeStabilityOverCost = true
+    const effectiveUseMaskMode = useMaskMode && !prioritizeStabilityOverCost
+    const stableFirstPatchMode = useMaskMode && !effectiveUseMaskMode
     const enablePretranslate = settings.enablePretranslate
     const ocrEngine = settings.ocrEngine ?? "auto"
     const repairEngine = settings.repairEngine ?? "ai"
-    const activeMaskMode = useMaskMode
+    const activeMaskMode = effectiveUseMaskMode
         ? (useReverseMaskMode ? "inverse-mask" : "mask")
-        : "patch"
+        : (stableFirstPatchMode ? "patch-stable" : "patch")
     const SAFE_DETECT_PAYLOAD_CHARS = 2_000_000
     const FOUR_K_LONG_EDGE = 3840
     const isPatchEditorEnabled = (settings.enableComicModule ?? true) && (settings.enablePatchEditor ?? true)
@@ -140,6 +144,16 @@ export function EditorToolbar() {
         setPipelineStageActive(null)
         setPipelineStageDurations({})
     }
+
+    const maybeNotifyStablePatchFallback = useCallback(() => {
+        if (!stableFirstPatchMode || stableFallbackNoticeShownRef.current) return
+        stableFallbackNoticeShownRef.current = true
+        toast.info(
+            locale === "zh"
+                ? "已启用稳定优先策略：当前遮罩模式自动降级为分片模式执行。"
+                : "Stability-first is enabled: mask mode is currently executed via patch mode."
+        )
+    }, [locale, stableFirstPatchMode])
 
     const beginPipelineStage = (stage: PipelineStageKey) => {
         const now = performance.now()
@@ -2750,6 +2764,32 @@ export function EditorToolbar() {
             .map((item) => item.selection)
         const enableMaskPostRefine = settings.enableSlowGenerationFallbacks ?? false
         const refineSelectionList = enableMaskPostRefine ? problematicSelectionList : severeSelectionList
+
+        if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
+            if (updateToolbarProgress) {
+                setProgressDetail(
+                    locale === "zh"
+                        ? "遮罩结果出现字体/排版异常，自动切换分片模式重试..."
+                        : "Mask output looks style/layout-drifted, retrying with patch mode..."
+                )
+            }
+            toast.warning(
+                locale === "zh"
+                    ? "检测到遮罩结果异常，已自动切换分片模式重试。"
+                    : "Mask output looked unstable; automatically retried with patch mode."
+            )
+            return processSelectionsPatchMode(
+                imageId,
+                originalImg,
+                composeBaseImg,
+                sourceSelections,
+                effectivePrompt,
+                updateToolbarProgress,
+                trackSelectionProgress,
+                true
+            )
+        }
+
         const shouldRunPatchRefine =
             refineSelectionList.length > 0 &&
             (
@@ -2855,14 +2895,29 @@ export function EditorToolbar() {
                 return refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
+                if (updateToolbarProgress) {
+                    setProgressDetail(
+                        locale === "zh"
+                            ? "遮罩回补失败，自动切换分片模式重试..."
+                            : "Mask refine failed, retrying with patch mode..."
+                    )
+                }
                 toast.warning(
                     locale === "zh"
-                        ? "局部回补失败，已保留遮罩结果。"
-                        : "Patch refinement failed. Keeping mask-mode output."
+                        ? "遮罩回补失败，已自动切换分片模式重试。"
+                        : "Mask refine failed; automatically retried with patch mode."
+                )
+                return processSelectionsPatchMode(
+                    imageId,
+                    originalImg,
+                    composeBaseImg,
+                    sourceSelections,
+                    effectivePrompt,
+                    updateToolbarProgress,
+                    trackSelectionProgress,
+                    true
                 )
             }
-        } else if (!enableMaskPostRefine && problematicSelectionList.length > 0) {
-            console.info("Mask post-refine skipped (no severe anomalies).")
         } else if (problematicSelectionList.length === 1) {
             // Skip low-confidence single-selection refine to avoid over-correction artifacts.
             console.info("Mask post-refine skipped for low-confidence single selection.")
@@ -2953,7 +3008,7 @@ export function EditorToolbar() {
             existingDetectedBlocks
         )
 
-        if (useMaskMode) {
+        if (effectiveUseMaskMode) {
             return processSelectionsMaskMode(
                 imageId,
                 originalImg,
@@ -3091,11 +3146,12 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
+        maybeNotifyStablePatchFallback()
 
         // 检查 API 配置
         if (settings.useServerApi) {
             const COST_PER_GENERATION = 10
-            const generationUnits = useMaskMode
+            const generationUnits = effectiveUseMaskMode
                 ? 1
                 : Math.max(1, currentImage.selections.length || 0)
             const totalCost = COST_PER_GENERATION * generationUnits
@@ -3167,6 +3223,7 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
+        maybeNotifyStablePatchFallback()
 
         const editedBlocks = (currentImage.detectedTextBlocks || []).filter((block) => {
             const source = (block.sourceText || "").trim()
@@ -3191,7 +3248,7 @@ export function EditorToolbar() {
                 ? existingSelections
                 : blocksToSelections(editedBlocks, originalImg.width, originalImg.height, "ocr-fillback")
             const COST_PER_GENERATION = 10
-            const generationUnits = useMaskMode
+            const generationUnits = effectiveUseMaskMode
                 ? 1
                 : Math.max(1, effectiveSelections.length || 0)
             const totalCost = COST_PER_GENERATION * generationUnits
@@ -3358,6 +3415,7 @@ export function EditorToolbar() {
             toast.warning(locale === "zh" ? "没有需要处理的图片" : "No images to process")
             return
         }
+        maybeNotifyStablePatchFallback()
 
         const templateSelections = applyToAll
             ? (currentImage?.selections || images.find((img) => img.selections?.length)?.selections || [])
@@ -3367,7 +3425,7 @@ export function EditorToolbar() {
             const COST_PER_GENERATION = 10
             const totalUnits = imagesToProcess.reduce((acc, img) => {
                 const selections = applyToAll ? templateSelections : (img.selections || [])
-                const units = useMaskMode ? 1 : Math.max(1, selections.length || 0)
+                const units = effectiveUseMaskMode ? 1 : Math.max(1, selections.length || 0)
                 return acc + units
             }, 0)
             const totalCost = COST_PER_GENERATION * Math.max(1, totalUnits)
@@ -3702,6 +3760,7 @@ export function EditorToolbar() {
             toast.error(t.errors.noImage)
             return
         }
+        maybeNotifyStablePatchFallback()
 
         if (!settings.useServerApi && !settings.apiKey) {
             toast.error(t.errors.apiKeyRequired)
@@ -3750,7 +3809,7 @@ export function EditorToolbar() {
 
             if (settings.useServerApi) {
                 const COST_PER_GENERATION = 10
-                const generationUnits = useMaskMode ? 1 : Math.max(1, detectedSelections.length || 0)
+                const generationUnits = effectiveUseMaskMode ? 1 : Math.max(1, detectedSelections.length || 0)
                 const totalCost = COST_PER_GENERATION * generationUnits
                 const deducted = await deductCoins(totalCost)
                 if (!deducted) {
