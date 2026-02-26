@@ -2743,18 +2743,20 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Selection[] = []
+        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+            const [edgeInkRatio, sourceEdgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
                 computeEdgeInkRatio(generatedPatch),
+                computeEdgeInkRatio(sourcePatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
             const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+            const edgeRise = Math.max(0, edgeInkRatio - sourceEdgeInkRatio)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
                 sourceInkDensity > 0.028 &&
@@ -2808,13 +2810,13 @@ export function EditorToolbar() {
                 const refineInputImageData = useReverseMaskMode
                     ? createInverseMaskedImage(
                         maskedAppliedBaseImage,
-                        refineSelectionList,
+                        problematicSelectionList,
                         "#ffffff",
                         MASK_CONTEXT_PADDING
                     )
                     : createMaskedImage(
                         maskedAppliedBaseImage,
-                        refineSelectionList,
+                        problematicSelectionList,
                         "#ffffff",
                         MASK_CONTEXT_PADDING
                     )
@@ -2859,12 +2861,11 @@ export function EditorToolbar() {
 
                 const refinedComposite = await compositeSelectionsFromFullImage(
                     maskedAppliedBaseImage,
+                    refinedResult.imageData,
                     problematicSelectionList,
-                    effectivePrompt,
-                    updateToolbarProgress,
-                    trackSelectionProgress,
-                    true
+                    MASK_BLEND_PADDING
                 )
+                colorAdjustedResultData = refinedComposite
             } catch (error) {
                 console.warn("Mask post-refine failed, keeping mask result:", error)
                 if (updateToolbarProgress) {
