@@ -262,6 +262,23 @@ export function EditorToolbar() {
         return getTranslationDirectionMeta(direction).sourceLangLabel
     }
 
+    const aiVisionOcrUseCustomConfig = Boolean(settings.aiVisionOcrUseCustomConfig)
+    const aiVisionOcrRuntimeConfig = {
+        provider: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrProvider ?? "openai")
+            : settings.provider,
+        apiKey: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrApiKey || "")
+            : settings.apiKey,
+        baseUrl: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrBaseUrl || "")
+            : settings.baseUrl,
+        model: aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrModel || "")
+            : settings.model,
+        imageSize: settings.imageSize || "2K",
+    } as const
+
     const applyAngleThresholdFilter = (blocks: DetectedTextBlock[]) => {
         const filteredByFurigana = filterLikelyFuriganaBlocks(
             blocks,
@@ -506,6 +523,8 @@ export function EditorToolbar() {
         imageWidth?: number,
         imageHeight?: number
     ): Promise<DetectTextResponse> => {
+        const forceLocalAiVisionOcr = ocrEngine === "ai_vision" && aiVisionOcrUseCustomConfig
+        const shouldUseServerDetection = settings.useServerApi && !forceLocalAiVisionOcr
         const useServerDetectionPipeline = ocrEngine !== "ai_vision"
         const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
         const webtoonRatio = imageWidth && imageHeight
@@ -519,7 +538,7 @@ export function EditorToolbar() {
             imageWidth && imageHeight
                 ? resolveDetectionRegionHints(selectionsHint, imageWidth, imageHeight)
                 : {}
-        const detectCandidates = settings.useServerApi || useServerDetectionPipeline
+        const detectCandidates = shouldUseServerDetection || useServerDetectionPipeline
             ? await buildDetectPayloadCandidates(imageData, [
                 { maxLongEdge: 3072, quality: 0.9, mimeType: "image/jpeg" },
                 { maxLongEdge: 2560, quality: 0.86, mimeType: "image/jpeg" },
@@ -530,15 +549,10 @@ export function EditorToolbar() {
             ])
             : [imageData]
 
-        if (!settings.useServerApi && !useServerDetectionPipeline) {
+        if (!shouldUseServerDetection && !useServerDetectionPipeline) {
             return detectTextBlocks({
                 imageData: detectCandidates[0],
-                config: {
-                    provider: settings.provider,
-                    apiKey: settings.apiKey,
-                    baseUrl: settings.baseUrl,
-                    model: settings.model,
-                },
+                config: aiVisionOcrRuntimeConfig,
                 targetLanguage,
                 sourceLanguageHint: getSourceLanguageHintForDetection(),
                 sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -580,7 +594,7 @@ export function EditorToolbar() {
                     if (canRetryWithSmallerPayload) {
                         continue
                     }
-                    if (strictServerDetectionEngine || settings.useServerApi) {
+                    if (strictServerDetectionEngine || shouldUseServerDetection) {
                         return {
                             success: false,
                             blocks: [],
@@ -639,13 +653,13 @@ export function EditorToolbar() {
                 lastError = error instanceof Error
                     ? error.message
                     : (locale === "zh" ? "网站 API 文本检测失败" : "Server text detection failed")
-                if (strictServerDetectionEngine || settings.useServerApi || i >= detectCandidates.length - 1) {
+                if (strictServerDetectionEngine || shouldUseServerDetection || i >= detectCandidates.length - 1) {
                     break
                 }
             }
         }
 
-        if (strictServerDetectionEngine || settings.useServerApi) {
+        if (strictServerDetectionEngine || shouldUseServerDetection) {
             return {
                 success: false,
                 blocks: [],
@@ -661,12 +675,7 @@ export function EditorToolbar() {
 
         return detectTextBlocks({
             imageData: imageData,
-            config: {
-                provider: settings.provider,
-                apiKey: settings.apiKey,
-                baseUrl: settings.baseUrl,
-                model: settings.model,
-            },
+            config: aiVisionOcrRuntimeConfig,
             targetLanguage,
             sourceLanguageHint: getSourceLanguageHintForDetection(),
             sourceLanguageAllowlist: getSourceLanguageAllowlistForDetection(),
@@ -2364,41 +2373,54 @@ export function EditorToolbar() {
         }
 
         const colorAdjustedResultImage = await loadImage(colorAdjustedResultData)
-        const problematicSelections: Selection[] = []
+        const problematicSelections: Array<{ selection: Selection; severe: boolean }> = []
 
         for (const selection of sourceSelections) {
             const sourcePatch = cropSelection(originalImg, selection, PATCH_CONTEXT_PADDING)
             const generatedPatch = cropSelection(colorAdjustedResultImage, selection, PATCH_CONTEXT_PADDING)
-            const [edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+            const [sourceEdgeInkRatio, edgeInkRatio, sourceInkDensity, generatedInkDensity] = await Promise.all([
+                computeEdgeInkRatio(sourcePatch),
                 computeEdgeInkRatio(generatedPatch),
                 computePatchInkDensity(sourcePatch),
                 computePatchInkDensity(generatedPatch),
             ])
             const isLikelyVertical = selection.height > selection.width * 1.2
-            const likelyClipped = edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5)
+            const edgeRise = edgeInkRatio - sourceEdgeInkRatio
+            const likelyClipped =
+                edgeInkRatio > (isLikelyVertical ? 0.42 : 0.5) &&
+                edgeRise > (isLikelyVertical ? 0.09 : 0.07)
             const densityRatio = generatedInkDensity / Math.max(0.01, sourceInkDensity)
             const likelyFontDrift =
-                sourceInkDensity > 0.02 &&
-                (densityRatio < 0.48 || densityRatio > 2.2)
+                sourceInkDensity > 0.028 &&
+                (densityRatio < 0.38 || densityRatio > 2.8) &&
+                edgeRise > 0.05
 
             if (likelyClipped || likelyFontDrift) {
-                problematicSelections.push(selection)
+                const severe =
+                    (edgeInkRatio > (isLikelyVertical ? 0.62 : 0.66) && edgeRise > 0.12) ||
+                    edgeRise > 0.14
+                problematicSelections.push({ selection, severe })
             }
         }
 
-        if (problematicSelections.length > 0) {
+        const problematicSelectionList = problematicSelections.map((item) => item.selection)
+        const shouldRunPatchRefine =
+            problematicSelections.length >= 2 ||
+            problematicSelections.some((item) => item.severe)
+
+        if (problematicSelectionList.length > 0 && shouldRunPatchRefine) {
             if (updateToolbarProgress) {
                 setProgress(86)
                 setProgressText("1/2")
                 setProgressDetail(
                     locale === "zh"
-                        ? `遮罩后检测到 ${problematicSelections.length} 个选区疑似截断/字体漂移，自动局部回补中...`
-                        : `${problematicSelections.length} selections look clipped/style-drifted after mask mode, patch-refining...`
+                        ? `遮罩后检测到 ${problematicSelectionList.length} 个高风险选区疑似截断/字体漂移，自动局部回补中...`
+                        : `${problematicSelectionList.length} high-risk selections look clipped/style-drifted after mask mode, patch-refining...`
                 )
             }
 
             if (trackSelectionProgress) {
-                const problematicIds = new Set(problematicSelections.map((selection) => selection.id))
+                const problematicIds = new Set(problematicSelectionList.map((selection) => selection.id))
                 sourceSelections.forEach((selection) => {
                     if (!problematicIds.has(selection.id)) {
                         setSelectionProgress(imageId, selection.id, "completed")
@@ -2422,7 +2444,7 @@ export function EditorToolbar() {
                     imageId,
                     originalImg,
                     maskedAppliedBaseImage,
-                    problematicSelections,
+                    problematicSelectionList,
                     effectivePrompt,
                     updateToolbarProgress,
                     trackSelectionProgress,
@@ -2436,6 +2458,9 @@ export function EditorToolbar() {
                         : "Patch refinement failed. Keeping mask-mode output."
                 )
             }
+        } else if (problematicSelectionList.length === 1) {
+            // Skip low-confidence single-selection refine to avoid over-correction artifacts.
+            console.info("Mask post-refine skipped for low-confidence single selection.")
         }
 
         if (trackSelectionProgress) {
