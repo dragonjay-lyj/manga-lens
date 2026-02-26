@@ -1206,6 +1206,108 @@ export function EditorToolbar() {
         }
     }
 
+    const removeArtificialWhiteHalo = async (
+        sourcePatchDataUrl: string,
+        generatedPatchDataUrl: string
+    ): Promise<string | null> => {
+        try {
+            const [sourceImg, generatedImg] = await Promise.all([
+                loadImage(sourcePatchDataUrl),
+                loadImage(generatedPatchDataUrl),
+            ])
+
+            const width = Math.max(1, generatedImg.width)
+            const height = Math.max(1, generatedImg.height)
+            const srcCanvas = document.createElement("canvas")
+            const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true })
+            const outCanvas = document.createElement("canvas")
+            const outCtx = outCanvas.getContext("2d", { willReadFrequently: true })
+            if (!srcCtx || !outCtx) return null
+
+            srcCanvas.width = width
+            srcCanvas.height = height
+            outCanvas.width = width
+            outCanvas.height = height
+            srcCtx.drawImage(sourceImg, 0, 0, width, height)
+            outCtx.drawImage(generatedImg, 0, 0, width, height)
+
+            const srcData = srcCtx.getImageData(0, 0, width, height).data
+            const outImageData = outCtx.getImageData(0, 0, width, height)
+            const outData = outImageData.data
+
+            const isNearWhiteNeutral = (r: number, g: number, b: number) => {
+                const max = Math.max(r, g, b)
+                const min = Math.min(r, g, b)
+                const lum = r * 0.299 + g * 0.587 + b * 0.114
+                return lum > 198 && (max - min) < 24
+            }
+            const isLikelyTextInk = (r: number, g: number, b: number) => {
+                const max = Math.max(r, g, b)
+                const min = Math.min(r, g, b)
+                const lum = r * 0.299 + g * 0.587 + b * 0.114
+                const chroma = max - min
+                return lum < 150 && chroma > 18
+            }
+
+            let changedPixels = 0
+            const minChangedPixels = Math.max(8, Math.floor(width * height * 0.0007))
+            const stride = width * 4
+
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    const i = (y * width + x) * 4
+                    const a = outData[i + 3]
+                    if (a < 140) continue
+
+                    const r = outData[i]
+                    const g = outData[i + 1]
+                    const b = outData[i + 2]
+                    if (!isNearWhiteNeutral(r, g, b)) continue
+
+                    const sr = srcData[i]
+                    const sg = srcData[i + 1]
+                    const sb = srcData[i + 2]
+                    const sourceNearWhite = isNearWhiteNeutral(sr, sg, sb)
+                    const diff = Math.abs(r - sr) + Math.abs(g - sg) + Math.abs(b - sb)
+                    if (sourceNearWhite && diff < 26) continue
+
+                    const neighborOffsets = [
+                        -4, 4, -stride, stride,
+                        -stride - 4, -stride + 4, stride - 4, stride + 4,
+                    ]
+                    let hasTextNeighbor = false
+                    for (const offset of neighborOffsets) {
+                        const ni = i + offset
+                        if (ni < 0 || ni + 2 >= outData.length) continue
+                        const nr = outData[ni]
+                        const ng = outData[ni + 1]
+                        const nb = outData[ni + 2]
+                        if (!isLikelyTextInk(nr, ng, nb)) continue
+                        const snr = srcData[ni]
+                        const sng = srcData[ni + 1]
+                        const snb = srcData[ni + 2]
+                        if (isLikelyTextInk(snr, sng, snb) || !isNearWhiteNeutral(snr, sng, snb)) {
+                            hasTextNeighbor = true
+                            break
+                        }
+                    }
+                    if (!hasTextNeighbor) continue
+
+                    outData[i] = clampRgb(sr * 0.85 + r * 0.15)
+                    outData[i + 1] = clampRgb(sg * 0.85 + g * 0.15)
+                    outData[i + 2] = clampRgb(sb * 0.85 + b * 0.15)
+                    changedPixels += 1
+                }
+            }
+
+            if (changedPixels < minChangedPixels) return null
+            outCtx.putImageData(outImageData, 0, 0)
+            return outCanvas.toDataURL("image/png")
+        } catch {
+            return null
+        }
+    }
+
     const getSelectionDarkRatio = (image: HTMLImageElement, selections: Selection[]): number => {
         if (!selections.length) return 0
 
@@ -2141,6 +2243,17 @@ export function EditorToolbar() {
                         }
                     }
                 }
+                if (sourcePatch || inputPatchForFinalCheck) {
+                    const haloRemovalSource = inputPatchForFinalCheck || sourcePatch || cropSelection(
+                        originalImg,
+                        finalSelection,
+                        PATCH_CONTEXT_PADDING + 4
+                    )
+                    const dehaloImageData = await removeArtificialWhiteHalo(haloRemovalSource, finalImageData)
+                    if (dehaloImageData) {
+                        finalImageData = dehaloImageData
+                    }
+                }
 
                 if (inputPatchForFinalCheck && isExactlySameImageData(inputPatchForFinalCheck, finalImageData)) {
                     const unchangedError = locale === "zh"
@@ -2236,6 +2349,9 @@ export function EditorToolbar() {
                 locale === "zh"
                     ? "保持字重接近原文，禁止整体加粗。"
                     : "Keep font weight close to source; avoid global boldening.",
+                locale === "zh"
+                    ? "字号必须接近原文（建议不超过原文字高的 105%），不要放大成更粗更满的版式。"
+                    : "Keep font size close to source (prefer <=105% of source glyph height), avoid oversized heavier layout.",
                 locale === "zh"
                     ? "若译文较长，请优先换行与缩小字号，禁止截断文字。"
                     : "If translation is longer, prioritize line-wrap and font-size reduction. Never clip text.",
@@ -2403,29 +2519,41 @@ export function EditorToolbar() {
                         isRgbNearBlack(generatedDominantRgb) ||
                         currentDistance > 120
 
-                    if (!needColorCorrection) continue
+                    let patchedSelectionData = generatedPatch
 
-                    const correctedPatch = await tintChangedDarkTextToColor(
-                        sourcePatch,
-                        generatedPatch,
-                        sourceDominantColor
-                    )
-                    if (!correctedPatch) continue
+                    if (needColorCorrection) {
+                        const correctedPatch = await tintChangedDarkTextToColor(
+                            sourcePatch,
+                            generatedPatch,
+                            sourceDominantColor
+                        )
 
-                    const correctedDominantColor = await getDominantTextColorFromPatch(correctedPatch)
-                    const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
-                    if (!correctedDominantRgb || isRgbNearBlack(correctedDominantRgb)) continue
+                        if (correctedPatch) {
+                            const correctedDominantColor = await getDominantTextColorFromPatch(correctedPatch)
+                            const correctedDominantRgb = correctedDominantColor ? hexToRgb(correctedDominantColor) : null
+                            if (correctedDominantRgb && !isRgbNearBlack(correctedDominantRgb)) {
+                                const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
+                                if (!generatedDominantRgb || correctedDistance + 6 < currentDistance) {
+                                    patchedSelectionData = correctedPatch
+                                }
+                            }
+                        }
+                    }
 
-                    const correctedDistance = colorDistance(sourceDominantRgb, correctedDominantRgb)
-                    if (generatedDominantRgb && correctedDistance + 6 >= currentDistance) continue
+                    const dehaloPatch = await removeArtificialWhiteHalo(sourcePatch, patchedSelectionData)
+                    if (dehaloPatch) {
+                        patchedSelectionData = dehaloPatch
+                    }
 
-                    colorAdjustedResultData = await compositeImage(
-                        currentFullResultImage,
-                        correctedPatch,
-                        selection,
-                        PATCH_CONTEXT_PADDING,
-                        PATCH_BLEND_PADDING
-                    )
+                    if (!isExactlySameImageData(generatedPatch, patchedSelectionData)) {
+                        colorAdjustedResultData = await compositeImage(
+                            currentFullResultImage,
+                            patchedSelectionData,
+                            selection,
+                            PATCH_CONTEXT_PADDING,
+                            PATCH_BLEND_PADDING
+                        )
+                    }
 
                     if (updateToolbarProgress) {
                         const progressBase = 72
@@ -2556,6 +2684,9 @@ export function EditorToolbar() {
                     locale === "zh"
                         ? "禁止改变气泡底色和文字外的背景像素，不要额外加粗字体。"
                         : "Do not alter bubble/background pixels outside glyph strokes, and do not add extra bold weight.",
+                    locale === "zh"
+                        ? "若字重或字号明显大于原文，请减小字号并减轻描边。"
+                        : "If weight/size is visibly larger than source, reduce font size and weaken stroke.",
                     locale === "zh"
                         ? "禁止修改选区外内容；若文本偏长，优先换行和缩小字号，确保完整显示。"
                         : "Do not modify pixels outside selected areas; for long text, use line-wrap and smaller font to avoid clipping.",
