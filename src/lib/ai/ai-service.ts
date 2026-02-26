@@ -588,6 +588,83 @@ function parseJsonFromText(raw: string): unknown {
     return null
 }
 
+function normalizeDataImageUri(input: string): string | null {
+    const text = String(input || '').trim()
+    if (!text) return null
+    const match = text.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/i)
+    if (!match) return null
+    const mimeType = match[1].toLowerCase()
+    const payload = match[2].replace(/\s+/g, '')
+    if (!payload) return null
+    return `data:${mimeType};base64,${payload}`
+}
+
+function extractDataImageFromText(raw: string): string | null {
+    const text = String(raw || '').trim()
+    if (!text) return null
+
+    const direct = normalizeDataImageUri(text)
+    if (direct) return direct
+
+    const markdownMatch = text.match(/!\[[^\]]*]\((data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+)\)/i)
+    if (markdownMatch?.[1]) {
+        const normalized = normalizeDataImageUri(markdownMatch[1])
+        if (normalized) return normalized
+    }
+
+    const htmlMatch = text.match(/src=["'](data:image\/[a-zA-Z0-9.+-]+;base64,[^"']+)["']/i)
+    if (htmlMatch?.[1]) {
+        const normalized = normalizeDataImageUri(htmlMatch[1])
+        if (normalized) return normalized
+    }
+
+    const embeddedMatch = text.match(/(data:image\/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=\s]+)/i)
+    if (embeddedMatch?.[1]) {
+        const normalized = normalizeDataImageUri(embeddedMatch[1])
+        if (normalized) return normalized
+    }
+
+    return null
+}
+
+function extractDataImageFromUnknown(payload: unknown): string | null {
+    if (typeof payload === 'string') {
+        return extractDataImageFromText(payload)
+    }
+
+    if (Array.isArray(payload)) {
+        for (const item of payload) {
+            const found = extractDataImageFromUnknown(item)
+            if (found) return found
+        }
+        return null
+    }
+
+    if (!payload || typeof payload !== 'object') return null
+    const obj = payload as Record<string, unknown>
+
+    const directKeyCandidates = [
+        'image',
+        'imageData',
+        'b64_json',
+        'b64Json',
+        'url',
+        'content',
+        'text',
+    ]
+    for (const key of directKeyCandidates) {
+        if (!(key in obj)) continue
+        const found = extractDataImageFromUnknown(obj[key])
+        if (found) return found
+    }
+
+    for (const value of Object.values(obj)) {
+        const found = extractDataImageFromUnknown(value)
+        if (found) return found
+    }
+    return null
+}
+
 function toNumber(input: unknown): number | null {
     if (typeof input === 'number' && Number.isFinite(input)) return input
     if (typeof input === 'string' && input.trim()) {
@@ -1152,6 +1229,13 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
 
         const data = await response.json()
         const rawContent = data.choices?.[0]?.message?.content
+        const extractedFromRawContent = extractDataImageFromUnknown(rawContent)
+        if (extractedFromRawContent) {
+            return {
+                success: true,
+                imageData: extractedFromRawContent,
+            }
+        }
         const content = Array.isArray(rawContent)
             ? rawContent.map((item: { text?: string }) => item?.text || '').join('\n')
             : rawContent
@@ -1160,20 +1244,22 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
         // 如果使用的是支持图像生成的兼容接口，需要解析响应
         if (typeof content === 'string' && content) {
             // 检查是否是 base64 图片
-            if (content.startsWith('data:image')) {
+            const extractedFromContent = extractDataImageFromText(content)
+            if (extractedFromContent) {
                 return {
                     success: true,
-                    imageData: content,
+                    imageData: extractedFromContent,
                 }
             }
 
             // 尝试从 JSON 响应中提取图片
             try {
                 const parsed = JSON.parse(content)
-                if (parsed.image) {
+                const extractedFromParsed = extractDataImageFromUnknown(parsed)
+                if (extractedFromParsed) {
                     return {
                         success: true,
-                        imageData: parsed.image,
+                        imageData: extractedFromParsed,
                     }
                 }
             } catch {
