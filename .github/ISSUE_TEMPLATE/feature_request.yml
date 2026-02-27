@@ -1,0 +1,38 @@
+name: Feature Request
+description: Suggest an idea or improvement.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提交功能建议。请尽量描述业务目标和使用场景。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 背景/问题
+      description: 当前有什么痛点或限制？
+      placeholder: 例如：批量导出的 JSON 无法包含自定义字段。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案描述
+      description: 你期望新增/调整的行为是什么？
+      placeholder: 例如：在导出弹窗增加“附加元数据”开关。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案（可选）
+      description: 你尝试过哪些替代方案？
+      placeholder: 例如：目前只能手动后处理 JSON。
+  - type: textarea
+    id: impact
+    attributes:
+      label: 预期收益
+      description: 对用户或业务的价值。
+      placeholder: 例如：减少后处理时间，方便接入下游流水线。

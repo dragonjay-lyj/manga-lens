@@ -1,0 +1,58 @@
+name: Bug Report
+description: Report a reproducible bug.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你提交问题。请尽量提供可复现信息，便于快速定位。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 简要说明你遇到的问题。
+      placeholder: 例如：点击“阶段2：全部翻译”后页面报错 500。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序描述最小复现步骤。
+      placeholder: |
+        1. 打开 ...
+        2. 上传 ...
+        3. 点击 ...
+        4. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      placeholder: 例如：应返回翻译结果而不是报错。
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      placeholder: 例如：返回 500，控制台出现某某错误。
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 系统、浏览器、Node 版本等。
+      placeholder: Windows 11 + Chrome 124 + Node 20.17.0
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志 / 截图（可选）
+      description: 请粘贴关键报错信息或上传截图。
+      render: shell
