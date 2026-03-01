@@ -640,6 +640,18 @@ function normalizeDataImageUri(input: string): string | null {
     return `data:${mimeType};base64,${payload}`
 }
 
+function normalizeRemoteImageUrl(input: string): string | null {
+    const text = String(input || '').trim()
+    if (!text) return null
+    try {
+        const parsed = new URL(text)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+        return parsed.toString()
+    } catch {
+        return null
+    }
+}
+
 function extractDataImageFromText(raw: string): string | null {
     const text = String(raw || '').trim()
     if (!text) return null
@@ -663,6 +675,32 @@ function extractDataImageFromText(raw: string): string | null {
     if (embeddedMatch?.[1]) {
         const normalized = normalizeDataImageUri(embeddedMatch[1])
         if (normalized) return normalized
+    }
+
+    return null
+}
+
+function extractRemoteImageUrlFromText(raw: string): string | null {
+    const text = String(raw || '').trim()
+    if (!text) return null
+
+    const direct = normalizeRemoteImageUrl(text)
+    if (direct) return direct
+
+    const markdownMatch = text.match(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i)
+    if (markdownMatch?.[1]) {
+        const normalized = normalizeRemoteImageUrl(markdownMatch[1])
+        if (normalized) return normalized
+    }
+
+    const htmlMatch = text.match(/src=["'](https?:\/\/[^"']+)["']/i)
+    if (htmlMatch?.[1]) {
+        const normalized = normalizeRemoteImageUrl(htmlMatch[1])
+        if (normalized) return normalized
+    }
+
+    if (/^https?:\/\/\S+$/i.test(text)) {
+        return normalizeRemoteImageUrl(text)
     }
 
     return null
@@ -704,6 +742,130 @@ function extractDataImageFromUnknown(payload: unknown): string | null {
         if (found) return found
     }
     return null
+}
+
+function extractRemoteImageUrlFromUnknown(payload: unknown): string | null {
+    if (typeof payload === 'string') {
+        return extractRemoteImageUrlFromText(payload)
+    }
+
+    if (Array.isArray(payload)) {
+        for (const item of payload) {
+            const found = extractRemoteImageUrlFromUnknown(item)
+            if (found) return found
+        }
+        return null
+    }
+
+    if (!payload || typeof payload !== 'object') return null
+    const obj = payload as Record<string, unknown>
+
+    const directKeyCandidates = [
+        'image',
+        'imageData',
+        'url',
+        'uri',
+        'href',
+        'image_url',
+        'imageUrl',
+        'content',
+        'text',
+    ]
+
+    for (const key of directKeyCandidates) {
+        if (!(key in obj)) continue
+        const found = extractRemoteImageUrlFromUnknown(obj[key])
+        if (found) return found
+    }
+
+    for (const value of Object.values(obj)) {
+        const found = extractRemoteImageUrlFromUnknown(value)
+        if (found) return found
+    }
+
+    return null
+}
+
+function inferMimeTypeFromImageUrl(imageUrl: string): string | null {
+    try {
+        const pathname = new URL(imageUrl).pathname.toLowerCase()
+        if (pathname.endsWith('.png')) return 'image/png'
+        if (pathname.endsWith('.jpg') || pathname.endsWith('.jpeg')) return 'image/jpeg'
+        if (pathname.endsWith('.webp')) return 'image/webp'
+        if (pathname.endsWith('.gif')) return 'image/gif'
+        if (pathname.endsWith('.bmp')) return 'image/bmp'
+        if (pathname.endsWith('.avif')) return 'image/avif'
+        if (pathname.endsWith('.tif') || pathname.endsWith('.tiff')) return 'image/tiff'
+        return null
+    } catch {
+        return null
+    }
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    if (typeof Buffer !== 'undefined') {
+        return Buffer.from(buffer).toString('base64')
+    }
+
+    const bytes = new Uint8Array(buffer)
+    const chunkSize = 0x8000
+    let binary = ''
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize)
+        binary += String.fromCharCode(...chunk)
+    }
+    return btoa(binary)
+}
+
+async function downloadRemoteImageAsDataUri(imageUrl: string): Promise<string | null> {
+    try {
+        const response = await fetchWithTimeout(
+            imageUrl,
+            {
+                method: 'GET',
+            },
+            REQUEST_TIMEOUT_MS
+        )
+        if (!response.ok) return null
+
+        const contentTypeHeader = String(response.headers.get('content-type') || '')
+            .split(';')[0]
+            .trim()
+            .toLowerCase()
+        if (contentTypeHeader && !contentTypeHeader.startsWith('image/')) {
+            return null
+        }
+        const inferredMime = inferMimeTypeFromImageUrl(imageUrl)
+        const mimeType = contentTypeHeader.startsWith('image/') ? contentTypeHeader : inferredMime
+        if (!mimeType) return null
+
+        const payload = await response.arrayBuffer()
+        if (!payload.byteLength) return null
+        const base64 = arrayBufferToBase64(payload)
+        return `data:${mimeType};base64,${base64}`
+    } catch {
+        return null
+    }
+}
+
+async function resolveImageDataFromUnknown(payload: unknown): Promise<string | null> {
+    const embeddedDataImage = extractDataImageFromUnknown(payload)
+    if (embeddedDataImage) return embeddedDataImage
+
+    const remoteImageUrl = extractRemoteImageUrlFromUnknown(payload)
+    if (!remoteImageUrl) return null
+
+    const downloaded = await downloadRemoteImageAsDataUri(remoteImageUrl)
+    return downloaded
+}
+
+async function resolveImageDataFromTextPayload(rawText: string): Promise<string | null> {
+    const direct = await resolveImageDataFromUnknown(rawText)
+    if (direct) return direct
+
+    const parsed = parseJsonFromText(rawText)
+    if (!parsed) return null
+    return resolveImageDataFromUnknown(parsed)
 }
 
 function toNumber(input: unknown): number | null {
@@ -1199,12 +1361,36 @@ async function generateWithGemini(request: GenerateImageRequest): Promise<Genera
             }
         }
 
+        const extractedFromParts = await resolveImageDataFromUnknown(parts)
+        if (extractedFromParts) {
+            return {
+                success: true,
+                imageData: extractedFromParts,
+            }
+        }
+
+        const extractedFromPayload = await resolveImageDataFromUnknown(data)
+        if (extractedFromPayload) {
+            return {
+                success: true,
+                imageData: extractedFromPayload,
+            }
+        }
+
         // 如果没有图片，检查是否有文本响应
         const textPart = parts.find((part: { text?: string }) => part.text)
         if (textPart?.text) {
+            const extractedFromText = await resolveImageDataFromTextPayload(textPart.text)
+            if (extractedFromText) {
+                return {
+                    success: true,
+                    imageData: extractedFromText,
+                }
+            }
+            const remoteImageUrl = extractRemoteImageUrlFromText(textPart.text)
             return {
                 success: false,
-                error: `AI 返回文本而非图片（模型可能不支持图像输出，model=${model}）: ${truncate(textPart.text, 220)}`,
+                error: `AI 返回文本而非图片（模型可能不支持图像输出，model=${model}）: ${truncate(textPart.text, 220)}${remoteImageUrl ? `（检测到图片链接但下载失败: ${remoteImageUrl}）` : ''}`,
             }
         }
 
@@ -1270,7 +1456,7 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
 
         const data = await response.json()
         const rawContent = data.choices?.[0]?.message?.content
-        const extractedFromRawContent = extractDataImageFromUnknown(rawContent)
+        const extractedFromRawContent = await resolveImageDataFromUnknown(rawContent)
         if (extractedFromRawContent) {
             return {
                 success: true,
@@ -1285,7 +1471,7 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
         // 如果使用的是支持图像生成的兼容接口，需要解析响应
         if (typeof content === 'string' && content) {
             // 检查是否是 base64 图片
-            const extractedFromContent = extractDataImageFromText(content)
+            const extractedFromContent = await resolveImageDataFromTextPayload(content)
             if (extractedFromContent) {
                 return {
                     success: true,
@@ -1296,7 +1482,7 @@ async function generateWithOpenAI(request: GenerateImageRequest): Promise<Genera
             // 尝试从 JSON 响应中提取图片
             try {
                 const parsed = JSON.parse(content)
-                const extractedFromParsed = extractDataImageFromUnknown(parsed)
+                const extractedFromParsed = await resolveImageDataFromUnknown(parsed)
                 if (extractedFromParsed) {
                     return {
                         success: true,
