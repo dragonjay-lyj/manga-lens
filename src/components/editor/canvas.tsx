@@ -140,6 +140,32 @@ export function EditorCanvas() {
     const isComicModuleEnabled = settings.enableComicModule ?? true
     const isSelectionOcrEnabled = isComicModuleEnabled && (settings.enableSelectionOcr ?? true)
     const isPatchEditorEnabled = isComicModuleEnabled && (settings.enablePatchEditor ?? true)
+    const ocrEngine = settings.ocrEngine ?? "auto"
+    const aiVisionOcrUseCustomConfig = Boolean(settings.aiVisionOcrUseCustomConfig)
+    const forceLocalAiVisionOcr = ocrEngine === "ai_vision" && aiVisionOcrUseCustomConfig
+    const aiVisionOcrRuntimeConfig = useMemo(() => {
+        const provider = aiVisionOcrUseCustomConfig
+            ? (settings.aiVisionOcrProvider ?? "openai")
+            : settings.provider
+        return {
+            provider,
+            apiKey: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrApiKey || "") : settings.apiKey,
+            baseUrl: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrBaseUrl || "") : settings.baseUrl,
+            model: aiVisionOcrUseCustomConfig ? (settings.aiVisionOcrModel || "") : settings.model,
+            imageSize: settings.imageSize || "2K",
+        }
+    }, [
+        aiVisionOcrUseCustomConfig,
+        settings.aiVisionOcrApiKey,
+        settings.aiVisionOcrBaseUrl,
+        settings.aiVisionOcrModel,
+        settings.aiVisionOcrProvider,
+        settings.apiKey,
+        settings.baseUrl,
+        settings.imageSize,
+        settings.model,
+        settings.provider,
+    ])
 
     // 选区调整状态
     const [isResizing, setIsResizing] = useState(false)
@@ -884,6 +910,8 @@ export function EditorCanvas() {
             toast.error(locale === "zh" ? "图片尚未加载完成" : "Image is still loading")
             return
         }
+        const useServerDetectionPipeline = ocrEngine !== "ai_vision"
+        const strictServerDetectionEngine = ocrEngine !== "auto" && ocrEngine !== "ai_vision"
 
         const runServerDetect = async (imageData: string) => {
             const res = await fetch("/api/ai/detect-text", {
@@ -897,6 +925,7 @@ export function EditorCanvas() {
                     imageWidth: Math.round(selection.width),
                     imageHeight: Math.round(selection.height),
                     preferComicDetector: true,
+                    ocrEngine,
                 }),
             })
             if (!res.ok) {
@@ -912,22 +941,26 @@ export function EditorCanvas() {
             const patchData = cropSelection(image, selection, 10)
             let blocks: Array<{ sourceText?: string; translatedText?: string }> = []
 
-            if (settings.useServerApi) {
+            if (settings.useServerApi && !forceLocalAiVisionOcr) {
                 blocks = await runServerDetect(patchData)
             } else {
-                try {
-                    blocks = await runServerDetect(patchData)
-                } catch {
+                let shouldUseLocalAiVision = !useServerDetectionPipeline
+                if (useServerDetectionPipeline) {
+                    try {
+                        blocks = await runServerDetect(patchData)
+                    } catch (error) {
+                        if (strictServerDetectionEngine) {
+                            throw error
+                        }
+                        shouldUseLocalAiVision = true
+                    }
+                }
+
+                if (shouldUseLocalAiVision) {
                     // Fallback to user's own key if server detect is unavailable.
                     const localResult = await detectTextBlocks({
                         imageData: patchData,
-                        config: {
-                            provider: settings.provider,
-                            apiKey: settings.apiKey,
-                            baseUrl: settings.baseUrl,
-                            model: settings.model,
-                            imageSize: settings.imageSize || "2K",
-                        },
+                        config: aiVisionOcrRuntimeConfig,
                         targetLanguage: getTargetLanguageForDetection(),
                         sourceLanguageHint: getSourceLanguageHintForDetection(),
                         sourceLanguageAllowlist: settings.sourceLanguageAllowlist ?? [],
@@ -1022,17 +1055,15 @@ export function EditorCanvas() {
         getTargetLanguageForDetection,
         getSourceLanguageHintForDetection,
         locale,
+        ocrEngine,
         plainTextToRichHtml,
         selectionOcrMetaMap,
         setDetectedTextBlocks,
-        settings.apiKey,
-        settings.baseUrl,
         settings.defaultVerticalText,
-        settings.imageSize,
-        settings.model,
-        settings.provider,
         settings.sourceLanguageAllowlist,
         settings.useServerApi,
+        aiVisionOcrRuntimeConfig,
+        forceLocalAiVisionOcr,
     ])
 
     const selectionActionOverlays = useMemo(() => {
