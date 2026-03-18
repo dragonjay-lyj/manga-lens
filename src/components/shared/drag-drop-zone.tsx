@@ -196,7 +196,7 @@ export function DragDropZone({
 
             {/* 拖拽覆盖层 */}
             {isDragging && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center bg-primary/10 backdrop-blur-sm border-2 border-dashed border-primary rounded-lg transition-all">
+                <div className="absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10 backdrop-blur-sm transition-[background-color,border-color,opacity] duration-200">
                     <div className="text-center space-y-2">
                         <div className="w-16 h-16 mx-auto rounded-full bg-primary/20 flex items-center justify-center animate-pulse">
                             <Upload className="h-8 w-8 text-primary" />

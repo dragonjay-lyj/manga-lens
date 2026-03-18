@@ -61,7 +61,7 @@ export function ImagePreview({
                     <button
                         type="button"
                         className={cn(
-                            "relative w-full aspect-video rounded-lg overflow-hidden transition-all text-left",
+                            "relative aspect-video w-full overflow-hidden rounded-lg text-left transition-[border-color,box-shadow,transform] duration-200",
                             "border-2 hover:border-primary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                             isSelected
                                 ? "border-primary ring-2 ring-primary/20"

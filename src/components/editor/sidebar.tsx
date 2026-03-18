@@ -3450,7 +3450,7 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
                                     <div
                                         key={img.id}
                                         className={cn(
-                                            "relative aspect-square rounded-md overflow-hidden border-2 transition-all",
+                                            "relative aspect-square overflow-hidden rounded-md border-2 transition-[border-color,box-shadow] duration-200",
                                             currentImageId === img.id
                                                 ? "border-primary ring-2 ring-primary/30"
                                                 : "border-transparent hover:border-primary/50"
@@ -5708,4 +5708,3 @@ export function EditorSidebar({ className }: EditorSidebarProps = {}) {
         </>
     )
 }
-

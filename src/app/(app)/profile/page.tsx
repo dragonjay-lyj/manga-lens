@@ -305,7 +305,7 @@ export default function ProfilePage() {
                                         {weeklyTrend.map((item) => (
                                             <div
                                                 key={item.label}
-                                                className="flex-1 bg-primary/20 rounded-t transition-all"
+                                                className="flex-1 rounded-t bg-primary/20 transition-[height,background-color] duration-200"
                                                 style={{
                                                     height: `${Math.max(8, Math.round((item.count / trendMaxCount) * 96))}px`,
                                                 }}

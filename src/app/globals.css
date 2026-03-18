@@ -2,13 +2,13 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+@custom-variant dark (&:is([data-theme="dark"] *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-inter), system-ui, sans-serif;
-  --font-display: var(--font-plus-jakarta-sans), system-ui, sans-serif;
+  --font-sans: var(--font-noto-sans-jp), system-ui, sans-serif;
+  --font-display: var(--font-noto-serif-jp), serif;
   --font-mono: ui-monospace, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
@@ -48,91 +48,142 @@
   --radius-4xl: calc(var(--radius) + 16px);
 }
 
-/* ========================================
-   Light Theme (默认)
-   ======================================== */
-:root,
-[data-theme="light"] {
-  --radius: 0.625rem;
-  --background: oklch(0.98 0.005 270);
-  --foreground: oklch(0.15 0.02 270);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.02 270);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.02 270);
-  --primary: oklch(0.55 0.23 264);
-  --primary-foreground: oklch(0.98 0 0);
-  --secondary: oklch(0.96 0.01 270);
-  --secondary-foreground: oklch(0.25 0.02 270);
-  --muted: oklch(0.96 0.01 270);
-  --muted-foreground: oklch(0.5 0.02 270);
-  --accent: oklch(0.75 0.15 195);
-  --accent-foreground: oklch(0.15 0.02 270);
-  --destructive: oklch(0.6 0.24 25);
-  --border: oklch(0.92 0.01 270);
-  --input: oklch(0.92 0.01 270);
-  --ring: oklch(0.55 0.23 264);
-  --chart-1: oklch(0.55 0.23 264);
-  --chart-2: oklch(0.65 0.17 195);
-  --chart-3: oklch(0.6 0.2 145);
-  --chart-4: oklch(0.7 0.18 55);
-  --chart-5: oklch(0.65 0.22 340);
-  --sidebar: oklch(0.985 0.005 270);
-  --sidebar-foreground: oklch(0.15 0.02 270);
-  --sidebar-primary: oklch(0.55 0.23 264);
-  --sidebar-primary-foreground: oklch(0.98 0 0);
-  --sidebar-accent: oklch(0.96 0.01 270);
-  --sidebar-accent-foreground: oklch(0.25 0.02 270);
-  --sidebar-border: oklch(0.92 0.01 270);
-  --sidebar-ring: oklch(0.55 0.23 264);
+:root {
+  --radius: 0.75rem;
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4rem;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
+  --color-primary: #1e293b;
+  --color-secondary: #334155;
+  --color-cta: #22c55e;
+  --color-background: #0f172a;
+  --color-text: #f8fafc;
+  --background: #0f172a;
+  --foreground: #f8fafc;
+  --card: #162236;
+  --card-foreground: #f8fafc;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #22c55e;
+  --primary-foreground: #f8fafc;
+  --secondary: #334155;
+  --secondary-foreground: #f8fafc;
+  --muted: #182538;
+  --muted-foreground: #cbd5e1;
+  --accent: #1e293b;
+  --accent-foreground: #f8fafc;
+  --destructive: #ef4444;
+  --border: rgb(148 163 184 / 0.22);
+  --input: #334155;
+  --ring: #22c55e;
+  --chart-1: #22c55e;
+  --chart-2: #4ade80;
+  --chart-3: #64748b;
+  --chart-4: #f59e0b;
+  --chart-5: #38bdf8;
+  --sidebar: #121d2f;
+  --sidebar-foreground: #f8fafc;
+  --sidebar-primary: #22c55e;
+  --sidebar-primary-foreground: #f8fafc;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #f8fafc;
+  --sidebar-border: rgb(148 163 184 / 0.18);
+  --sidebar-ring: #22c55e;
+  color-scheme: dark;
 }
 
-/* ========================================
-   Dark Theme (夜间)
-   ======================================== */
-.dark,
-[data-theme="dark"] {
-  --background: oklch(0.12 0.02 270);
-  --foreground: oklch(0.95 0.01 270);
-  --card: oklch(0.16 0.02 270);
-  --card-foreground: oklch(0.95 0.01 270);
-  --popover: oklch(0.16 0.02 270);
-  --popover-foreground: oklch(0.95 0.01 270);
-  --primary: oklch(0.7 0.2 264);
-  --primary-foreground: oklch(0.12 0.02 270);
-  --secondary: oklch(0.22 0.02 270);
-  --secondary-foreground: oklch(0.95 0.01 270);
-  --muted: oklch(0.22 0.02 270);
-  --muted-foreground: oklch(0.65 0.02 270);
-  --accent: oklch(0.7 0.15 195);
-  --accent-foreground: oklch(0.12 0.02 270);
-  --destructive: oklch(0.65 0.22 25);
-  --border: oklch(0.28 0.02 270);
-  --input: oklch(0.22 0.02 270);
-  --ring: oklch(0.7 0.2 264);
-  --chart-1: oklch(0.65 0.22 264);
-  --chart-2: oklch(0.7 0.17 195);
-  --chart-3: oklch(0.65 0.2 145);
-  --chart-4: oklch(0.75 0.18 55);
-  --chart-5: oklch(0.7 0.22 340);
-  --sidebar: oklch(0.14 0.02 270);
-  --sidebar-foreground: oklch(0.95 0.01 270);
-  --sidebar-primary: oklch(0.7 0.2 264);
-  --sidebar-primary-foreground: oklch(0.12 0.02 270);
-  --sidebar-accent: oklch(0.22 0.02 270);
-  --sidebar-accent-foreground: oklch(0.95 0.01 270);
-  --sidebar-border: oklch(0.28 0.02 270);
-  --sidebar-ring: oklch(0.7 0.2 264);
+[data-theme="light"] {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #22c55e;
+  --primary-foreground: #ffffff;
+  --secondary: #e2e8f0;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #475569;
+  --accent: #1e293b;
+  --accent-foreground: #f8fafc;
+  --destructive: #dc2626;
+  --border: rgb(30 41 59 / 0.14);
+  --input: #e2e8f0;
+  --ring: #1e293b;
+  --chart-1: #16a34a;
+  --chart-2: #22c55e;
+  --chart-3: #334155;
+  --chart-4: #f59e0b;
+  --chart-5: #0ea5e9;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0f172a;
+  --sidebar-primary: #22c55e;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e2e8f0;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: rgb(30 41 59 / 0.14);
+  --sidebar-ring: #1e293b;
+  color-scheme: light;
+}
+
+html {
+  min-height: 100%;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: rgb(34 197 94 / 0.24);
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring/40;
+  }
+
+  html,
+  body {
+    min-height: 100%;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
     font-family: var(--font-sans);
+    background-image:
+      radial-gradient(circle at top left, rgb(34 197 94 / 0.16), transparent 26%),
+      linear-gradient(140deg, rgb(30 41 59 / 0.22), transparent 40%),
+      linear-gradient(180deg, var(--background), color-mix(in srgb, var(--background) 90%, black 10%));
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+
+  ::selection {
+    background: rgb(34 197 94 / 0.3);
+    color: var(--foreground);
+  }
+
+  button,
+  [role="button"],
+  a[href],
+  summary,
+  select,
+  input[type="radio"],
+  input[type="checkbox"],
+  input[type="range"] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  input:disabled,
+  textarea:disabled,
+  select:disabled {
+    cursor: not-allowed;
   }
 
   h1,
@@ -142,21 +193,32 @@
   h5,
   h6 {
     font-family: var(--font-display);
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  main[id],
+  section[id] {
+    scroll-margin-top: 7rem;
   }
 }
 
 .skip-link {
   position: fixed;
-  top: 0.5rem;
-  left: 0.5rem;
+  top: 0.75rem;
+  left: 0.75rem;
   z-index: 1000;
   transform: translateY(-200%);
-  border-radius: 0.5rem;
+  border-radius: 0.75rem;
   background: var(--primary);
   color: var(--primary-foreground);
-  padding: 0.5rem 0.75rem;
+  padding: 0.75rem 1rem;
   font-size: 0.875rem;
   font-weight: 600;
+  box-shadow: var(--shadow-lg);
   transition: transform 0.2s ease;
 }
 
@@ -164,29 +226,70 @@
   transform: translateY(0);
 }
 
-/* ========================================
-   Glassmorphism 效果
-   ======================================== */
+.surface-card {
+  background: linear-gradient(180deg, rgb(22 34 54 / 0.96), rgb(15 23 42 / 0.96));
+  border: 1px solid rgb(148 163 184 / 0.18);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(16px);
+}
+
+.surface-panel {
+  background: linear-gradient(180deg, rgb(22 34 54 / 0.9), rgb(15 23 42 / 0.86));
+  border: 1px solid rgb(148 163 184 / 0.16);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(14px);
+}
+
+[data-theme="light"] .surface-card,
+[data-theme="light"] .surface-panel {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(248 250 252 / 0.98));
+}
+
 .glass {
-  background: var(--card);
-  border: 1px solid var(--border);
+  background: rgb(15 23 42 / 0.78);
+  border: 1px solid rgb(148 163 184 / 0.16);
+  backdrop-filter: blur(14px);
 }
 
 .glass-card {
   background: var(--card);
   border: 1px solid var(--border);
-  box-shadow: 0 4px 18px oklch(0 0 0 / 0.08);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(12px);
 }
 
-/* ========================================
-   渐变与动画
-   ======================================== */
+.kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgb(148 163 184 / 0.22);
+  background: rgb(15 23 42 / 0.58);
+  padding: 0.5rem 0.9rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+[data-theme="light"] .kicker {
+  background: rgb(255 255 255 / 0.82);
+}
+
+.pattern-grid {
+  background-image:
+    linear-gradient(rgb(148 163 184 / 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(148 163 184 / 0.08) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: linear-gradient(180deg, rgb(255 255 255 / 0.72), transparent 88%);
+}
+
 .gradient-primary {
-  background: linear-gradient(135deg, var(--primary), var(--accent));
+  background: linear-gradient(135deg, var(--color-primary), var(--color-cta));
 }
 
 .gradient-text {
-  background: linear-gradient(135deg, var(--primary), var(--accent));
+  background: linear-gradient(135deg, var(--foreground), var(--primary));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -201,7 +304,6 @@
 }
 
 @keyframes float {
-
   0%,
   100% {
     transform: translateY(0);
@@ -212,25 +314,6 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-
-  .animate-pulse-slow,
-  .animate-float {
-    animation: none !important;
-  }
-}
-
-/* ========================================
-   滚动条样式
-   ======================================== */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -250,27 +333,45 @@
   background: var(--primary);
 }
 
-/* ========================================
-   选区样式
-   ======================================== */
 .selection-box {
   border: 2px dashed var(--primary);
-  background: oklch(from var(--primary) l c h / 0.1);
+  background: rgb(34 197 94 / 0.1);
   cursor: move;
 }
 
 .selection-box:hover {
-  border-color: var(--accent);
-  background: oklch(from var(--accent) l c h / 0.15);
+  border-color: var(--primary);
+  background: rgb(34 197 94 / 0.16);
 }
 
 .selection-handle {
+  position: absolute;
   width: 10px;
   height: 10px;
   background: var(--primary);
   border: 2px solid var(--background);
   border-radius: 50%;
-  position: absolute;
   cursor: pointer;
 }
 
+@media (max-width: 640px) {
+  .pattern-grid {
+    background-size: 28px 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .animate-pulse-slow,
+  .animate-float {
+    animation: none !important;
+  }
+}

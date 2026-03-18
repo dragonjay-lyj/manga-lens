@@ -38,7 +38,7 @@ export default function SettingsPage() {
         siteName: "MangaLens",
         siteUrl: "https://manga-lens.com",
         defaultLocale: "zh-CN",
-        defaultTheme: "light",
+        defaultTheme: "dark",
         enableRegistration: true,
         enableGoogleAuth: true,
         maintenanceMode: false,
@@ -209,11 +209,8 @@ export default function SettingsPage() {
                                         <SelectValue />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        <SelectItem value="light">Light</SelectItem>
                                         <SelectItem value="dark">Dark</SelectItem>
-                                        <SelectItem value="ocean">Ocean</SelectItem>
-                                        <SelectItem value="rose">Rose</SelectItem>
-                                        <SelectItem value="forest">Forest</SelectItem>
+                                        <SelectItem value="light">Light</SelectItem>
                                     </SelectContent>
                                 </Select>
                             </div>

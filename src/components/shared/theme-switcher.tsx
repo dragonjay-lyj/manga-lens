@@ -1,65 +1,61 @@
 "use client"
 
 import { useTheme } from "next-themes"
+import { Check, MoonStar, SunMedium } from "lucide-react"
 import { IconButton } from "@/components/ui/icon-button"
 import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Sun, Moon, Waves, Flower2, TreePine } from "lucide-react"
 
 const themes = [
-    { value: "light", label: "Light", labelZh: "浅色", icon: Sun },
-    { value: "dark", label: "Dark", labelZh: "深色", icon: Moon },
-    { value: "ocean", label: "Ocean", labelZh: "海洋", icon: Waves },
-    { value: "rose", label: "Rose", labelZh: "玫瑰", icon: Flower2 },
-    { value: "forest", label: "Forest", labelZh: "森林", icon: TreePine },
+  { value: "dark", label: "Dark", labelZh: "深色", icon: MoonStar },
+  { value: "light", label: "Light", labelZh: "浅色", icon: SunMedium },
 ]
 
 interface ThemeSwitcherProps {
-    locale?: "en" | "zh"
+  locale?: "en" | "zh"
 }
 
 export function ThemeSwitcher({ locale = "zh" }: ThemeSwitcherProps) {
-    const { theme, setTheme } = useTheme()
+  const { theme, setTheme } = useTheme()
+  const activeTheme = theme === "light" ? "light" : "dark"
+  const currentTheme = themes.find((item) => item.value === activeTheme) ?? themes[0]
+  const CurrentIcon = currentTheme.icon
 
-    const currentTheme = themes.find(t => t.value === theme) || themes[1]
-    const CurrentIcon = currentTheme.icon
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <IconButton
+          variant="ghost"
+          className="h-11 w-11 border border-border/70 bg-card/60 hover:bg-accent"
+          ariaLabel={locale === "zh" ? "切换主题" : "Toggle theme"}
+        >
+          <CurrentIcon className="h-4 w-4" />
+          <span className="sr-only">
+            {locale === "zh" ? "切换主题" : "Toggle theme"}
+          </span>
+        </IconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-40">
+        {themes.map((item) => {
+          const Icon = item.icon
 
-    return (
-        <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-                <IconButton
-                    variant="ghost"
-                    className="h-11 w-11"
-                    ariaLabel={locale === "zh" ? "切换主题" : "Toggle theme"}
-                >
-                    <CurrentIcon className="h-4 w-4" />
-                    <span className="sr-only">
-                        {locale === "zh" ? "切换主题" : "Toggle theme"}
-                    </span>
-                </IconButton>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="glass-card">
-                {themes.map((t) => {
-                    const Icon = t.icon
-                    return (
-                        <DropdownMenuItem
-                            key={t.value}
-                            onClick={() => setTheme(t.value)}
-                            className="cursor-pointer gap-2"
-                        >
-                            <Icon className="h-4 w-4" />
-                            <span>{locale === "zh" ? t.labelZh : t.label}</span>
-                            {theme === t.value && (
-                                <span className="ml-auto text-primary">✓</span>
-                            )}
-                        </DropdownMenuItem>
-                    )
-                })}
-            </DropdownMenuContent>
-        </DropdownMenu>
-    )
+          return (
+            <DropdownMenuItem
+              key={item.value}
+              onClick={() => setTheme(item.value)}
+              className="gap-3"
+            >
+              <Icon className="h-4 w-4" />
+              <span>{locale === "zh" ? item.labelZh : item.label}</span>
+              {activeTheme === item.value ? <Check className="ml-auto h-4 w-4 text-primary" /> : null}
+            </DropdownMenuItem>
+          )
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }

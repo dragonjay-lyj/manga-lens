@@ -303,15 +303,15 @@ export default function EditorPage() {
                     accept={EDITOR_IMAGE_ACCEPT}
                     className="h-screen"
                 >
-                    <div className="h-full flex flex-col bg-background overflow-hidden">
+                    <div className="flex h-full flex-col overflow-hidden bg-background">
                         {/* 顶部导航 */}
-                        <header className="h-12 border-b border-border glass flex items-center justify-between px-4 gap-2">
+                        <header className="flex h-12 items-center justify-between gap-2 border-b border-border/70 bg-card/70 px-4 backdrop-blur-xl">
                             <div className="flex items-center gap-4">
                                 <Link href="/" className="flex items-center gap-2">
-                                    <div className="w-7 h-7 rounded-md gradient-primary flex items-center justify-center">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary shadow-[var(--shadow-md)]">
                                         <Sparkles className="h-4 w-4 text-white" />
                                     </div>
-                                    <span className="font-display font-bold text-lg gradient-text">
+                                    <span className="font-display text-lg font-bold">
                                         MangaLens
                                     </span>
                                 </Link>
@@ -612,5 +612,4 @@ export default function EditorPage() {
         </ErrorBoundary>
     )
 }
-
 

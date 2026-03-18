@@ -85,7 +85,7 @@ export default function AdminLayout({
     // 加载中
     if (!isLoaded || isAdmin === null) {
         return (
-            <div className="h-screen flex items-center justify-center">
+            <div className="flex h-screen items-center justify-center bg-background">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
             </div>
         )
@@ -94,7 +94,7 @@ export default function AdminLayout({
     // 非管理员访问被拒绝
     if (!isAdmin) {
         return (
-            <div className="h-screen flex flex-col items-center justify-center gap-4">
+            <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background text-center">
                 <ShieldAlert className="h-16 w-16 text-destructive" />
                 <h1 className="text-2xl font-bold">访问被拒绝</h1>
                 <p className="text-muted-foreground">您没有管理员权限访问此页面</p>
@@ -108,25 +108,27 @@ export default function AdminLayout({
     )
 
     return (
-        <div className="min-h-screen bg-background relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-                <div className="absolute top-20 -left-40 w-80 h-80 bg-primary/10 rounded-full blur-3xl" />
-                <div className="absolute bottom-20 -right-40 w-80 h-80 bg-accent/10 rounded-full blur-3xl" />
+        <div className="relative min-h-screen overflow-x-clip bg-background text-foreground">
+            <div className="pointer-events-none absolute inset-0">
+                <div className="pattern-grid absolute inset-0 opacity-35" />
+                <div className="absolute top-20 -left-40 h-80 w-80 rounded-full bg-primary/10 blur-3xl" />
+                <div className="absolute bottom-20 -right-40 h-80 w-80 rounded-[2rem] bg-accent/20 blur-3xl" />
             </div>
 
             <div className="h-screen p-3 sm:p-4">
-                <div className="h-full flex rounded-2xl border border-border/60 bg-card/80 backdrop-blur-xl overflow-hidden">
+                <div className="surface-card h-full overflow-hidden rounded-[1.75rem]">
+                    <div className="flex h-full">
                     {/* 侧边栏 */}
                     <aside
                         className={cn(
-                            "border-r border-border glass-card transition-all duration-300 flex flex-col",
+                            "flex flex-col border-r border-border/70 bg-card/80 backdrop-blur-xl transition-[width,border-color,background-color] duration-300",
                             collapsed ? "w-16" : "w-64"
                         )}
                     >
-                        <div className="h-14 border-b border-border flex items-center justify-between px-4 flex-shrink-0">
+                        <div className="flex h-14 flex-shrink-0 items-center justify-between border-b border-border/70 px-4">
                             {!collapsed && (
                                 <Link href="/admin" className="flex items-center gap-2">
-                                    <div className="w-7 h-7 rounded-md gradient-primary flex items-center justify-center">
+                                    <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary shadow-[var(--shadow-md)]">
                                         <Sparkles className="h-4 w-4 text-white" />
                                     </div>
                                     <span className="font-display font-bold">Admin</span>
@@ -134,6 +136,7 @@ export default function AdminLayout({
                             )}
                             <IconButton
                                 variant="ghost"
+                                className="border border-border/70 bg-card/60 hover:bg-accent"
                                 ariaLabel={collapsed ? "展开侧边栏" : "收起侧边栏"}
                                 onClick={() => setCollapsed(!collapsed)}
                             >
@@ -153,10 +156,10 @@ export default function AdminLayout({
                                             key={item.href}
                                             href={item.href}
                                             className={cn(
-                                                "flex items-center gap-3 px-3 py-2 rounded-lg transition-colors",
+                                                "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-[background-color,color,box-shadow] duration-200",
                                                 isActive
-                                                    ? "bg-primary text-primary-foreground"
-                                                    : "hover:bg-muted"
+                                                    ? "bg-primary text-primary-foreground shadow-[var(--shadow-md)]"
+                                                    : "text-muted-foreground hover:bg-accent/80 hover:text-accent-foreground"
                                             )}
                                         >
                                             <item.icon className="h-5 w-5 flex-shrink-0" />
@@ -167,11 +170,11 @@ export default function AdminLayout({
                             </nav>
                         </ScrollArea>
 
-                        <div className="border-t border-border p-4 flex-shrink-0">
+                        <div className="border-t border-border/70 p-4 flex-shrink-0">
                             <Link
                                 href="/"
                                 className={cn(
-                                    "flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted transition-colors",
+                                    "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground transition-[background-color,color] duration-200 hover:bg-accent/80 hover:text-accent-foreground",
                                     collapsed ? "justify-center" : ""
                                 )}
                             >
@@ -182,8 +185,8 @@ export default function AdminLayout({
                     </aside>
 
                     {/* 主内容 */}
-                    <div className="flex-1 flex flex-col overflow-hidden">
-                        <header className="h-14 border-b border-border glass flex items-center justify-between px-6 flex-shrink-0">
+                    <div className="flex flex-1 flex-col overflow-hidden">
+                        <header className="flex h-14 flex-shrink-0 items-center justify-between border-b border-border/70 bg-card/60 px-6 backdrop-blur-xl">
                             <h1 className="font-display font-semibold text-lg">
                                 {currentNav?.label || "Admin"}
                             </h1>
@@ -192,10 +195,11 @@ export default function AdminLayout({
                             </div>
                         </header>
 
-                        <main id="main-content" className="flex-1 overflow-auto p-6">
+                        <main id="main-content" className="flex-1 overflow-auto p-4 sm:p-6">
                             {children}
                         </main>
                     </div>
+                </div>
                 </div>
             </div>
         </div>

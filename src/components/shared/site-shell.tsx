@@ -8,117 +8,127 @@ import { IconButton } from "@/components/ui/icon-button"
 import { ThemeSwitcher } from "@/components/shared/theme-switcher"
 import { LanguageSwitcher } from "@/components/shared/language-switcher"
 import {
-    Sheet,
-    SheetClose,
-    SheetContent,
-    SheetDescription,
-    SheetHeader,
-    SheetTitle,
-    SheetTrigger,
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
 } from "@/components/ui/sheet"
 import { useEditorStore } from "@/lib/stores/editor-store"
 import { cn } from "@/lib/utils"
 
 const navLinks = [
-    { href: "/docs", zh: "文档", en: "Docs", prefetch: false },
-    { href: "/api-docs", zh: "API 文档", en: "API Docs", prefetch: false },
-    { href: "/projects", zh: "项目", en: "Projects", prefetch: false },
-    { href: "/profile", zh: "个人中心", en: "Profile", prefetch: false },
-    { href: "/admin", zh: "管理后台", en: "Admin", prefetch: false },
+  { href: "/docs", zh: "文档", en: "Docs", prefetch: false },
+  { href: "/api-docs", zh: "API 文档", en: "API Docs", prefetch: false },
+  { href: "/projects", zh: "项目", en: "Projects", prefetch: false },
+  { href: "/profile", zh: "个人中心", en: "Profile", prefetch: false },
+  { href: "/admin", zh: "管理后台", en: "Admin", prefetch: false },
 ]
 
 type SiteShellProps = {
-    children: ReactNode
-    contentClassName?: string
+  children: ReactNode
+  contentClassName?: string
 }
 
 export function SiteShell({ children, contentClassName }: SiteShellProps) {
-    const { locale, setLocale } = useEditorStore()
+  const { locale, setLocale } = useEditorStore()
 
-    return (
-        <div className="relative min-h-screen overflow-hidden bg-background">
-            <div className="pointer-events-none absolute left-0 top-0 hidden h-full w-full md:block">
-                <div className="absolute -left-40 top-20 h-80 w-80 rounded-full bg-primary/10 blur-3xl" />
-                <div className="absolute -right-40 bottom-20 h-80 w-80 rounded-full bg-accent/10 blur-3xl" />
+  return (
+    <div className="relative min-h-screen overflow-x-clip bg-background text-foreground">
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="pattern-grid absolute inset-0 opacity-40" />
+        <div className="absolute -left-24 top-28 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
+        <div className="absolute -right-28 top-44 h-80 w-80 rounded-[2rem] bg-accent/25 blur-3xl" />
+      </div>
+
+      <header className="sticky top-4 z-50 px-4">
+        <nav className="surface-card mx-auto flex max-w-7xl items-center justify-between gap-3 rounded-[1.25rem] px-4 py-3">
+          <Link href="/" className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl gradient-primary shadow-[var(--shadow-md)]">
+              <Sparkles className="h-5 w-5 text-white" />
+            </div>
+            <div className="space-y-0.5">
+              <span className="font-display text-lg font-semibold tracking-tight">MangaLens</span>
+              <p className="hidden text-xs text-muted-foreground md:block">
+                {locale === "zh" ? "漫画翻译与局部重绘工作台" : "Manga translation and repaint workspace"}
+              </p>
+            </div>
+          </Link>
+
+          <div className="hidden items-center gap-1 lg:flex">
+            {navLinks.map((item) => (
+              <Button key={item.href} variant="ghost" size="sm" className="h-10 px-4 text-sm" asChild>
+                <Link href={item.href} prefetch={item.prefetch}>
+                  {locale === "zh" ? item.zh : item.en}
+                </Link>
+              </Button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Sheet>
+              <SheetTrigger asChild>
+                <IconButton
+                  variant="ghost"
+                  className="border border-border/70 bg-card/60 hover:bg-accent lg:hidden"
+                  ariaLabel={locale === "zh" ? "打开导航菜单" : "Open navigation menu"}
+                >
+                  <Menu className="h-4 w-4" />
+                </IconButton>
+              </SheetTrigger>
+              <SheetContent side="right" className="w-[88vw] p-0 sm:max-w-sm">
+                <SheetHeader className="border-b border-border/70">
+                  <SheetTitle>{locale === "zh" ? "页面导航" : "Navigation"}</SheetTitle>
+                  <SheetDescription>
+                    {locale === "zh" ? "快速访问网站主要页面" : "Quick access to the main pages"}
+                  </SheetDescription>
+                </SheetHeader>
+                <div className="space-y-3 p-4">
+                  <div className="flex items-center gap-2">
+                    <LanguageSwitcher locale={locale} onChange={setLocale} />
+                    <ThemeSwitcher locale={locale} />
+                  </div>
+                  {navLinks.map((item) => (
+                    <SheetClose asChild key={item.href}>
+                      <Link
+                        href={item.href}
+                        prefetch={item.prefetch}
+                        className="flex h-12 items-center rounded-xl border border-border/70 bg-card/70 px-4 text-sm font-medium transition-[background-color,border-color,color] duration-200 hover:bg-accent hover:text-accent-foreground"
+                      >
+                        {locale === "zh" ? item.zh : item.en}
+                      </Link>
+                    </SheetClose>
+                  ))}
+                </div>
+              </SheetContent>
+            </Sheet>
+
+            <div className="hidden sm:block">
+              <LanguageSwitcher locale={locale} onChange={setLocale} />
+            </div>
+            <div className="hidden sm:block">
+              <ThemeSwitcher locale={locale} />
             </div>
 
-            <header className="fixed left-4 right-4 top-6 z-50">
-                <nav className="mx-auto flex max-w-7xl items-center justify-between gap-2 rounded-2xl border border-border/70 bg-card/95 px-4 py-3.5 shadow-sm backdrop-blur">
-                    <Link href="/" className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary">
-                            <Sparkles className="h-5 w-5 text-white" />
-                        </div>
-                        <span className="hidden font-display text-lg font-bold sm:block">MangaLens</span>
-                    </Link>
+            <Button variant="outline" size="sm" className="hidden sm:inline-flex" asChild>
+              <Link href="/sign-in" prefetch={false}>
+                {locale === "zh" ? "登录" : "Sign In"}
+              </Link>
+            </Button>
+            <Button size="sm" className="shadow-[var(--shadow-md)]" asChild>
+              <Link href="/editor" prefetch={false}>
+                {locale === "zh" ? "进入编辑器" : "Open Editor"}
+              </Link>
+            </Button>
+          </div>
+        </nav>
+      </header>
 
-                    <div className="hidden items-center gap-1 py-1 lg:flex">
-                        {navLinks.map((item) => (
-                            <Button key={item.href} variant="ghost" size="sm" className="h-9 px-3" asChild>
-                                <Link href={item.href} prefetch={item.prefetch}>
-                                    {locale === "zh" ? item.zh : item.en}
-                                </Link>
-                            </Button>
-                        ))}
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        <Sheet>
-                            <SheetTrigger asChild>
-                                <IconButton
-                                    variant="ghost"
-                                    className="lg:hidden"
-                                    ariaLabel={locale === "zh" ? "打开导航菜单" : "Open navigation menu"}
-                                >
-                                    <Menu className="h-4 w-4" />
-                                </IconButton>
-                            </SheetTrigger>
-                            <SheetContent side="right" className="w-[85vw] p-0 sm:max-w-sm">
-                                <SheetHeader className="border-b border-border">
-                                    <SheetTitle>{locale === "zh" ? "页面导航" : "Navigation"}</SheetTitle>
-                                    <SheetDescription>
-                                        {locale === "zh" ? "快速访问网站主要页面" : "Quick access to main pages"}
-                                    </SheetDescription>
-                                </SheetHeader>
-                                <div className="space-y-2 p-4">
-                                    {navLinks.map((item) => (
-                                        <SheetClose asChild key={item.href}>
-                                            <Link
-                                                href={item.href}
-                                                prefetch={item.prefetch}
-                                                className="flex h-11 items-center rounded-md border border-border px-3 text-sm transition-colors hover:bg-muted"
-                                            >
-                                                {locale === "zh" ? item.zh : item.en}
-                                            </Link>
-                                        </SheetClose>
-                                    ))}
-                                </div>
-                            </SheetContent>
-                        </Sheet>
-
-                        <div className="hidden sm:block">
-                            <ThemeSwitcher locale={locale} />
-                        </div>
-                        <div className="hidden sm:block">
-                            <LanguageSwitcher locale={locale} onChange={setLocale} />
-                        </div>
-
-                        <Button variant="outline" size="sm" asChild>
-                            <Link href="/sign-in" prefetch={false}>
-                                {locale === "zh" ? "登录" : "Sign In"}
-                            </Link>
-                        </Button>
-                        <Button size="sm" asChild>
-                            <Link href="/editor" prefetch={false}>
-                                {locale === "zh" ? "进入编辑器" : "Open Editor"}
-                            </Link>
-                        </Button>
-                    </div>
-                </nav>
-            </header>
-
-            <main id="main-content" className="px-4 pb-10 pt-32">
-                <div className={cn("mx-auto w-full", contentClassName)}>{children}</div>
-            </main>
-        </div>
-    )
+      <main id="main-content" className="px-4 pb-12 pt-14 sm:pt-16">
+        <div className={cn("mx-auto w-full", contentClassName)}>{children}</div>
+      </main>
+    </div>
+  )
 }
