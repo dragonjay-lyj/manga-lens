@@ -12,6 +12,11 @@ const rootDir = process.cwd()
 const openNextOutputDir = path.join(rootDir, ".open-next")
 const splitServerFunctions = ["admin", "editor", "ai", "account"]
 const runtimePatchedFiles = [".open-next/server-functions/default/handler.mjs"]
+const unsupportedRuntimePatterns = [
+  /cacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/cache\.cjs\1\)/,
+  /composableCacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/composable-cache\.cjs\1\)/,
+  /function setNextjsServerWorkingDirectory\(\)\s*\{[^{}]*process\.chdir\([^)]*\);?\s*\}/,
+]
 
 function getServerFunctionRelativePath(functionName, fileName) {
   return `.open-next/server-functions/${functionName}/${fileName}`
@@ -60,8 +65,14 @@ async function patchOpenNextRuntimeFile(relativePath) {
     await writeFile(fullPath, patchedCode)
   }
 
-  if (/(?:__require\d*|require)\.resolve\(/.test(patchedCode)) {
-    throw new Error(`Unsupported require.resolve remained after patching: ${relativePath}`)
+  const remainingUnsupportedPattern = unsupportedRuntimePatterns.find((pattern) =>
+    pattern.test(patchedCode),
+  )
+
+  if (remainingUnsupportedPattern) {
+    throw new Error(
+      `Unsupported runtime pattern remained after patching: ${relativePath} :: ${remainingUnsupportedPattern}`,
+    )
   }
 }
 
