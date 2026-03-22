@@ -51,11 +51,12 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 - The deploy script also forces `OPEN_NEXT_DEPLOY=true` so Wrangler does not auto-delegate custom worker uploads back into `opennextjs-cloudflare deploy`.
 - Child workers are still bundled by Wrangler during deploy. Extra runtime dependencies such as `critters` and `@opentelemetry/api` are installed in the app so that bundle step can resolve them.
 - The child-worker Wrangler configs also alias `@opentelemetry/api` to `next/dist/compiled/@opentelemetry/api`, matching OpenNext's own patching strategy for traced Next internals.
+- OpenNext only emits a bundled `handler.mjs` for the default server worker. The deploy script now generates equivalent bundled `handler.mjs` files for `admin`, `editor`, `ai`, and `account` before uploading them.
 
 ## Operational Notes
 
 - The deploy script uploads child workers first, then the gateway worker.
 - Service bindings are declared in the checked-in `wrangler*.jsonc` files.
-- Non-default server workers boot from `.open-next/server-functions/*/index.mjs`; only the default worker gets a bundled `handler.mjs`.
+- All server workers now boot from bundled `.open-next/server-functions/*/handler.mjs` files.
 - Child workers keep `WORKER_SELF_REFERENCE` pointed at the gateway worker so internal OpenNext callbacks still re-enter through middleware.
 - This setup is intended for the Workers free plan where a single OpenNext worker is too large.

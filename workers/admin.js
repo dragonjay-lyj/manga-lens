@@ -1,5 +1,5 @@
 import { runWithCloudflareRequestContext } from "../.open-next/cloudflare/init.js"
-import { handler } from "../.open-next/server-functions/admin/index.mjs"
+import { handler } from "../.open-next/server-functions/admin/handler.mjs"
 
 const adminWorker = {
   async fetch(request, env, ctx) {

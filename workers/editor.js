@@ -1,5 +1,5 @@
 import { runWithCloudflareRequestContext } from "../.open-next/cloudflare/init.js"
-import { handler } from "../.open-next/server-functions/editor/index.mjs"
+import { handler } from "../.open-next/server-functions/editor/handler.mjs"
 
 const editorWorker = {
   async fetch(request, env, ctx) {

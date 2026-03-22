@@ -1,5 +1,5 @@
 import { runWithCloudflareRequestContext } from "../.open-next/cloudflare/init.js"
-import { handler } from "../.open-next/server-functions/ai/index.mjs"
+import { handler } from "../.open-next/server-functions/ai/handler.mjs"
 
 const aiWorker = {
   async fetch(request, env, ctx) {
