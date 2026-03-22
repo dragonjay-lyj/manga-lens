@@ -50,6 +50,7 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 - Workers Builds injects CI variables that force `wrangler deploy` to target the connected Worker name. The checked-in deploy script clears that override for child workers before publishing them.
 - The deploy script also forces `OPEN_NEXT_DEPLOY=true` so Wrangler does not auto-delegate custom worker uploads back into `opennextjs-cloudflare deploy`.
 - Child workers are still bundled by Wrangler during deploy. Extra runtime dependencies such as `critters` and `@opentelemetry/api` are installed in the app so that bundle step can resolve them.
+- The child-worker Wrangler configs also alias `@opentelemetry/api` to `next/dist/compiled/@opentelemetry/api`, matching OpenNext's own patching strategy for traced Next internals.
 
 ## Operational Notes
 
