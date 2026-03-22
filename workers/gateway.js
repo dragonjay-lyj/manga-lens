@@ -1,6 +1,5 @@
 import { handleCdnCgiImageRequest, handleImageRequest } from "../.open-next/cloudflare/images.js"
 import { runWithCloudflareRequestContext } from "../.open-next/cloudflare/init.js"
-import { maybeGetSkewProtectionResponse } from "../.open-next/cloudflare/skew-protection.js"
 import { handler as middlewareHandler } from "../.open-next/middleware/handler.mjs"
 
 function matchesPrefix(pathname, prefix) {
@@ -44,14 +43,9 @@ async function dispatchToBoundWorker(request, env) {
   return worker.fetch(request)
 }
 
-export default {
+const gatewayWorker = {
   async fetch(request, env, ctx) {
     return runWithCloudflareRequestContext(request, env, ctx, async () => {
-      const skewResponse = maybeGetSkewProtectionResponse(request)
-      if (skewResponse) {
-        return skewResponse
-      }
-
       const url = new URL(request.url)
 
       if (url.pathname.startsWith("/cdn-cgi/image/")) {
@@ -74,3 +68,5 @@ export default {
     })
   },
 }
+
+export default gatewayWorker

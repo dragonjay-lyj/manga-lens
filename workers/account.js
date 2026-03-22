@@ -1,10 +1,12 @@
 import { runWithCloudflareRequestContext } from "../.open-next/cloudflare/init.js"
-import { handler } from "../.open-next/server-functions/account/handler.mjs"
+import { handler } from "../.open-next/server-functions/account/index.mjs"
 
-export default {
+const accountWorker = {
   async fetch(request, env, ctx) {
     return runWithCloudflareRequestContext(request, env, ctx, async () => {
       return handler(request, env, ctx, request.signal)
     })
   },
 }
+
+export default accountWorker

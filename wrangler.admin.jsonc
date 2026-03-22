@@ -10,7 +10,7 @@
   "services": [
     {
       "binding": "WORKER_SELF_REFERENCE",
-      "service": "manga-lens-admin"
+      "service": "manga-lens"
     }
   ]
 }

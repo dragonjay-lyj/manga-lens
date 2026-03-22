@@ -5,17 +5,52 @@ import path from "node:path"
 const rootDir = process.cwd()
 
 const requiredOutputs = [
-  ".open-next/middleware/handler.mjs",
-  ".open-next/server-functions/default/handler.mjs",
-  ".open-next/server-functions/admin/handler.mjs",
-  ".open-next/server-functions/editor/handler.mjs",
-  ".open-next/server-functions/ai/handler.mjs",
-  ".open-next/server-functions/account/handler.mjs",
+  {
+    label: "middleware worker",
+    paths: [".open-next/middleware/handler.mjs"],
+  },
+  {
+    label: "default server worker",
+    paths: [".open-next/server-functions/default/handler.mjs"],
+  },
+  {
+    label: "admin server worker",
+    paths: [
+      ".open-next/server-functions/admin/index.mjs",
+      ".open-next/server-functions/admin/handler.mjs",
+    ],
+  },
+  {
+    label: "editor server worker",
+    paths: [
+      ".open-next/server-functions/editor/index.mjs",
+      ".open-next/server-functions/editor/handler.mjs",
+    ],
+  },
+  {
+    label: "ai server worker",
+    paths: [
+      ".open-next/server-functions/ai/index.mjs",
+      ".open-next/server-functions/ai/handler.mjs",
+    ],
+  },
+  {
+    label: "account server worker",
+    paths: [
+      ".open-next/server-functions/account/index.mjs",
+      ".open-next/server-functions/account/handler.mjs",
+    ],
+  },
 ]
 
-for (const relativePath of requiredOutputs) {
-  if (!existsSync(path.join(rootDir, relativePath))) {
-    console.error(`Missing build output: ${relativePath}`)
+for (const output of requiredOutputs) {
+  const hasExpectedOutput = output.paths.some((relativePath) =>
+    existsSync(path.join(rootDir, relativePath)),
+  )
+
+  if (!hasExpectedOutput) {
+    console.error(`Missing build output for ${output.label}.`)
+    console.error(`Checked: ${output.paths.join(", ")}`)
     console.error("Run `npm run build` before deploying the free-plan multi-worker setup.")
     process.exit(1)
   }

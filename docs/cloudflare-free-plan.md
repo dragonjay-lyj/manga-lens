@@ -52,4 +52,6 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 
 - The deploy script uploads child workers first, then the gateway worker.
 - Service bindings are declared in the checked-in `wrangler*.jsonc` files.
+- Non-default server workers boot from `.open-next/server-functions/*/index.mjs`; only the default worker gets a bundled `handler.mjs`.
+- Child workers keep `WORKER_SELF_REFERENCE` pointed at the gateway worker so internal OpenNext callbacks still re-enter through middleware.
 - This setup is intended for the Workers free plan where a single OpenNext worker is too large.
