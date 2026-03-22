@@ -1,8 +1,38 @@
 import { existsSync } from "node:fs"
+import { readFile, writeFile } from "node:fs/promises"
 import { spawn } from "node:child_process"
 import path from "node:path"
 
 const rootDir = process.cwd()
+const runtimePatchedFiles = [
+  ".open-next/server-functions/default/handler.mjs",
+  ".open-next/server-functions/default/index.mjs",
+  ".open-next/server-functions/admin/index.mjs",
+  ".open-next/server-functions/editor/index.mjs",
+  ".open-next/server-functions/ai/index.mjs",
+  ".open-next/server-functions/account/index.mjs",
+]
+
+async function patchOpenNextRuntimeFile(relativePath) {
+  const fullPath = path.join(rootDir, relativePath)
+
+  if (!existsSync(fullPath)) {
+    return
+  }
+
+  const currentCode = await readFile(fullPath, "utf8")
+  const patchedCode = currentCode
+    .replace(/__require\d?\(/g, "require(")
+    .replace(/__require\d?\./g, "require.")
+
+  if (patchedCode !== currentCode) {
+    await writeFile(fullPath, patchedCode)
+  }
+}
+
+for (const relativePath of runtimePatchedFiles) {
+  await patchOpenNextRuntimeFile(relativePath)
+}
 
 const requiredOutputs = [
   {
