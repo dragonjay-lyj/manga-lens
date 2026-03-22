@@ -1,15 +1,13 @@
 import { existsSync } from "node:fs"
-import { readFile, writeFile } from "node:fs/promises"
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { spawn } from "node:child_process"
 import path from "node:path"
-import { build } from "esbuild"
-import { needsExperimentalReact } from "../../node_modules/@opennextjs/cloudflare/dist/cli/build/utils/needs-experimental-react.js"
-import { shimRequireHook } from "../../node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/require-hook.js"
-import { shimReact } from "../../node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/shim-react.js"
-import { setWranglerExternal } from "../../node_modules/@opennextjs/cloudflare/dist/cli/build/patches/plugins/wrangler-external.js"
+import { getNextVersion } from "../../node_modules/@opennextjs/aws/dist/build/helper.js"
+import { bundleServer } from "../../node_modules/@opennextjs/cloudflare/dist/cli/build/bundle-server.js"
 
 const rootDir = process.cwd()
 const openNextOutputDir = path.join(rootDir, ".open-next")
+const splitWorkerBundleDir = path.join(openNextOutputDir, ".split-worker-bundles")
 const splitServerFunctions = ["admin", "editor", "ai", "account"]
 const runtimePatchedFiles = [".open-next/server-functions/default/handler.mjs"]
 const unsupportedRuntimePatterns = [
@@ -17,19 +15,31 @@ const unsupportedRuntimePatterns = [
   /composableCacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/composable-cache\.cjs\1\)/,
   /function setNextjsServerWorkingDirectory\(\)\s*\{[^{}]*process\.chdir\([^)]*\);?\s*\}/,
 ]
+const nextVersion = getNextVersion(rootDir)
+const bundleServerConfig = {
+  cloudflare: {
+    useWorkerdCondition: true,
+  },
+}
 
 function getServerFunctionRelativePath(functionName, fileName) {
   return `.open-next/server-functions/${functionName}/${fileName}`
 }
 
-async function readNextStandaloneConfig(functionName) {
-  const requiredServerFilesPath = path.join(
-    rootDir,
-    getServerFunctionRelativePath(functionName, ".next/required-server-files.json"),
-  )
+function getServerFunctionDirectory(functionName) {
+  return path.join(rootDir, ".open-next/server-functions", functionName)
+}
 
-  const requiredServerFiles = JSON.parse(await readFile(requiredServerFilesPath, "utf8"))
-  return requiredServerFiles.config
+function createSplitBundleBuildOptions(outputDir) {
+  return {
+    appBuildOutputPath: rootDir,
+    appPath: rootDir,
+    config: bundleServerConfig,
+    debug: false,
+    monorepoRoot: rootDir,
+    nextVersion,
+    outputDir,
+  }
 }
 
 async function patchOpenNextRuntimeFile(relativePath) {
@@ -77,59 +87,30 @@ async function patchOpenNextRuntimeFile(relativePath) {
 }
 
 async function bundleSplitWorkerHandler(functionName) {
-  const inputRelativePath = getServerFunctionRelativePath(functionName, "index.mjs")
   const outputRelativePath = getServerFunctionRelativePath(functionName, "handler.mjs")
-  const nextConfig = await readNextStandaloneConfig(functionName)
+  const sourceDir = getServerFunctionDirectory(functionName)
+  const tempOutputDir = path.join(splitWorkerBundleDir, functionName)
+  const tempDefaultDir = path.join(tempOutputDir, "server-functions/default")
 
-  await build({
-    entryPoints: [path.join(rootDir, inputRelativePath)],
-    bundle: true,
-    outfile: path.join(rootDir, outputRelativePath),
-    format: "esm",
-    target: "esnext",
-    platform: "node",
-    conditions: ["workerd"],
-    minifyWhitespace: true,
-    minifyIdentifiers: false,
-    minifySyntax: true,
-    legalComments: "none",
-    external: ["./middleware/handler.mjs"],
-    plugins: [
-      shimRequireHook({ outputDir: openNextOutputDir }),
-      shimReact({ outputDir: openNextOutputDir }),
-      setWranglerExternal(),
-    ],
-    alias: {
-      "next/dist/compiled/node-fetch": path.join(
-        openNextOutputDir,
-        "cloudflare-templates/shims/fetch.js",
-      ),
-      "next/dist/compiled/ws": path.join(openNextOutputDir, "cloudflare-templates/shims/empty.js"),
-      "next/dist/compiled/@ampproject/toolbox-optimizer": path.join(
-        openNextOutputDir,
-        "cloudflare-templates/shims/throw.js",
-      ),
-      "next/dist/compiled/edge-runtime": path.join(
-        openNextOutputDir,
-        "cloudflare-templates/shims/empty.js",
-      ),
-      "@next/env": path.join(openNextOutputDir, "cloudflare-templates/shims/env.js"),
-    },
-    define: {
-      "process.env.__NEXT_PRIVATE_STANDALONE_CONFIG": JSON.stringify(JSON.stringify(nextConfig)),
-      __dirname: '""',
-      __non_webpack_require__: "require",
-      "process.env.NEXT_RUNTIME": '"nodejs"',
-      "process.env.NODE_ENV": '"production"',
-      "process.env.__NEXT_EXPERIMENTAL_REACT": `${needsExperimentalReact(nextConfig)}`,
-      "process.env.__NEXT_TRUST_HOST_HEADER": "true",
-    },
-    banner: {
-      js: 'import {setInterval, clearInterval, setTimeout, clearTimeout} from "node:timers"',
-    },
-  })
+  await rm(tempOutputDir, { recursive: true, force: true })
 
-  await patchOpenNextRuntimeFile(outputRelativePath)
+  try {
+    await mkdir(path.join(tempOutputDir, "server-functions"), { recursive: true })
+    await cp(sourceDir, tempDefaultDir, { recursive: true })
+
+    await bundleServer(createSplitBundleBuildOptions(tempOutputDir), { minify: true })
+
+    const bundledHandlerPath = path.join(tempDefaultDir, "handler.mjs")
+
+    if (!existsSync(bundledHandlerPath)) {
+      throw new Error(`OpenNext did not emit a bundled handler for ${functionName}.`)
+    }
+
+    await copyFile(bundledHandlerPath, path.join(rootDir, outputRelativePath))
+    await patchOpenNextRuntimeFile(outputRelativePath)
+  } finally {
+    await rm(tempOutputDir, { recursive: true, force: true })
+  }
 }
 
 for (const relativePath of runtimePatchedFiles) {
@@ -176,7 +157,9 @@ for (const output of requiredBuildOutputs) {
   }
 }
 
-await Promise.all(splitServerFunctions.map((functionName) => bundleSplitWorkerHandler(functionName)))
+for (const functionName of splitServerFunctions) {
+  await bundleSplitWorkerHandler(functionName)
+}
 
 for (const functionName of splitServerFunctions) {
   const handlerRelativePath = getServerFunctionRelativePath(functionName, "handler.mjs")
