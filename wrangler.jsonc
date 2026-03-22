@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "manga-lens",
-  "main": ".open-next/worker.js",
+  "main": "workers/gateway.js",
   "compatibility_date": "2026-03-22",
   "compatibility_flags": [
     "nodejs_compat",
@@ -15,6 +15,26 @@
     {
       "binding": "WORKER_SELF_REFERENCE",
       "service": "manga-lens"
+    },
+    {
+      "binding": "DEFAULT_WORKER",
+      "service": "manga-lens-default"
+    },
+    {
+      "binding": "ADMIN_WORKER",
+      "service": "manga-lens-admin"
+    },
+    {
+      "binding": "EDITOR_WORKER",
+      "service": "manga-lens-editor"
+    },
+    {
+      "binding": "AI_WORKER",
+      "service": "manga-lens-ai"
+    },
+    {
+      "binding": "ACCOUNT_WORKER",
+      "service": "manga-lens-account"
     }
   ]
 }

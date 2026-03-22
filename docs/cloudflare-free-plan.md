@@ -1,0 +1,55 @@
+# Cloudflare Free Plan Deployment
+
+This repository includes a multi-worker deployment layout for staying under the Cloudflare Workers free-plan size limit.
+
+## Commands
+
+- Build command: `npm run build`
+- Deploy command: `npm run upload:free`
+
+For a one-shot local deployment, use:
+
+- `npm run deploy:free`
+
+## Workers
+
+The free-plan layout deploys these workers:
+
+- `manga-lens`
+- `manga-lens-default`
+- `manga-lens-admin`
+- `manga-lens-editor`
+- `manga-lens-ai`
+- `manga-lens-account`
+
+The gateway worker is `manga-lens`. It runs middleware, serves assets and routes requests to the bound workers.
+
+## Required Secrets And Vars
+
+Every worker that executes server code needs the same runtime secrets and variables that the single-worker setup used before.
+
+At minimum, configure the following for all server workers:
+
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `CLERK_SECRET_KEY`
+- `CLERK_WEBHOOK_SECRET`
+- `NEXT_PUBLIC_CLERK_SIGN_IN_URL`
+- `NEXT_PUBLIC_CLERK_SIGN_UP_URL`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `NEXT_PUBLIC_SITE_URL`
+
+If you use site-level AI, OCR or payment providers, copy those variables too.
+
+## Cloudflare Dashboard Notes
+
+- The project deploy command must not stay as `npx wrangler deploy`.
+- Set it to `npm run upload:free`.
+- The build command should stay `npm run build`.
+
+## Operational Notes
+
+- The deploy script uploads child workers first, then the gateway worker.
+- Service bindings are declared in the checked-in `wrangler*.jsonc` files.
+- This setup is intended for the Workers free plan where a single OpenNext worker is too large.
