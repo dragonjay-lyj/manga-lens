@@ -7,7 +7,7 @@ const isProtectedRoute = createRouteMatcher([
   "/profile(.*)",
 ])
 
-// Next.js 16 Proxy runs on the Edge Runtime by default.
+// Cloudflare's OpenNext adapter does not support Next.js 16's Node-based proxy.ts yet.
 export default clerkMiddleware(async (auth, req) => {
   if (isProtectedRoute(req)) {
     await auth.protect()
