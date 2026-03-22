@@ -39,12 +39,12 @@ async function patchOpenNextRuntimeFile(relativePath) {
     .replace(/__require\d?\(/g, "require(")
     .replace(/__require\d?\./g, "require.")
     .replace(
-      /(var|let|const) cacheHandlerPath = (?:__require\d?|require)\.resolve\((['"])\.\/cache\.cjs\2\);/g,
-      '$1 cacheHandlerPath = "";',
+      /cacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/cache\.cjs\1\)/g,
+      'cacheHandlerPath=""',
     )
     .replace(
-      /(var|let|const) composableCacheHandlerPath = (?:__require\d?|require)\.resolve\((['"])\.\/composable-cache\.cjs\2\);/g,
-      '$1 composableCacheHandlerPath = "";',
+      /composableCacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/composable-cache\.cjs\1\)/g,
+      'composableCacheHandlerPath=""',
     )
     .replace(/eval\("require"\)/g, "require")
     .replace(
@@ -52,12 +52,16 @@ async function patchOpenNextRuntimeFile(relativePath) {
       'require("next/dist/compiled/@opentelemetry/api")',
     )
     .replace(
-      /function setNextjsServerWorkingDirectory\(\)\s*\{\s*process\.chdir\(__dirname\);?\s*\}/g,
+      /function setNextjsServerWorkingDirectory\(\)\s*\{[^{}]*process\.chdir\([^)]*\);?\s*\}/g,
       "function setNextjsServerWorkingDirectory() {}",
     )
 
   if (patchedCode !== currentCode) {
     await writeFile(fullPath, patchedCode)
+  }
+
+  if (/(?:__require\d*|require)\.resolve\(/.test(patchedCode)) {
+    throw new Error(`Unsupported require.resolve remained after patching: ${relativePath}`)
   }
 }
 
