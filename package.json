@@ -37,10 +37,12 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^6.37.3",
+    "@opentelemetry/api": "^1.9.0",
     "@supabase/supabase-js": "^2.95.3",
     "ag-psd": "^30.1.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "critters": "^0.0.25",
     "docx": "^9.5.2",
     "file-saver": "^2.0.5",
     "jspdf": "^4.2.0",
