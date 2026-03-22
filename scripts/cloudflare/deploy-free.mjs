@@ -74,6 +74,7 @@ const ciOverrideEnvKeys = [
 
 for (const config of configs) {
   const childEnv = { ...process.env }
+  childEnv.OPEN_NEXT_DEPLOY = "true"
 
   if (ciLockedConfigs.has(config)) {
     for (const key of ciOverrideEnvKeys) {

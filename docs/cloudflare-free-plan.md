@@ -48,11 +48,13 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 - Set it to `npm run upload:free`.
 - The build command should stay `npm run build`.
 - Workers Builds injects CI variables that force `wrangler deploy` to target the connected Worker name. The checked-in deploy script clears that override for child workers before publishing them.
+- The deploy script also forces `OPEN_NEXT_DEPLOY=true` so Wrangler does not auto-delegate custom worker uploads back into `opennextjs-cloudflare deploy`.
 
 ## Operational Notes
 
 - The deploy script uploads child workers first, then the gateway worker.
 - Service bindings are declared in the checked-in `wrangler*.jsonc` files.
+- The wrangler configs use `no_bundle` because `.open-next/server-functions/*` are already generated artifacts and should not be re-bundled by Wrangler.
 - Non-default server workers boot from `.open-next/server-functions/*/index.mjs`; only the default worker gets a bundled `handler.mjs`.
 - Child workers keep `WORKER_SELF_REFERENCE` pointed at the gateway worker so internal OpenNext callbacks still re-enter through middleware.
 - This setup is intended for the Workers free plan where a single OpenNext worker is too large.
