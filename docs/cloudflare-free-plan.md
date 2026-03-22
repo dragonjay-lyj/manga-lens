@@ -47,6 +47,7 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 - The project deploy command must not stay as `npx wrangler deploy`.
 - Set it to `npm run upload:free`.
 - The build command should stay `npm run build`.
+- Workers Builds injects CI variables that force `wrangler deploy` to target the connected Worker name. The checked-in deploy script clears that override for child workers before publishing them.
 
 ## Operational Notes
 

@@ -66,11 +66,25 @@ const configs = [
 ]
 
 const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx"
+const ciLockedConfigs = new Set(configs.filter((config) => config !== "wrangler.jsonc"))
+const ciOverrideEnvKeys = [
+  "WRANGLER_CI_MATCH_TAG",
+  "WRANGLER_CI_OVERRIDE_NAME",
+]
 
 for (const config of configs) {
+  const childEnv = { ...process.env }
+
+  if (ciLockedConfigs.has(config)) {
+    for (const key of ciOverrideEnvKeys) {
+      delete childEnv[key]
+    }
+  }
+
   await new Promise((resolve, reject) => {
     const child = spawn(npxCommand, ["wrangler", "deploy", "--config", config], {
       cwd: rootDir,
+      env: childEnv,
       stdio: "inherit",
       shell: false,
     })
