@@ -25,10 +25,6 @@
       "service": "manga-lens-admin"
     },
     {
-      "binding": "EDITOR_WORKER",
-      "service": "manga-lens-editor"
-    },
-    {
       "binding": "AI_WORKER",
       "service": "manga-lens-ai"
     },

@@ -8,7 +8,7 @@ import { bundleServer } from "../../node_modules/@opennextjs/cloudflare/dist/cli
 const rootDir = process.cwd()
 const openNextOutputDir = path.join(rootDir, ".open-next")
 const splitWorkerBundleDir = path.join(openNextOutputDir, ".split-worker-bundles")
-const splitServerFunctions = ["admin", "editor", "ai", "account"]
+const splitServerFunctions = ["admin", "ai", "account"]
 const runtimePatchedFiles = [".open-next/server-functions/default/handler.mjs"]
 const unsupportedRuntimePatterns = [
   /cacheHandlerPath\s*=\s*(?:__require\d*|require)\.resolve\((['"])\.\/cache\.cjs\1\)/,
@@ -131,10 +131,6 @@ const requiredBuildOutputs = [
     paths: [getServerFunctionRelativePath("admin", "index.mjs")],
   },
   {
-    label: "editor server worker",
-    paths: [getServerFunctionRelativePath("editor", "index.mjs")],
-  },
-  {
     label: "ai server worker",
     paths: [getServerFunctionRelativePath("ai", "index.mjs")],
   },
@@ -174,7 +170,6 @@ for (const functionName of splitServerFunctions) {
 const configs = [
   "wrangler.default.jsonc",
   "wrangler.admin.jsonc",
-  "wrangler.editor.jsonc",
   "wrangler.ai.jsonc",
   "wrangler.account.jsonc",
   "wrangler.jsonc",

@@ -11,10 +11,6 @@ function selectBinding(pathname) {
     return "AI_WORKER"
   }
 
-  if (matchesPrefix(pathname, "/editor")) {
-    return "EDITOR_WORKER"
-  }
-
   if (matchesPrefix(pathname, "/admin") || matchesPrefix(pathname, "/api/admin")) {
     return "ADMIN_WORKER"
   }

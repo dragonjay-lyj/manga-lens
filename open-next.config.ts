@@ -2,7 +2,7 @@ import { defineCloudflareConfig } from "@opennextjs/cloudflare"
 
 const baseConfig = defineCloudflareConfig({})
 
-export default {
+const openNextConfig = {
   ...baseConfig,
   default: {
     ...baseConfig.default,
@@ -26,11 +26,6 @@ export default {
         "app/api/admin/users/route",
       ],
       patterns: ["admin", "admin/*", "api/admin/*"],
-    },
-    editor: {
-      minify: true,
-      routes: ["app/(app)/editor/page"],
-      patterns: ["editor", "editor/*"],
     },
     ai: {
       minify: true,
@@ -78,3 +73,5 @@ export default {
     },
   },
 }
+
+export default openNextConfig

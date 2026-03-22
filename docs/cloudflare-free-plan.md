@@ -18,7 +18,6 @@ The free-plan layout deploys these workers:
 - `manga-lens`
 - `manga-lens-default`
 - `manga-lens-admin`
-- `manga-lens-editor`
 - `manga-lens-ai`
 - `manga-lens-account`
 
@@ -51,7 +50,8 @@ If you use site-level AI, OCR or payment providers, copy those variables too.
 - The deploy script also forces `OPEN_NEXT_DEPLOY=true` so Wrangler does not auto-delegate custom worker uploads back into `opennextjs-cloudflare deploy`.
 - Child workers are still bundled by Wrangler during deploy. Extra runtime dependencies such as `critters` and `@opentelemetry/api` are installed in the app so that bundle step can resolve them.
 - The child-worker Wrangler configs also alias `@opentelemetry/api` to `next/dist/compiled/@opentelemetry/api`, matching OpenNext's own patching strategy for traced Next internals.
-- OpenNext only emits a bundled `handler.mjs` for the default server worker. The deploy script now reuses OpenNext's own `bundleServer` pipeline to generate equivalent bundled `handler.mjs` files for `admin`, `editor`, `ai`, and `account` before uploading them.
+- OpenNext only emits a bundled `handler.mjs` for the default server worker. The deploy script now reuses OpenNext's own `bundleServer` pipeline to generate equivalent bundled `handler.mjs` files for `admin`, `ai`, and `account` before uploading them.
+- `/editor` stays on the default worker path because it is a prerendered static route. Keeping it out of the split server-worker list avoids shipping the editor's large client dependency graph inside a dedicated free-plan worker.
 
 ## Operational Notes
 
