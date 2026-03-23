@@ -3,6 +3,10 @@ import type { ClerkMiddlewareOptions } from "@clerk/nextjs/server"
 type ClerkAuthRoute = "sign-in" | "sign-up"
 type SearchParamValue = string | string[] | undefined
 type SearchParamRecord = Record<string, SearchParamValue>
+type RequestContext = {
+  origin?: string
+  host?: string
+}
 type ClerkProviderOptions = {
   signInUrl?: string
   signUpUrl?: string
@@ -17,8 +21,9 @@ type ClerkProviderOptions = {
 
 const DEFAULT_SITE_URL = "http://localhost:3000"
 const DEFAULT_EDITOR_PATH = "/editor"
+const CLERK_API_VERSION = "2025-11-10"
 
-const trimToUndefined = (value?: string) => {
+const trimToUndefined = (value?: string | null) => {
   const normalized = value?.trim()
   return normalized ? normalized : undefined
 }
@@ -54,6 +59,13 @@ const signUpFallbackRedirectUrl =
   DEFAULT_EDITOR_PATH
 const allowedRedirectOrigins = parseOrigins(process.env.NEXT_PUBLIC_CLERK_ALLOWED_REDIRECT_ORIGINS)
 
+let clerkEnvironmentCache:
+  | {
+      expiresAt: number
+      value: { signInUrl?: string; signUpUrl?: string }
+    }
+  | undefined
+
 const getAuthRouteUrl = (route: ClerkAuthRoute) => (route === "sign-in" ? signInUrl : signUpUrl)
 
 const getFallbackRedirectPath = (route: ClerkAuthRoute) =>
@@ -78,6 +90,115 @@ const appendSearchParams = (url: URL, searchParams: SearchParamRecord) => {
   }
 }
 
+const getRequestContextFromUrl = (value: string | URL): RequestContext => {
+  const url = new URL(value.toString())
+
+  return {
+    origin: url.origin,
+    host: url.host,
+  }
+}
+
+const decodePublishableKey = (publishableKey?: string) => {
+  const encodedFrontendApi = publishableKey?.split("_")[2]
+
+  if (!encodedFrontendApi) {
+    return undefined
+  }
+
+  try {
+    const decodedValue = atob(encodedFrontendApi)
+    return decodedValue.endsWith("$") ? decodedValue.slice(0, -1) : decodedValue
+  } catch {
+    return undefined
+  }
+}
+
+const getClerkEnvironmentEndpoint = () => {
+  const frontendApi = decodePublishableKey(trimToUndefined(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY))
+  return frontendApi ? `https://${frontendApi}/v1/environment?__clerk_api_version=${CLERK_API_VERSION}` : undefined
+}
+
+async function getClerkEnvironmentConfig() {
+  if (clerkEnvironmentCache && Date.now() < clerkEnvironmentCache.expiresAt) {
+    return clerkEnvironmentCache.value
+  }
+
+  const endpoint = getClerkEnvironmentEndpoint()
+
+  if (!endpoint) {
+    return undefined
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      next: { revalidate: 300 },
+    })
+
+    if (!response.ok) {
+      return undefined
+    }
+
+    const payload = await response.json()
+    const value = {
+      signInUrl: trimToUndefined(payload.display_config?.sign_in_url),
+      signUpUrl: trimToUndefined(payload.display_config?.sign_up_url),
+    }
+
+    clerkEnvironmentCache = {
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      value,
+    }
+
+    return value
+  } catch {
+    return undefined
+  }
+}
+
+async function resolveClerkRuntimeConfig(requestContext?: RequestContext) {
+  const props: ClerkProviderOptions = {
+    signInUrl,
+    signUpUrl,
+    signInForceRedirectUrl,
+    signUpForceRedirectUrl,
+    signInFallbackRedirectUrl,
+    signUpFallbackRedirectUrl,
+  }
+
+  if (allowedRedirectOrigins.length > 0) {
+    props.allowedRedirectOrigins = allowedRedirectOrigins
+  }
+
+  if (isSatellite && domain) {
+    props.isSatellite = true
+    props.domain = domain
+    return props
+  }
+
+  if (!requestContext?.origin || !requestContext.host) {
+    return props
+  }
+
+  const environmentConfig = await getClerkEnvironmentConfig()
+  const primarySignInUrl = environmentConfig?.signInUrl
+  const primarySignUpUrl = environmentConfig?.signUpUrl
+
+  if (!primarySignInUrl || !isHttpUrl(primarySignInUrl)) {
+    return props
+  }
+
+  props.signInUrl = primarySignInUrl
+  props.signUpUrl = primarySignUpUrl ?? props.signUpUrl
+
+  if (new URL(primarySignInUrl).origin !== requestContext.origin) {
+    props.isSatellite = true
+    props.domain = requestContext.host
+  }
+
+  return props
+}
+
 export function getClerkProviderProps(): ClerkProviderOptions {
   const props: ClerkProviderOptions = {
     signInUrl,
@@ -100,15 +221,20 @@ export function getClerkProviderProps(): ClerkProviderOptions {
   return props
 }
 
-export function getClerkMiddlewareOptions(): ClerkMiddlewareOptions {
+export async function getClerkProviderPropsForRequest(requestContext: RequestContext) {
+  return resolveClerkRuntimeConfig(requestContext)
+}
+
+export async function getClerkMiddlewareOptions(requestContext: RequestContext): Promise<ClerkMiddlewareOptions> {
+  const resolvedConfig = await resolveClerkRuntimeConfig(requestContext)
   const options: ClerkMiddlewareOptions = {
-    signInUrl,
-    signUpUrl,
+    signInUrl: resolvedConfig.signInUrl,
+    signUpUrl: resolvedConfig.signUpUrl,
   }
 
-  if (isSatellite && domain) {
+  if (resolvedConfig.isSatellite && resolvedConfig.domain) {
     options.isSatellite = true
-    options.domain = domain
+    options.domain = resolvedConfig.domain
   }
 
   return options
@@ -143,6 +269,51 @@ export function getPrimaryAuthRedirectUrl(route: ClerkAuthRoute, searchParams: S
   }
 
   return authUrl.toString()
+}
+
+export async function getPrimaryAuthRedirectUrlForRequest(
+  route: ClerkAuthRoute,
+  searchParams: SearchParamRecord,
+  requestContext: RequestContext,
+) {
+  const resolvedConfig = await resolveClerkRuntimeConfig(requestContext)
+  const authRouteUrl = route === "sign-in" ? resolvedConfig.signInUrl : resolvedConfig.signUpUrl
+
+  if (!resolvedConfig.isSatellite || !resolvedConfig.domain || !authRouteUrl || !isHttpUrl(authRouteUrl)) {
+    return null
+  }
+
+  const requestOrigin = requestContext.origin ?? new URL(siteUrl).origin
+  const authUrl = new URL(authRouteUrl)
+
+  if (authUrl.origin === requestOrigin) {
+    return null
+  }
+
+  appendSearchParams(authUrl, searchParams)
+
+  if (!authUrl.searchParams.has("redirect_url")) {
+    authUrl.searchParams.set("redirect_url", toAbsoluteUrl(getFallbackRedirectPath(route)))
+  }
+
+  return authUrl.toString()
+}
+
+export function getRequestContextFromHeaders(headers: Headers): RequestContext {
+  const forwardedProtocol = trimToUndefined(headers.get("x-forwarded-proto"))
+  const forwardedHost = trimToUndefined(headers.get("x-forwarded-host"))
+  const host = forwardedHost ?? trimToUndefined(headers.get("host"))
+
+  if (!host) {
+    return {}
+  }
+
+  const protocol = forwardedProtocol ?? (host.includes("localhost") ? "http" : "https")
+  return getRequestContextFromUrl(`${protocol}://${host}`)
+}
+
+export function getRequestContextFromRequestUrl(value: string | URL) {
+  return getRequestContextFromUrl(value)
 }
 
 function buildAuthRouteHref(route: ClerkAuthRoute, returnBackUrl: string) {
