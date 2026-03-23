@@ -191,11 +191,6 @@ async function resolveClerkRuntimeConfig(requestContext?: RequestContext) {
   props.signInUrl = primarySignInUrl
   props.signUpUrl = primarySignUpUrl ?? props.signUpUrl
 
-  if (new URL(primarySignInUrl).origin !== requestContext.origin) {
-    props.isSatellite = true
-    props.domain = requestContext.host
-  }
-
   return props
 }
 
@@ -279,7 +274,7 @@ export async function getPrimaryAuthRedirectUrlForRequest(
   const resolvedConfig = await resolveClerkRuntimeConfig(requestContext)
   const authRouteUrl = route === "sign-in" ? resolvedConfig.signInUrl : resolvedConfig.signUpUrl
 
-  if (!resolvedConfig.isSatellite || !resolvedConfig.domain || !authRouteUrl || !isHttpUrl(authRouteUrl)) {
+  if (!authRouteUrl || !isHttpUrl(authRouteUrl)) {
     return null
   }
 
