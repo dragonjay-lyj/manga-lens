@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button"
 import { IconButton } from "@/components/ui/icon-button"
 import { ThemeSwitcher } from "@/components/shared/theme-switcher"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { getSignInHref } from "@/lib/auth/clerk-config"
 import {
     LayoutDashboard,
     Users,
@@ -47,7 +46,6 @@ export default function AdminLayout({
     const router = useRouter()
     const [collapsed, setCollapsed] = useState(false)
     const [isAdmin, setIsAdmin] = useState<boolean | null>(null)
-    const signInHref = getSignInHref("/admin")
 
     // 验证管理员权限
     useEffect(() => {
@@ -78,14 +76,9 @@ export default function AdminLayout({
         checkAdminStatus()
     }, [isLoaded, userId, user])
 
-    useEffect(() => {
-        if (isLoaded && !userId) {
-            window.location.assign(signInHref)
-        }
-    }, [isLoaded, userId, signInHref])
-
     // 未登录时重定向
     if (isLoaded && !userId) {
+        router.push("/sign-in")
         return null
     }
 

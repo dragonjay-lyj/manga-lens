@@ -1,24 +1,6 @@
 import { SignIn } from "@clerk/nextjs"
-import { headers } from "next/headers"
-import { redirect } from "next/navigation"
-import { getPrimaryAuthRedirectUrlForRequest, getRequestContextFromHeaders } from "@/lib/auth/clerk-config"
 
-type SignInPageProps = {
-  searchParams: Promise<Record<string, string | string[] | undefined>>
-}
-
-export default async function SignInPage({ searchParams }: SignInPageProps) {
-  const headerStore = await headers()
-  const primarySignInUrl = await getPrimaryAuthRedirectUrlForRequest(
-    "sign-in",
-    await searchParams,
-    getRequestContextFromHeaders(headerStore),
-  )
-
-  if (primarySignInUrl) {
-    redirect(primarySignInUrl)
-  }
-
+export default function SignInPage() {
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
       <div aria-hidden className="pointer-events-none absolute inset-0">

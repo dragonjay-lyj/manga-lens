@@ -17,7 +17,6 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet"
 import { useEditorStore } from "@/lib/stores/editor-store"
-import { getSignInHref } from "@/lib/auth/clerk-config"
 import { cn } from "@/lib/utils"
 
 const navLinks = [
@@ -35,7 +34,6 @@ type SiteShellProps = {
 
 export function SiteShell({ children, contentClassName }: SiteShellProps) {
   const { locale, setLocale } = useEditorStore()
-  const signInHref = getSignInHref()
 
   return (
     <div className="relative min-h-screen overflow-x-clip bg-background text-foreground">
@@ -115,7 +113,7 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
             </div>
 
             <Button variant="outline" size="sm" className="hidden sm:inline-flex" asChild>
-              <Link href={signInHref} prefetch={false}>
+              <Link href="/sign-in" prefetch={false}>
                 {locale === "zh" ? "登录" : "Sign In"}
               </Link>
             </Button>

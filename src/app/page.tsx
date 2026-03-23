@@ -31,7 +31,6 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet"
 import { useEditorStore } from "@/lib/stores/editor-store"
-import { getSignInHref } from "@/lib/auth/clerk-config"
 import type { Locale } from "@/lib/i18n"
 
 type NavLinkItem = {
@@ -338,7 +337,6 @@ const homeContent: Record<Locale, HomeContent> = {
 export default function HomePage() {
   const locale = useEditorStore((state) => state.locale)
   const setLocale = useEditorStore((state) => state.setLocale)
-  const signInHref = getSignInHref()
   const t = homeContent[locale]
   const heroDifferentiators = t.differentiatorItems.slice(0, 3)
   const workflowSteps: IconCardItem[] = [
@@ -430,7 +428,7 @@ export default function HomePage() {
                   <div className="grid gap-3 pt-2">
                     <SheetClose asChild>
                       <Button variant="outline" className="w-full" asChild>
-                        <Link href={signInHref} prefetch={false}>
+                        <Link href="/sign-in" prefetch={false}>
                           {t.auth.signIn}
                         </Link>
                       </Button>
@@ -449,7 +447,7 @@ export default function HomePage() {
             <LanguageSwitcher locale={locale} onChange={setLocale} />
             <ThemeSwitcher locale={locale} />
             <Button variant="outline" className="hidden sm:inline-flex" asChild>
-              <Link href={signInHref} prefetch={false}>
+              <Link href="/sign-in" prefetch={false}>
                 {t.auth.signIn}
               </Link>
             </Button>

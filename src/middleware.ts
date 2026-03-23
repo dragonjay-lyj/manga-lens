@@ -1,23 +1,25 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
-import { getClerkMiddlewareOptions, getRequestContextFromRequestUrl } from "./lib/auth/clerk-config"
 
+// 定义需要保护的路由
 const isProtectedRoute = createRouteMatcher([
-  "/editor(.*)",
-  "/admin(.*)",
-  "/projects(.*)",
-  "/profile(.*)",
+    "/editor(.*)",
+    "/admin(.*)",
+    "/projects(.*)",
+    "/profile(.*)",
 ])
 
-// Cloudflare's OpenNext adapter does not support Next.js 16's Node-based proxy.ts yet.
 export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) {
-    await auth.protect()
-  }
-}, async (req) => getClerkMiddlewareOptions(getRequestContextFromRequestUrl(req.nextUrl)))
+    // 如果是受保护的路由，要求用户登录
+    if (isProtectedRoute(req)) {
+        await auth.protect()
+    }
+})
 
 export const config = {
-  matcher: [
-    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
-    "/(api|trpc)(.*)",
-  ],
+    matcher: [
+        // 跳过 Next.js 内部文件和静态文件
+        "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+        // 始终运行 API 路由
+        "/(api|trpc)(.*)",
+    ],
 }
