@@ -1,6 +1,18 @@
 import { SignUp } from "@clerk/nextjs"
+import { redirect } from "next/navigation"
+import { getPrimaryAuthRedirectUrl } from "@/lib/auth/clerk-config"
 
-export default function SignUpPage() {
+type SignUpPageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}
+
+export default async function SignUpPage({ searchParams }: SignUpPageProps) {
+  const primarySignUpUrl = getPrimaryAuthRedirectUrl("sign-up", await searchParams)
+
+  if (primarySignUpUrl) {
+    redirect(primarySignUpUrl)
+  }
+
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-12">
       <div aria-hidden className="pointer-events-none absolute inset-0">
