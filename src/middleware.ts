@@ -1,4 +1,5 @@
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
+import { getClerkProviderProps } from "@/lib/auth/clerk-config"
 
 // 定义需要保护的路由
 const isProtectedRoute = createRouteMatcher([
@@ -8,12 +9,24 @@ const isProtectedRoute = createRouteMatcher([
     "/profile(.*)",
 ])
 
+const clerkProviderProps = getClerkProviderProps()
+const clerkMiddlewareOptions = {
+    signInUrl: clerkProviderProps.signInUrl,
+    signUpUrl: clerkProviderProps.signUpUrl,
+    ...(clerkProviderProps.isSatellite && clerkProviderProps.domain
+        ? {
+            isSatellite: true as const,
+            domain: clerkProviderProps.domain,
+        }
+        : {}),
+}
+
 export default clerkMiddleware(async (auth, req) => {
     // 如果是受保护的路由，要求用户登录
     if (isProtectedRoute(req)) {
         await auth.protect()
     }
-})
+}, clerkMiddlewareOptions)
 
 export const config = {
     matcher: [

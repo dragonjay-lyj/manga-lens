@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
+import { ClerkProvider } from "@clerk/nextjs"
 import { Noto_Sans_JP, Noto_Serif_JP } from "next/font/google"
 import { ThemeProvider } from "@/components/providers/theme-provider"
+import { getClerkProviderProps } from "@/lib/auth/clerk-config"
 import "./globals.css"
 
 const notoSansJP = Noto_Sans_JP({
@@ -69,15 +71,19 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  const clerkProviderProps = getClerkProviderProps()
+
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <body className={`${notoSansJP.variable} ${notoSerifJP.variable} antialiased`}>
-        <ThemeProvider>
-          <a href="#main-content" className="skip-link">
-            跳到主内容 / Skip to main content
-          </a>
-          {children}
-        </ThemeProvider>
+        <ClerkProvider {...clerkProviderProps}>
+          <ThemeProvider>
+            <a href="#main-content" className="skip-link">
+              跳到主内容 / Skip to main content
+            </a>
+            {children}
+          </ThemeProvider>
+        </ClerkProvider>
       </body>
     </html>
   )

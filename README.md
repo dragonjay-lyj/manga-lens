@@ -131,6 +131,9 @@ npm run dev
 | `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | 建议 | 注册页地址 |
 | `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL` | 建议 | 登录后跳转 |
 | `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL` | 建议 | 注册后跳转 |
+| `NEXT_PUBLIC_CLERK_IS_SATELLITE` | 多域部署建议 | 将当前站点标记为 Clerk satellite 域 |
+| `NEXT_PUBLIC_CLERK_DOMAIN` | 多域部署建议 | 当前 satellite 域名（如 `manga.dragonjay.top`） |
+| `NEXT_PUBLIC_CLERK_ALLOWED_REDIRECT_ORIGINS` | 多域部署建议 | 允许 primary 域登录后跳回的来源，逗号分隔 |
 | `NEXT_PUBLIC_SUPABASE_URL` | 是 | Supabase URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 是 | Supabase anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | 是 | Supabase service role key |

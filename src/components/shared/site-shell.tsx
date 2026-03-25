@@ -2,6 +2,7 @@
 
 import Link from "next/link"
 import { type ReactNode } from "react"
+import { useClerk } from "@clerk/nextjs"
 import { Menu, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { IconButton } from "@/components/ui/icon-button"
@@ -34,6 +35,8 @@ type SiteShellProps = {
 
 export function SiteShell({ children, contentClassName }: SiteShellProps) {
   const { locale, setLocale } = useEditorStore()
+  const { buildSignInUrl } = useClerk()
+  const signInHref = buildSignInUrl()
 
   return (
     <div className="relative min-h-screen overflow-x-clip bg-background text-foreground">
@@ -113,7 +116,7 @@ export function SiteShell({ children, contentClassName }: SiteShellProps) {
             </div>
 
             <Button variant="outline" size="sm" className="hidden sm:inline-flex" asChild>
-              <Link href="/sign-in" prefetch={false}>
+              <Link href={signInHref} prefetch={false}>
                 {locale === "zh" ? "登录" : "Sign In"}
               </Link>
             </Button>

@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { useClerk } from "@clerk/nextjs"
 import {
   ArrowRight,
   AudioLines,
@@ -335,8 +336,10 @@ const homeContent: Record<Locale, HomeContent> = {
 }
 
 export default function HomePage() {
+  const { buildSignInUrl } = useClerk()
   const locale = useEditorStore((state) => state.locale)
   const setLocale = useEditorStore((state) => state.setLocale)
+  const signInHref = buildSignInUrl()
   const t = homeContent[locale]
   const heroDifferentiators = t.differentiatorItems.slice(0, 3)
   const workflowSteps: IconCardItem[] = [
@@ -428,7 +431,7 @@ export default function HomePage() {
                   <div className="grid gap-3 pt-2">
                     <SheetClose asChild>
                       <Button variant="outline" className="w-full" asChild>
-                        <Link href="/sign-in" prefetch={false}>
+                        <Link href={signInHref} prefetch={false}>
                           {t.auth.signIn}
                         </Link>
                       </Button>
@@ -447,7 +450,7 @@ export default function HomePage() {
             <LanguageSwitcher locale={locale} onChange={setLocale} />
             <ThemeSwitcher locale={locale} />
             <Button variant="outline" className="hidden sm:inline-flex" asChild>
-              <Link href="/sign-in" prefetch={false}>
+              <Link href={signInHref} prefetch={false}>
                 {t.auth.signIn}
               </Link>
             </Button>
